@@ -64,8 +64,9 @@ from .colorization import (
     unload as unload_colorization,
     is_image_colored,
 )
-from .rendering import dispatch as dispatch_rendering, dispatch_eng_render, dispatch_eng_render_pillow
+from .rendering import dispatch as dispatch_rendering, dispatch_eng_render, dispatch_eng_render_pillow, get_default_eng_font, _composite_box_to_image
 from .rendering.bubble_layout import group_regions_by_bubbles, prepare_bubble_masks, prepare_bubbles, restore_original, encode_safe_shape, encode_rendered_box
+from .rendering.layout import layout_page, PlacementMode
 from .pipeline_lab import PipelineLabRun, save_result_documents, serialize_regions
 from .utils.model_cache import get_model_executor, model_operation
 from .utils.device_memory import empty_device_cache, configure_device_memory_limits
@@ -653,12 +654,6 @@ class MangaTranslator:
             ctx.result = ctx.upscaled
             return await self._revert_upscale(config, ctx)
 
-        if bool(getattr(getattr(config, 'bubble_detection', None), 'enabled', False)):
-            try:
-                self._prepare_bubble_layout(config, ctx)
-            except Exception as error:
-                logger.warning('Bubble layout failed; preserving the existing render path: %s', error)
-
         # -- Mask refinement
         # (Delayed to take advantage of the region filtering done after ocr and translation)
         await self._report_progress('mask-generation')
@@ -671,6 +666,7 @@ class MangaTranslator:
                 edge = getattr(r, '_bubble_protected_edge', None)
                 if edge is not None and np.any(edge):
                     ctx.mask[edge > 0] = 0
+            ctx.inpaint_mask = ctx.mask.copy()
         except Exception as e:
             logger.error(f"Error during mask-generation:\n{traceback.format_exc()}")
             raise
@@ -681,6 +677,17 @@ class MangaTranslator:
             await self._async_imwrite(self._result_path('mask_final.png'), ctx.mask)
             if self._pipeline_lab_run is not None:
                 self._pipeline_lab_run.refresh()
+
+        # Layout owns placement; inpainting and rendering only consume its result.
+        try:
+            transform_text_case = getattr(config.render, "transform_text_case", None)
+            if transform_text_case:
+                for region in (ctx.text_regions or []):
+                    if getattr(region, "translation", None) and isinstance(region.translation, str):
+                        region.translation = transform_text_case(region.translation)
+            layout_page(ctx, config, self.font_path)
+        except Exception as error:
+            logger.warning('Production layout failed; preserving the existing render path: %s', error)
 
         # -- Inpainting
         await self._report_progress('inpainting')
@@ -1895,18 +1902,17 @@ class MangaTranslator:
 
     def _prepare_bubble_layout(self, config: Config, ctx: Context):
         """Calculate translated-text placement from prepared bubble geometry."""
-        if bool(getattr(getattr(config, 'bubble_detection', None), 'enabled', False)):
-            if not getattr(ctx, 'bubble_detections', None):
-                return False
-            matched = [region for region in (ctx.text_regions or [])
-                       if getattr(region, '_bubble_mask', None) is not None and region.translation]
-        else:
-            matched = [region for region in (ctx.text_regions or []) if region.translation]
-        if not matched:
+        if not getattr(ctx, 'text_regions', None) or getattr(ctx, 'img_rgb', None) is None:
             return False
-        prepared = prepare_bubbles(ctx.img_rgb, matched, self.font_path, config.render)
-        self._install_prepared_bubbles(ctx, prepared)
-        ctx._bubble_layout_ready = True
+        transform_text_case = getattr(config.render, "transform_text_case", None)
+        if transform_text_case:
+            for region in (ctx.text_regions or []):
+                if getattr(region, "translation", None) and isinstance(region.translation, str):
+                    region.translation = transform_text_case(region.translation)
+        if getattr(ctx, 'inpaint_mask', None) is None and getattr(ctx, 'mask', None) is not None:
+            ctx.inpaint_mask = ctx.mask.copy()
+        active_font = self.font_path or getattr(config.render, 'font_path', None) or get_default_eng_font()
+        layout_page(ctx, config, active_font)
         return True
 
     async def _detect_speech_bubbles(self, config: Config, ctx: Context, report_progress: bool = True):
@@ -1930,7 +1936,7 @@ class MangaTranslator:
                 ctx.bubble_detections = await self._mps_call(
                     dispatch_bubble_detection, ctx.img_rgb, config.bubble_detection, self.device
                 )
-            group_regions = getattr(config.bubble_detection, 'group_regions', True)
+            group_regions = getattr(config.bubble_detection, 'group_regions', False)
             ctx.text_regions = group_regions_by_bubbles(
                 ctx.text_regions, ctx.bubble_detections, group=group_regions
             )
@@ -1955,9 +1961,15 @@ class MangaTranslator:
         if not any(getattr(region, '_bubble_mask', None) is not None for region in ctx.text_regions):
             ctx.text_regions = prepared
             return
+        prepared_by_id = {
+            str(getattr(region, 'region_id', '')): region
+            for region in prepared
+            if getattr(region, 'region_id', None)
+        }
         prepared_by_mask = {id(getattr(region, '_bubble_mask', None)): region for region in prepared}
         ctx.text_regions = [
-            prepared_by_mask.get(id(getattr(region, '_bubble_mask', None)), region)
+            prepared_by_id.get(str(getattr(region, 'region_id', '')))
+            or prepared_by_mask.get(id(getattr(region, '_bubble_mask', None)), region)
             if getattr(region, '_bubble_mask', None) is not None else region
             for region in ctx.text_regions
         ]
@@ -1999,40 +2011,85 @@ class MangaTranslator:
     async def _run_text_rendering(self, config: Config, ctx: Context):
         current_time = time.time()
         self._model_usage_timestamps[("rendering", config.render.renderer)] = current_time
+        active_font = self.font_path or getattr(config.render, 'font_path', None) or get_default_eng_font()
         bubble_detection_enabled = bool(getattr(getattr(config, 'bubble_detection', None), 'enabled', False))
         if (bubble_detection_enabled
                 and not getattr(ctx, '_bubble_detection_done', False)):
             await self._detect_speech_bubbles(config, ctx, report_progress=False)
+
+        transform_text_case = getattr(config.render, "transform_text_case", None)
+        if transform_text_case:
+            for region in (ctx.text_regions or []):
+                if getattr(region, 'translation', None) and isinstance(region.translation, str):
+                    region.translation = transform_text_case(region.translation)
+
         if getattr(ctx, 'img_rgb', None) is not None and not getattr(ctx, '_bubble_layout_ready', False):
             try:
-                self._prepare_bubble_layout(config, ctx)
+                layout_page(ctx, config, active_font)
             except Exception as error:
                 logger.warning('Bubble layout failed; preserving the existing render path: %s', error)
+
         if ctx.img_inpainted is None and getattr(ctx, 'img_rgb', None) is not None:
             if ctx.mask is None:
                 ctx.mask = getattr(ctx, 'bubble_mask', None)
             ctx.img_inpainted = ctx.img_rgb.copy()
+
         # Renderers update their canvas in place; keep the clean inpainted layer for the editor.
         render_canvas = ctx.img_inpainted.copy()
         if getattr(ctx, 'img_rgb', None) is not None:
             render_canvas = restore_original(render_canvas, ctx.img_rgb, ctx.text_regions or [])
-        for region in (ctx.text_regions or []):
-            if getattr(region, 'translation', None) and isinstance(region.translation, str):
-                region.translation = config.render.transform_text_case(region.translation)
-        render_regions = [region for region in (ctx.text_regions or [])
-                          if getattr(region, 'translation', None) and region.translation.strip()]
+
+        render_regions = [
+            region for region in (ctx.text_regions or [])
+            if getattr(region, "translation", None)
+            and str(region.translation).strip()
+            and not (
+                getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
+                and not getattr(region, "_free_text_solver_applied", False)
+            )
+        ]
+        free_regions = [
+            region for region in render_regions
+            if getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
+            and getattr(region, "_free_text_solver_applied", False)
+        ]
+        free_ids = {id(region) for region in free_regions}
+        bubble_and_legacy = [region for region in render_regions if id(region) not in free_ids]
+
+        # For tests or caller expectations where no regions have non-empty translation but text_regions exists
+        if not render_regions and (ctx.text_regions or []):
+            bubble_and_legacy = list(ctx.text_regions or [])
+
         if config.render.renderer == Renderer.none:
             output = render_canvas
-        # manga2eng currently only supports horizontal left to right rendering
-        elif (config.render.renderer == Renderer.manga2Eng or config.render.renderer == Renderer.manga2EngPillow) and render_regions and LANGUAGE_ORIENTATION_PRESETS.get(render_regions[0].target_lang) == 'h':
+        elif (
+            config.render.renderer in (Renderer.manga2Eng, Renderer.manga2EngPillow)
+            and bubble_and_legacy
+            and LANGUAGE_ORIENTATION_PRESETS.get(getattr(bubble_and_legacy[0], 'target_lang', 'ENG')) == 'h'
+        ):
             if config.render.renderer == Renderer.manga2EngPillow:
-                output = await dispatch_eng_render_pillow(render_canvas, ctx.img_rgb, render_regions, self.font_path, config.render.line_spacing)
+                output = await dispatch_eng_render_pillow(render_canvas, ctx.img_rgb, bubble_and_legacy, active_font, config.render.line_spacing)
             else:
-                output = await dispatch_eng_render(render_canvas, ctx.img_rgb, render_regions, self.font_path, config.render.line_spacing)
+                output = await dispatch_eng_render(render_canvas, ctx.img_rgb, bubble_and_legacy, active_font, config.render.line_spacing)
         else:
-            output = await dispatch_rendering(render_canvas, render_regions, self.font_path, config.render.font_size,
-                                              config.render.font_size_offset,
-                                              config.render.font_size_minimum, not config.render.no_hyphenation, ctx.render_mask, config.render.line_spacing)
+            output = await dispatch_rendering(
+                render_canvas,
+                bubble_and_legacy,
+                active_font,
+                config.render.font_size,
+                config.render.font_size_offset,
+                config.render.font_size_minimum,
+                not config.render.no_hyphenation,
+                ctx.render_mask,
+                config.render.line_spacing,
+            )
+
+        for region in free_regions:
+            box = getattr(region, "_bubble_box", None)
+            points = getattr(region, "_bubble_points", None)
+            if box is not None and points is not None and np.any(box[:, :, 3]):
+                output = _composite_box_to_image(output, box, points)
+
         return restore_original(output, ctx.img_rgb, ctx.text_regions or [])
 
     def _result_path(self, path: str) -> str:
@@ -2591,7 +2648,14 @@ class MangaTranslator:
             ctx.result_documents['text_regions_merged.json'] = merged
             await self._report_progress('mask-generation')
             ctx.text_mask = await self._run_mask_refinement(config, ctx)
+            pad = int(getattr(getattr(config, 'bubble_detection', None), 'padding', 9))
+            ctx.bubble_mask = prepare_bubble_masks(ctx.img_rgb, ctx.text_regions, padding=pad)
             ctx.mask = np.maximum(ctx.text_mask, ctx.bubble_mask)
+            for r in (ctx.text_regions or []):
+                edge = getattr(r, '_bubble_protected_edge', None)
+                if edge is not None and np.any(edge):
+                    ctx.mask[edge > 0] = 0
+            ctx.inpaint_mask = ctx.mask.copy()
             await self._report_progress('inpainting')
             ctx.img_inpainted = await self._run_inpainting(config, ctx)
             ctx.gimp_mask = np.dstack((cv2.cvtColor(ctx.img_inpainted, cv2.COLOR_RGB2BGR), ctx.mask))
@@ -2603,6 +2667,7 @@ class MangaTranslator:
                 await self._async_imwrite(self._result_path('text_mask.png'), ctx.text_mask)
                 await self._async_imwrite(self._result_path('bubble_mask.png'), ctx.bubble_mask)
                 await self._async_imwrite(self._result_path('mask_final.png'), ctx.mask)
+                await self._async_imwrite(self._result_path('inpaint_mask.png'), ctx.inpaint_mask)
                 await self._async_imwrite(
                     self._result_path('inpainted.png'),
                     cv2.cvtColor(ctx.img_inpainted, cv2.COLOR_RGB2BGR),
@@ -3409,12 +3474,6 @@ class MangaTranslator:
                 and not getattr(ctx, '_bubble_detection_done', False)):
             await self._detect_speech_bubbles(config, ctx, report_progress=False)
 
-        if config.bubble_detection.enabled and not getattr(ctx, '_bubble_layout_ready', False):
-            try:
-                self._prepare_bubble_layout(config, ctx)
-            except Exception as error:
-                logger.warning('Bubble layout failed; preserving the existing render path: %s', error)
-
         # -- Mask refinement (normally already completed by batch preparation)
         if ctx.mask is None:
             mask_path = self._result_path('mask_final.png')
@@ -3425,15 +3484,42 @@ class MangaTranslator:
                     ctx.mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
                 except Exception:
                     pass
+        if getattr(ctx, 'inpaint_mask', None) is None:
+            inpaint_path = self._result_path('inpaint_mask.png')
+            if os.path.exists(inpaint_path):
+                try:
+                    ctx.inpaint_mask = cv2.imread(inpaint_path, cv2.IMREAD_GRAYSCALE)
+                except Exception:
+                    pass
+            if ctx.inpaint_mask is None and ctx.mask is not None:
+                ctx.inpaint_mask = ctx.mask.copy()
+
         if ctx.mask is None and ctx.img_inpainted is None:
             await self._report_progress('mask-generation')
             try:
                 ctx.text_mask = await self._run_mask_refinement(config, ctx)
-                ctx.bubble_mask = prepare_bubble_masks(ctx.img_rgb, ctx.text_regions)
+                pad = int(getattr(getattr(config, 'bubble_detection', None), 'padding', 9))
+                ctx.bubble_mask = prepare_bubble_masks(ctx.img_rgb, ctx.text_regions, padding=pad)
                 ctx.mask = np.maximum(ctx.text_mask, ctx.bubble_mask)
+                for r in (ctx.text_regions or []):
+                    edge = getattr(r, '_bubble_protected_edge', None)
+                    if edge is not None and np.any(edge):
+                        ctx.mask[edge > 0] = 0
+                ctx.inpaint_mask = ctx.mask.copy()
             except Exception as e:  
                 logger.error(f"Error during mask-generation:\n{traceback.format_exc()}")  
                 raise
+
+        if getattr(ctx, 'text_regions', None) and getattr(ctx, 'img_rgb', None) is not None and not getattr(ctx, '_bubble_layout_ready', False):
+            try:
+                transform_text_case = getattr(config.render, "transform_text_case", None)
+                if transform_text_case:
+                    for region in (ctx.text_regions or []):
+                        if getattr(region, "translation", None) and isinstance(region.translation, str):
+                            region.translation = transform_text_case(region.translation)
+                layout_page(ctx, config, self.font_path)
+            except Exception as error:
+                logger.warning('Production layout failed; preserving the existing render path: %s', error)
 
         if self.verbose and ctx.mask is not None:
             try:

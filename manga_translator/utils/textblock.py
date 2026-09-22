@@ -1,7 +1,7 @@
 import copy
 import re
 from functools import cached_property
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -72,6 +72,9 @@ class TextBlock(object):
                  shadow_color: Tuple = (0, 0, 0),
                  shadow_offset: List = [0, 0],
                  prob: float = 1,
+                 region_id: Optional[str] = None,
+                 source_region_ids: Optional[List[str]] = None,
+                 source_regions: Optional[List[Dict[str, Any]]] = None,
                  **kwargs) -> None:
         self.lines = np.array(lines, dtype=np.int32)
         # self.lines.sort()
@@ -91,6 +94,25 @@ class TextBlock(object):
                 else:
                     self.text += ' ' + txt
         self.prob = prob
+
+        # Identity/provenance belongs to the region model, not to a dev runner.
+        # Geometry snapshots let grouped translation units retain each source
+        # region for later placement and diagnostics.
+        self.region_id = str(region_id) if region_id is not None else None
+        self.source_region_ids = [str(item) for item in (source_region_ids or [])]
+        if self.region_id and not self.source_region_ids:
+            self.source_region_ids = [self.region_id]
+        self.source_regions = copy.deepcopy(source_regions or [])
+        if self.region_id and not self.source_regions:
+            x1, y1, x2, y2 = self.lines[..., 0].min(), self.lines[..., 1].min(), self.lines[..., 0].max(), self.lines[..., 1].max()
+            self.source_regions = [{
+                'id': self.region_id,
+                'polygons': self.lines.tolist(),
+                'bbox': [int(x1), int(y1), int(x2), int(y2)],
+                'centroid': [float((x1 + x2) / 2), float((y1 + y2) / 2)],
+                'source_text': str(self.text or ''),
+                'reading_order': 0,
+            }]
 
         self.translation = translation
 

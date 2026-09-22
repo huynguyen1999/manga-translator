@@ -712,7 +712,7 @@ export const App: React.FC = () => {
   const [customBoxThreshold, setCustomBoxThreshold] = useState<number>(0.45);
   const [customOcrProb, setCustomOcrProb] = useState<number | undefined>(undefined);
   const [maskDilationOffset, setMaskDilationOffset] = useState<number>(30);
-  const [bubbleDetection, setBubbleDetection] = useState(false);
+  const [bubbleDetection, setBubbleDetection] = useState(true);
   const [inpainter, setInpainter] = useState("default");
   const [colorizer, setColorizer] = useState("none");
   const [colorizeOnly, setColorizeOnly] = useState(false);
@@ -830,7 +830,13 @@ export const App: React.FC = () => {
       setCustomOcrProb(savedSettings.ocrMinConfidence);
     }
     if (shouldRememberSettings && savedSettings.maskDilationOffset !== undefined) setMaskDilationOffset(savedSettings.maskDilationOffset);
-    if (shouldRememberSettings && savedSettings.bubbleDetection !== undefined) setBubbleDetection(savedSettings.bubbleDetection);
+    if (shouldRememberSettings && savedSettings.bubbleDetection !== undefined) {
+      if (!savedSettings.migratedDefaultBubbleDetection) {
+        setBubbleDetection(true);
+      } else {
+        setBubbleDetection(savedSettings.bubbleDetection);
+      }
+    }
     if (shouldRememberSettings && savedSettings.inpainter) setInpainter(savedSettings.inpainter);
     if (shouldRememberSettings && savedSettings.colorizer) setColorizer(savedSettings.colorizer);
     if (shouldRememberSettings && savedSettings.colorizeOnly !== undefined) setColorizeOnly(savedSettings.colorizeOnly);
@@ -1098,6 +1104,7 @@ export const App: React.FC = () => {
       migratedDefaultQwen2: true,
       migratedDefaultSugoi: true,
       migratedDefaultGemini: true,
+      migratedDefaultBubbleDetection: true,
       migratedDefaultTargetLang: true,
     };
     saveSettings(settings);

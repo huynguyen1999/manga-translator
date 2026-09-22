@@ -1,0 +1,50 @@
+"""Production page-layout primitives and orchestration."""
+
+from .engine import layout_page
+from .geometry import BubbleGeometry, build_lobe_graph, compute_placement_target, compute_zone_shape_profile
+from .models import (
+    BandSlot,
+    BubbleLayoutGroup,
+    FreeTextDamageTarget,
+    FreeTextZone,
+    LayoutCandidate,
+    LayoutDiagnostics,
+    LobeGraph,
+    OriginalLayoutProfile,
+    PageLayoutResult,
+    PageObstacleMap,
+    PlacementTarget,
+    PlacementMode,
+    PlacedLine,
+    RegionLayout,
+    ScanInterval,
+    ZoneShapeProfile,
+)
+from .obstacles import build_free_text_ownership_zones, build_page_obstacle_map, classify_placement_modes
+
+__all__ = [
+    "BandSlot",
+    "BubbleGeometry",
+    "BubbleLayoutGroup",
+    "FreeTextDamageTarget",
+    "FreeTextZone",
+    "LayoutCandidate",
+    "LayoutDiagnostics",
+    "LobeGraph",
+    "OriginalLayoutProfile",
+    "PageLayoutResult",
+    "PageObstacleMap",
+    "PlacementMode",
+    "PlacedLine",
+    "RegionLayout",
+    "ScanInterval",
+    "build_lobe_graph",
+    "compute_placement_target",
+    "compute_zone_shape_profile",
+    "build_free_text_ownership_zones",
+    "build_page_obstacle_map",
+    "classify_placement_modes",
+    "PlacementTarget",
+    "ZoneShapeProfile",
+    "layout_page",
+]

@@ -507,6 +507,14 @@ class BatchScheduler:
 
             with Image.open(inpainted_path) as opened:
                 inpainted = np.array(opened.convert("RGB"))
+
+            original_path = find_asset(result_dir, "original_canvas") or find_asset(result_dir, "input")
+            if original_path is not None:
+                with Image.open(original_path) as opened:
+                    orig_img = np.array(opened.convert("RGB"))
+            else:
+                orig_img = inpainted.copy()
+
             ctx = Context()
             ctx.debug_folder = folder
             ctx.image_context = {
@@ -514,8 +522,25 @@ class BatchScheduler:
                 "file_md5": folder.split("-")[-1] if "-" in folder else folder,
                 "request_id": item.get("requestId"),
             }
-            ctx.img_rgb = inpainted.copy()
+            ctx.img_rgb = orig_img.copy()
             ctx.img_inpainted = inpainted.copy()
+
+            inpaint_mask_path = result_dir / "inpaint_mask.png"
+            mask_final_path = result_dir / "mask_final.png"
+            if inpaint_mask_path.is_file():
+                ctx.inpaint_mask = cv2.imread(str(inpaint_mask_path), cv2.IMREAD_GRAYSCALE)
+            elif mask_final_path.is_file():
+                ctx.inpaint_mask = cv2.imread(str(mask_final_path), cv2.IMREAD_GRAYSCALE)
+            else:
+                ctx.inpaint_mask = None
+            ctx.mask = ctx.inpaint_mask
+
+            bubble_mask_path = result_dir / "bubble_mask.png"
+            if bubble_mask_path.is_file():
+                ctx.bubble_mask = cv2.imread(str(bubble_mask_path), cv2.IMREAD_GRAYSCALE)
+            else:
+                ctx.bubble_mask = None
+
             ctx.text_regions = deserialize_textblocks(regions)
             for region in ctx.text_regions:
                 if not getattr(region, "target_lang", None):
@@ -1011,7 +1036,7 @@ class BatchScheduler:
                 },
                 "mask_dilation_offset": settings.get("maskDilationOffset", 30),
                 "bubble_detection": {
-                    "enabled": bool(settings.get("bubbleDetection", False)),
+                    "enabled": bool(settings.get("bubbleDetection", True)),
                     "model": "manga109",
                 },
             }

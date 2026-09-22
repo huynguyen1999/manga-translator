@@ -492,6 +492,15 @@ def _render_single_textblock_eng(
     stroke_width: float,
     downscale_constraint: float,
 ):
+    prepared_box = getattr(region, '_bubble_box', None)
+    prepared_points = getattr(region, '_bubble_points', None)
+    if prepared_box is not None and prepared_points is not None and np.any(prepared_box[:, :, 3]):
+        from . import _composite_box_to_image
+        img_np = np.array(img_pil)
+        img_np = _composite_box_to_image(img_np, prepared_box, prepared_points)
+        img_pil.paste(Image.fromarray(img_np))
+        return
+
     words = seg_eng(region.translation)
     if not words:
         return

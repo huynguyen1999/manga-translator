@@ -1212,16 +1212,30 @@ def _fit_lobe_text(region, rects, text, target_font, minimum_font, hyphenate, li
     return None
 
 
-def group_regions_by_bubbles(regions, detections, minimum_overlap: float = 0.35, group: bool = True):
-    """Group OCR regions whose polygons fall inside one detector instance.
+def group_regions_by_bubbles(regions, detections, minimum_overlap: float = 0.35, group: bool = False):
+    """Associate OCR regions with bubbles without merging them by default.
 
     If group=False, regions are not merged into a single multi-line text region,
     preserving each region independently while still assigning the matching bubble mask.
+    Pass group=True only when one semantic translation unit per bubble is desired.
     """
     if not detections:
+        for index, region in enumerate(regions):
+            if not getattr(region, "region_id", None):
+                region.region_id = f"region_{index}"
+            if not getattr(region, "source_region_ids", None):
+                region.source_region_ids = [str(region.region_id)]
+            if not getattr(region, "source_regions", None):
+                region.source_regions = [_source_region_snapshot(region, index)]
         return list(regions)
     for index, region in enumerate(regions):
         region._bubble_source_order = index
+        if not getattr(region, "region_id", None):
+            region.region_id = f"region_{index}"
+        if not getattr(region, "source_region_ids", None):
+            region.source_region_ids = [str(region.region_id)]
+        if not getattr(region, "source_regions", None):
+            region.source_regions = [_source_region_snapshot(region, index)]
     assignments = {}
     for index, region in enumerate(regions):
         polygon = np.zeros(detections[0].mask.shape, np.uint8)
@@ -1256,12 +1270,33 @@ def group_regions_by_bubbles(regions, detections, minimum_overlap: float = 0.35,
             region.lines = np.concatenate([item.lines for _, item in members])
             region.texts = [item.text for _, item in members]
             region.text = "\n".join(region.texts)
-            region.group_members = [getattr(item, "region_id", f"source_{index}") for index, item in members]
             region.group_id = f"bubble_{detection_index}"
+            region.region_id = region.group_id
+            region.source_region_ids = [
+                str(getattr(item, "region_id", f"source_{source_index}"))
+                for source_index, item in members
+            ]
+            region.group_members = list(region.source_region_ids)
+            region.source_regions = [
+                _source_region_snapshot(item, source_index) for source_index, item in members
+            ]
             region._bubble_mask = detections[detection_index].mask
             region._bubble_detection_confidence = detections[detection_index].confidence
             result.append(region)
     return sorted(result, key=lambda item: getattr(item, "_bubble_source_order", 0))
+
+
+def _source_region_snapshot(region, reading_order: int):
+    """Capture source identity and geometry before a bubble group is merged."""
+    lines = np.asarray(getattr(region, "lines", []))
+    return {
+        "id": str(getattr(region, "region_id", f"source_{reading_order}")),
+        "polygons": lines.tolist(),
+        "bbox": np.asarray(getattr(region, "xyxy", [0, 0, 0, 0])).tolist(),
+        "centroid": np.asarray(getattr(region, "center", [0, 0])).astype(float).tolist(),
+        "source_text": str(getattr(region, "text", "") or ""),
+        "reading_order": int(reading_order),
+    }
 
 
 def prepare_bubble_masks(image, regions, padding: int = 9):
@@ -1312,7 +1347,7 @@ def prepare_bubble_masks(image, regions, padding: int = 9):
     return combined
 
 
-def prepare_bubbles(image, regions, font_path, render_config):
+def prepare_bubbles(image, regions, font_path, render_config, group: bool = True):
     from . import _RENDER_LOCK, text_render, _horizontal_layout, _find_horizontal_placement, _points_for_rect, fg_bg_compare
 
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
@@ -1369,6 +1404,37 @@ def prepare_bubbles(image, regions, font_path, render_config):
         groups.setdefault((uncertain_boundary, label), []).append((index, region))
 
     result = list(untouched)
+    if not group:
+        # Keep each OCR region independent while reusing the same detected
+        # component. The recursive call uses custom-mask mode, so sibling ink
+        # cannot make an otherwise valid region look like an uncertain cleanup.
+        for (uncertain_boundary, label), members in groups.items():
+            component = custom_masks[label] if custom_mode else (
+                (closed_labels if uncertain_boundary else labels) == label
+            ).astype(np.uint8)
+            for index, member in members:
+                separate = copy.copy(member)
+                separate._bubble_mask = component
+                separate._bubble_source_order = index
+                prepared_regions = prepare_bubbles(
+                    image, [separate], font_path, render_config, group=True
+                )
+                for prepared_region in prepared_regions:
+                    prepared_region.region_id = getattr(member, "region_id", None)
+                    prepared_region.source_region_ids = list(
+                        getattr(member, "source_region_ids", []) or [prepared_region.region_id]
+                    )
+                    prepared_region.source_regions = copy.deepcopy(
+                        getattr(member, "source_regions", [])
+                    )
+                    if getattr(member, "_bubble_mask", None) is not None:
+                        prepared_region._bubble_mask = member._bubble_mask
+                    elif hasattr(prepared_region, "_bubble_mask"):
+                        del prepared_region._bubble_mask
+                    if hasattr(prepared_region, "group_members"):
+                        del prepared_region.group_members
+                    result.append(prepared_region)
+        return sorted(result, key=lambda item: getattr(item, "_bubble_source_order", 0))
     with _RENDER_LOCK:
         text_render.set_font(font_path)
         _horizontal_layout.cache_clear()
@@ -1404,9 +1470,25 @@ def prepare_bubbles(image, regions, font_path, render_config):
             region.texts = [r.text for _, r in members]
             region.text = "\n".join(region.texts)
             region.translation = "\n".join(r.translation for _, r in members)
-            if len(members) > 1 or not getattr(region, "group_members", None):
-                region.group_members = [f"source_{i}" for i, _ in members]
             region.group_id = f"bubble_{members[0][0]}"
+            region.region_id = region.group_id
+            region.source_region_ids = [
+                source_id
+                for source_index, item in members
+                for source_id in (
+                    getattr(item, "source_region_ids", None)
+                    or [str(getattr(item, "region_id", f"source_{source_index}"))]
+                )
+            ]
+            region.group_members = list(region.source_region_ids)
+            source_regions = []
+            for source_index, item in members:
+                records = getattr(item, "source_regions", None) or [_source_region_snapshot(item, source_index)]
+                for source in records:
+                    record = copy.deepcopy(source)
+                    record["reading_order"] = len(source_regions)
+                    source_regions.append(record)
+            region.source_regions = source_regions
             region.review_required = any(getattr(r, "review_required", False) for _, r in members)
             region.review_reason = next(
                 (getattr(r, "review_reason", None) for _, r in members if getattr(r, "review_required", False)),
@@ -1605,7 +1687,11 @@ def restore_original(canvas, original, regions):
             continue
         interior = getattr(region, "_bubble_restore", None)
         if interior is None:
-            interior = np.zeros(original.shape[:2], np.uint8)
-            cv2.fillPoly(interior, [np.asarray(line, np.int32) for line in region.lines], 1)
+            lines = getattr(region, "lines", None)
+            if lines is not None and len(lines) > 0:
+                interior = np.zeros(original.shape[:2], np.uint8)
+                cv2.fillPoly(interior, [np.asarray(line, np.int32) for line in lines], 1)
+            else:
+                continue
         canvas[interior > 0] = original[interior > 0]
     return canvas

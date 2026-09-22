@@ -335,6 +335,14 @@ def render_textblock_list_eng(
     img_w, img_h = img.shape[1], img.shape[0]
 
     for region in text_regions:
+        prepared_box = getattr(region, '_bubble_box', None)
+        prepared_points = getattr(region, '_bubble_points', None)
+        if prepared_box is not None and prepared_points is not None and np.any(prepared_box[:, :, 3]):
+            from . import _composite_box_to_image
+            img_array = np.array(img_pil)
+            img_array = _composite_box_to_image(img_array, prepared_box, prepared_points)
+            img_pil = Image.fromarray(img_array)
+            continue
         item = _process_pillow_region(
             region, original_img, font_path, max_font_size, ballonarea_thresh,
             downscale_constraint, bounds_padding, img_w, img_h, font_color

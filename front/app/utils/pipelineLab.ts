@@ -112,7 +112,7 @@ export const defaultPipelineLabSettings = (): PipelineLabSettings => {
     customBoxThreshold: stored.customBoxThreshold ?? 0.45,
     customOcrProb: stored.customOcrProb ?? stored.ocrMinConfidence ?? undefined,
     maskDilationOffset: stored.maskDilationOffset ?? 30,
-    bubbleDetection: stored.bubbleDetection ?? false,
+    bubbleDetection: stored.bubbleDetection ?? true,
     inpainter: stored.inpainter ?? "default",
     colorizer: "mc2",
     colorizeOnly: stored.colorizeOnly ?? false,

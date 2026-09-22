@@ -238,6 +238,7 @@ export interface TranslationSettings {
   migratedDefaultQwen2?: boolean;
   migratedDefaultSugoi?: boolean;
   migratedDefaultGemini?: boolean;
+  migratedDefaultBubbleDetection?: boolean;
   migratedDefaultTargetLang?: boolean;
   keepFailedPagesForEditing?: boolean;
   translationBatchSize?: number;

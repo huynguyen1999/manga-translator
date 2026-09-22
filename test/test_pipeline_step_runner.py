@@ -614,8 +614,12 @@ class PipelineStepRunnerTests(unittest.TestCase):
 
     def test_parser_bubble_grouping_option(self):
         parser = build_parser()
-        # Default: bubble_grouping is True
+        # Default: keep regions separate
         args = parser.parse_args(["capture", "-i", "page.png"])
+        self.assertFalse(args.bubble_grouping)
+
+        # Explicit opt-in: merge regions by bubble
+        args = parser.parse_args(["capture", "-i", "page.png", "--bubble-grouping"])
         self.assertTrue(args.bubble_grouping)
 
         # Flag provided: bubble_grouping is False

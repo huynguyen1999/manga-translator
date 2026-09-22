@@ -424,7 +424,8 @@ class BubbleLayoutTests(unittest.TestCase):
         config.render.font_size_minimum = 150
         translator._prepare_bubble_layout(config, ctx)
         self.assertEqual(ctx.text_regions[0].review_reason, "text_does_not_fit")
-        self.assertEqual(len(ctx.text_regions[0].group_members), 2)
+        self.assertEqual(len(ctx.text_regions), 2)
+        self.assertTrue(all(not hasattr(region, "group_members") for region in ctx.text_regions))
 
     def test_legacy_mask_generation_is_translation_independent(self):
         import asyncio
@@ -895,4 +896,3 @@ class BubbleLayoutTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

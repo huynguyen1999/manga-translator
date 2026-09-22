@@ -641,6 +641,23 @@ def resize_regions_to_font_size(
     dst_points_list = []
     placed_rects = []
     for region in text_regions:
+        if (
+            getattr(region, '_bubble_box', None) is not None
+            or getattr(region, '_solver_applied', False)
+            or getattr(region, '_free_text_solver_applied', False)
+        ):
+            pts = getattr(region, '_bubble_points', None)
+            if pts is None:
+                bounds = getattr(region, 'layout_bounds', None) or getattr(region, 'xyxy', None)
+                if bounds is not None:
+                    pts = _points_for_rect(region, bounds, img.shape[1], img.shape[0])
+                else:
+                    pts = getattr(region, 'min_rect', None)
+            dst_points_list.append(pts)
+            if region.horizontal and not getattr(region, "_render_suppressed", False) and pts is not None:
+                placed_rects.append(_bounds_from_region(pts))
+            continue
+
         original_region_font_size = region.font_size if region.font_size > 0 else font_size_minimum
         if font_size_fixed is not None:
             target_font_size = font_size_fixed
@@ -836,6 +853,9 @@ def render(
 
     prepared_box = getattr(region, '_bubble_box', None)
     if prepared_box is not None and np.any(prepared_box[:, :, 3]):
+        points = getattr(region, '_bubble_points', None)
+        if points is not None:
+            return _composite_box_to_image(img, prepared_box, points)
         return _composite_box_to_image(img, prepared_box, dst_points)
 
     fg, bg = region.get_font_colors()

@@ -516,7 +516,7 @@ class BubbleDetectionConfig(BaseModel):
     device: str = "auto"
     padding: int = 9
     """Padding erosion in pixels from bubble contour to protect the boundary edge stroke during inpainting."""
-    group_regions: bool = True
+    group_regions: bool = False
     """Whether to group and merge text regions falling inside the same detected bubble instance."""
 
 class PipelineLabConfig(BaseModel):

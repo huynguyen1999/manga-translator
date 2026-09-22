@@ -89,7 +89,7 @@ def serialize_regions(regions) -> list[dict[str, Any]]:
     for index, region in enumerate(regions or []):
         item: dict[str, Any] = {"index": index}
         for key in (
-            "region_id", "group_id", "group_members", "text", "text_raw", "translation",
+            "region_id", "source_region_ids", "source_regions", "group_id", "group_members", "text", "text_raw", "translation",
             "confidence", "font_size", "angle", "direction", "bubble_bounds", "layout_bounds",
             "layout_segments", "review_required", "review_reason",
         ):
@@ -224,7 +224,7 @@ def deserialize_textblocks(data: list[dict[str, Any]]) -> list[TextBlock]:
             prob=float(item.get("confidence") or item.get("prob") or 1.0),
         )
         tb.region_id = str(item.get("region_id") or "")
-        for key in ("group_id", "group_members", "bubble_bounds", "layout_bounds", "layout_segments", "review_required", "review_reason"):
+        for key in ("group_id", "group_members", "bubble_bounds", "layout_bounds", "layout_segments", "bubble_safe_shape", "review_required", "review_reason"):
             if key in item:
                 setattr(tb, key, item[key])
         if not getattr(tb, "group_id", None):

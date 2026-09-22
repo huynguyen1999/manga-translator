@@ -2,12 +2,33 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-22 — Production text rendering bypassed shape-aware layout solver
+
+- Symptom: Production translated manga pages rendered with jumbled, overlapping text, thick distorted borders, squished dialogue, and misaligned free-text.
+- Root cause: (1) `_run_text_rendering` transformed text case after layout rather than before, causing solver measurements to mismatch rendered text. (2) Free-text regions with solved layouts were fed into legacy `dispatch_rendering`/`dispatch_eng_render` which re-expanded/re-laid them out, rather than directly compositing `_bubble_box` onto `_bubble_points`. (3) `resize_regions_to_font_size` and `render` in `manga_translator/rendering/__init__.py` overwrote solved font sizes and warped boxes to re-estimated bounding boxes instead of using the solver's `_bubble_points`. (4) `_prepare_bubble_layout` called legacy `prepare_bubbles` instead of `layout_page`. (5) `_prepare_single_context` and `_complete_translation_pipeline` did not persist/restore `ctx.inpaint_mask`, causing free-text solver targets to be missing. (6) `server/batch_scheduler.py`'s `_process_rerender_item` initialized `ctx.img_rgb` with `inpainted.copy()` rather than `original_canvas.png`, and omitted `inpaint_mask.png`/`mask_final.png`.
+- Fix: Synchronized `_prepare_bubble_layout`, `_prepare_single_context`, `_complete_translation_pipeline`, and `server/batch_scheduler.py` with `pipeline_step_runner.py`: normalize text case before layout, route free text and bubble text through the shape-aware solver, preserve solved boxes/points in `resize_regions_to_font_size` and `_render_single_textblock_eng`, composite free-text boxes directly, load `original_canvas.png` and `inpaint_mask.png` across batch pipeline and saved rerenders, and run `layout_page` unconditionally.
+- Prevention: Ensure the core production rendering pipeline shares the exact execution path and invariant preservation as the dev pipeline runner.
+
 ## 2026-09-22 — Free-text coverage could reward fake vertical spacing
 
 - Symptom: Tall free-text inpaint regions selected paragraphs with excessive gaps between lines.
 - Root cause: Candidate generation derived an adaptive `line_spacing` from target height, and the coverage score rewarded allocated line rectangles alongside glyph pixels.
 - Fix: Clamp free-text leading to one natural typography value per render, score font/wrapping with actual glyph ink against the source-plus-inpaint footprint, and keep rectangle coverage diagnostic-only.
 - Prevention: Treat font size, wrapping, and rigid placement as the coverage search dimensions; never derive free-text line advance from erased-region height.
+
+## 2026-09-22 — Replanning could collapse grouped source provenance
+
+- Symptom: Re-running legacy bubble preparation on an already-grouped region reduced `group_members` to one item, losing the original source-region mapping.
+- Root cause: The grouping pass rebuilt IDs from the current member list instead of carrying an existing `source_region_ids`/`source_regions` chain through single-member re-entry.
+- Fix: Preserve nested source IDs and geometry snapshots whenever a grouped region is prepared again, reindexing flattened records by reading order.
+- Prevention: Treat grouped regions as semantic units with immutable source provenance; rerun tests after any layout re-entry.
+
+## 2026-09-22 — Layout re-entry could re-merge explicitly separate regions
+
+- Symptom: Bubble detection kept sibling OCR regions separate, but legacy preparation merged them again before rendering.
+- Root cause: A layout re-entry could call the legacy multi-region preparation path without carrying the no-grouping policy through.
+- Fix: The shared production/runner path carries the separate-region policy through preparation and fallback; grouping now requires an explicit opt-in.
+- Prevention: Test grouping policy at detection, preparation, and rendering boundaries.
 
 ## 2026-09-22 — Free-text joint layout searched an unbounded Cartesian product
 

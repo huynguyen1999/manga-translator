@@ -2,6 +2,33 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-22 — Enable speech bubble detection by default across Web Studio
+
+- Defaulted `bubbleDetection` to `true` in `front/app/App.tsx`, `front/app/utils/pipelineLab.ts`, and `server/batch_scheduler.py`'s `_config_for()`.
+- Added automatic migration `migratedDefaultBubbleDetection` in `front/app/App.tsx` and `TranslationSettings` to migrate existing saved user browser profiles to enable speech bubble detection by default, aligning Web Studio out-of-the-box typesetting with `pipeline_step_runner.py`'s high-quality shape-aware solver.
+
+## 2026-09-22 — Align production pipeline layout and rendering with step runner
+
+- Synchronized `MangaTranslator._run_text_rendering`, `MangaTranslator._prepare_bubble_layout`, `_prepare_single_context`, `_complete_translation_pipeline`, and `server/batch_scheduler.py` with `pipeline_step_runner.py`:
+  - Transformed text case before running `layout_page` so solver metrics match the rendered strings.
+  - Isolated free-text rendering (`_free_text_solver_applied`) to directly composite prepared `_bubble_box` onto `_bubble_points` instead of passing them into legacy balloon re-extraction.
+  - Updated `resize_regions_to_font_size` and `render` in `manga_translator/rendering/__init__.py`, `text_render_eng.py`, and `text_render_pillow_eng.py` to preserve shape-aware solver boxes, font sizes, and exact `_bubble_points` placement.
+  - Ensured `ctx.inpaint_mask = ctx.mask.copy()` and `inpaint_mask.png` persistence across `_prepare_single_context`, `_complete_translation_pipeline`, and `_process_rerender_item` for accurate inpaint footprint geometry.
+  - Loaded `original_canvas.png` (or `input.png`/`input.jpg`), `inpaint_mask.png`, and `bubble_mask.png` in saved rerenders so `layout_page` and `render_saved` produce pixel-identical results to devscripts fast rendering.
+
+## 2026-09-22 — Production layout boundary and region provenance
+
+- Added `manga_translator/rendering/layout/` with shared placement models, deterministic bubble lobe geometry, page obstacles, free-text ownership targets, and layout integrity diagnostics.
+- Routed the main pipeline through `layout_page()` after mask generation and before inpainting; it now executes the same extracted shape-aware solver as the pipeline step runner, with the existing renderer consuming the frozen placements.
+- Resolved one active font for both FreeType measurement and final painting, and restored persisted `bubble_safe_shape` geometry on saved rerenders.
+- Promoted stable region/source IDs and source geometry snapshots into `TextBlock`, bubble grouping, Pipeline Lab serialization, and step-runner JSON reload.
+
+## 2026-09-22 — Preserve separate OCR regions by default
+
+- Same-bubble OCR regions are now kept as separate translation/layout units by default across core config, bubble association, and dev capture.
+- Added explicit `--bubble-grouping` opt-in; existing no-grouping aliases remain supported.
+- Compatibility preparation preserves separate region IDs instead of re-merging them during legacy layout setup.
+
 ## 2026-09-22 — Natural-rhythm free-text footprint fitting
 
 - Free-text typography now uses one clamped, font-metric-derived baseline rhythm per render; target height cannot create artificial line spacing.
