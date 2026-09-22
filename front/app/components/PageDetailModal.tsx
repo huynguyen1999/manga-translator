@@ -135,6 +135,9 @@ interface ProfessionalStoryAnalysis {
   summary?: string;
   characters?: unknown;
   relationships?: unknown;
+  honorific_policy?: unknown;
+  language_features?: unknown;
+  localization_conventions?: unknown;
   glossary?: unknown;
   voice_notes?: unknown;
   continuity?: unknown;
@@ -1461,6 +1464,9 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                                   const details = ([
                                     ["Characters", story.characters],
                                     ["Relationships", story.relationships],
+                                    ["Honorific policy", story.honorific_policy],
+                                    ["Language features", story.language_features],
+                                    ["Localization conventions", story.localization_conventions],
                                     ["Voice notes", story.voice_notes],
                                     ["Continuity", story.continuity],
                                     ["Glossary", story.glossary],

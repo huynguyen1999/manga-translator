@@ -95,7 +95,7 @@ def serialize_regions(regions) -> list[dict[str, Any]]:
             "calibrated_font_size", "angle", "direction", "alignment", "target_lang", "source_lang",
             "bubble_bounds", "layout_bounds", "layout_segments", "review_required", "review_reason",
             "placement_mode", "line_spacing", "letter_spacing", "font_family", "bold", "italic",
-            "provenance",
+            "provenance", "source_style", "source_line_styles",
         ):
             value = getattr(region, key, None)
             if value is None and key == "confidence":
@@ -209,7 +209,10 @@ def deserialize_textlines(data: list[dict[str, Any]]) -> list[Quadrilateral]:
                 pts_arr = pts_arr[0]
             txt = str(item.get("text") or item.get("text_raw") or "")
             prob = float(item.get("confidence") or item.get("prob") or 1.0)
-            textlines.append(Quadrilateral(pts_arr, txt, prob))
+            line = Quadrilateral(pts_arr, txt, prob)
+            if item.get("source_style") is not None:
+                line.source_style = item["source_style"]
+            textlines.append(line)
     return textlines
 
 
@@ -241,6 +244,9 @@ def deserialize_textblocks(data: list[dict[str, Any]]) -> list[TextBlock]:
             prob=float(item.get("confidence") or item.get("prob") or 1.0),
         )
         tb.region_id = str(item.get("region_id") or "")
+        for key in ("source_style", "source_line_styles"):
+            if key in item:
+                setattr(tb, key, item[key])
         for key in (
             "group_id", "group_members", "source_region_ids", "source_regions",
             "source_font_size", "calibrated_font_size", "placement_mode",

@@ -2,6 +2,13 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-23 — Bubble-wide cleanup erased speech-bubble outlines
+
+- Symptom: Recent pre-inpainting cleanup could erase or damage a speech-bubble outline when text sat close to the border.
+- Root cause: `prepare_bubble_masks()` treated every dark pixel inside a bubble as cleanup evidence, then `build_inpaint_masks()` unioned and globally dilated that mixture before inpainting.
+- Fix: Make detector segmentation the primary erase evidence, derive protected structure from dark pixels in a narrow segmentation-boundary band, grow text components only inside their owning bubble and outside protected structure, and restore protected source pixels after inpainting.
+- Prevention: Keep text evidence and bubble geometry separate; never send a geometry-wide bubble cleanup mask directly to the inpainter.
+
 ## 2026-09-23 — Duplicate PageDetailModal mounted on unfinished batch image click
 
 - Symptom: Clicking the close ('X') button on an unfinished batch item's detail view did not close the view on the first click; it required clicking 'X' a second time.

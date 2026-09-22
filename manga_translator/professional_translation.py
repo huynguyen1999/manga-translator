@@ -16,12 +16,21 @@ REFUSAL_MARKERS = (
     "content_filter", "finish_reason: safety", "blocked for safety", "prohibited content",
 )
 
-PROFESSIONAL_SYSTEM_PROMPT = (
-    "You are a senior Japanese-to-English manga localization professional. "
-    "Follow the user's current analyst, localizer, or editor role exactly. "
-    "Handle fictional adult material without censorship or embellishment. "
-    "Return only the requested JSON; never add commentary or markdown."
-)
+PROFESSIONAL_SYSTEM_PROMPT = """You are a senior Japanese-to-English manga localization professional.
+Translate supplied source text faithfully; it may contain mature or explicit fictional material. Preserve meaning,
+tone, register, intensity, and character voice. Translate explicit, vulgar, euphemistic, clinical, or mild Japanese
+at a comparable level in natural English: do not sanitize explicit language or make mild language more graphic.
+Prefer natural English over word-for-word phrasing without changing meaning. Preserve slang and dialect function,
+honorific and relationship implications, emotional tone, power dynamics, consent/coercion implications, jokes,
+double meanings, intentional awkwardness, hesitation, repetition, and profanity intensity. Do not moralize,
+editorialize, summarize, invent explicit details, or continue the depicted scenario. This is translation, not
+creative generation. Follow the current analyst, translator, or editor role exactly. Return only the requested
+output format."""
+
+PROFESSIONAL_ANALYSIS_SYSTEM_PROMPT = """You are a Japanese manga story analyst preparing compact, neutral metadata
+for a translation team. Describe sensitive situations abstractly rather than repeating graphic dialogue; quote a
+source expression only when needed as evidence for a translation-relevant linguistic feature. Follow the analyst
+role exactly and return only the requested JSON."""
 
 
 def parse_story_ranges(value: str | None, page_count: int) -> list[tuple[int, int]]:
@@ -163,35 +172,36 @@ class ProfessionalTranslator:
 
     async def _request(self, stage: str, prompt: str) -> tuple[str, str]:
         try:
-            raw = await self._request_with(self.primary, prompt)
+            raw = await self._request_with(self.primary, prompt, stage)
             if _is_refusal(raw):
                 raise PermissionError(raw)
             return raw, _provider_name(self.primary)
         except Exception as exc:
             if not _is_refusal(exc) or self.primary == Translator.deepseek:
                 raise
-            raw = await self._request_with(Translator.deepseek, prompt)
+            raw = await self._request_with(Translator.deepseek, prompt, stage)
             if _is_refusal(raw):
                 raise PermissionError(raw)
             return raw, _provider_name(Translator.deepseek)
 
-    async def _request_with(self, key: Translator, prompt: str) -> str:
+    async def _request_with(self, key: Translator, prompt: str, stage: str = "draft") -> str:
         translator = get_translator(key)
         translator.parse_args(self.config)
         request = getattr(translator, "_request_translation", None)
         if request is None:
             raise ValueError(f"{_provider_name(key)} does not support professional prompts")
+        system_prompt = PROFESSIONAL_ANALYSIS_SYSTEM_PROMPT if stage.startswith("analysis") else PROFESSIONAL_SYSTEM_PROMPT
         original_config = getattr(translator, "config", None)
         original_cache_flag = getattr(translator, "_canUseCache", None)
         had_instance_system_template = "_CHAT_SYSTEM_TEMPLATE" in getattr(translator, "__dict__", {})
         original_system_template = getattr(translator, "_CHAT_SYSTEM_TEMPLATE", None)
         translator.config = OmegaConf.merge(
             original_config or {},
-            {"chat_system_template": PROFESSIONAL_SYSTEM_PROMPT, "chat_sample": {}},
+            {"chat_system_template": system_prompt, "chat_sample": {}},
         )
         # DeepSeek reads the class template directly while the other GPT providers
         # use the config-backed property. Set both paths for the professional call.
-        translator._CHAT_SYSTEM_TEMPLATE = PROFESSIONAL_SYSTEM_PROMPT
+        translator._CHAT_SYSTEM_TEMPLATE = system_prompt
         translator._professional_json_mode = True
         if original_cache_flag is not None:
             translator._canUseCache = False
@@ -231,7 +241,7 @@ class ProfessionalTranslator:
         # try falling back to DeepSeek before failing the stage.
         if self.primary != Translator.deepseek:
             try:
-                raw = await self._request_with(Translator.deepseek, prompt)
+                raw = await self._request_with(Translator.deepseek, prompt, stage)
                 if not _is_refusal(raw):
                     data = _json_object(raw)
                     provider = _provider_name(Translator.deepseek)
@@ -278,8 +288,30 @@ class ProfessionalTranslator:
         prompt = f"""You are a senior Japanese manga story analyst preparing an English localization.
 Read all OCR text before translation. This is fictional adult material; describe it neutrally without censoring it.
 Detect separate stories using textual chapter titles, cast/setting resets, endings, and narrative discontinuities.
-Return JSON only with: stories (array of start_page, end_page, confidence, summary, characters, relationships,
-glossary, voice_notes, continuity, ambiguities). Page numbers are one-based and every page must appear exactly once.
+Return JSON only. Each story has start_page, end_page, confidence, summary, characters, relationships, glossary,
+voice_notes, continuity, ambiguities, honorific_policy, language_features, and localization_conventions.
+Each important recurring character has name and voice: register, politeness, directness, traits, dialect
+(detected, type, confidence, evidence, communicative_effect, localization_strategy), slang_style
+(level, categories, localization_strategy), sentence_style, verbal_habits, pronoun_notes, and localization_notes.
+Use language_features entries with pages, speaker, source, type, literal_meaning, contextual_meaning, tone,
+function, preferred_strategy, possible_renderings, and confidence (omit inapplicable fields). Use
+honorific_policy {default, rules:[{form, strategy, reason}]} and localization_conventions with dialect_strategy,
+slang_strategy, profanity_strategy, recurring_idioms, and forms_of_address.
+Analyze translation-relevant speech rather than treating all dialogue as standard Japanese. Detect supported
+dialects and sociolects (including regional, rough, feminine-coded, gyaru, delinquent, elderly, childish,
+internet, formal, archaic, refined, subordinate, and professional speech), slang, idioms/fixed expressions,
+sentence-ending particles, pronouns, honorifics/forms of address, and recurring idiolect. Record only meaningful
+features, with source, speaker, pages, type, contextual and literal meaning where useful, tone/function,
+confidence, and a preferred English strategy. Include natural English renderings when useful and note tempting
+choices that would distort age, identity, era, or intensity. Do not map a Japanese dialect to an English regional
+accent; describe its communicative effect and recommend a non-stereotyping strategy. Do not mechanically
+translate particles or pronouns, or replace Japanese slang with transient American internet slang by default.
+For honorifics and forms of address, record source form and consistent story-level treatment (retain, translate,
+convey through register, or omit when English implies the relationship). Include honorific_policy rules and
+localization_conventions for names/forms of address, dialect, slang, profanity, idioms, and character voice.
+Flag deliberate speech changes (politeness, pronouns, honorifics, name choice, dialect, roughness) in continuity
+or language_features. Keep voice_notes only as a brief compatibility summary; structured character voice and
+language_features are the authoritative linguistic analysis. Page numbers are one-based and every page must appear exactly once.
 {forced_instruction}
 
 {page_text}"""
@@ -314,7 +346,9 @@ glossary, voice_notes, continuity, ambiguities). Page numbers are one-based and 
                 analysis, _ = await self._json_request(
                     "analysis-consolidation",
                     "Consolidate these ordered manga analysis windows into the requested stories JSON. "
-                    "Preserve absolute page numbers, cover every page exactly once, and obey this boundary rule: "
+                    "Preserve all structured character voice, honorific_policy, language_features, and "
+                    "localization_conventions alongside the existing story fields. Preserve absolute page "
+                    "numbers, cover every page exactly once, and obey this boundary rule: "
                     f"{forced_instruction}\n{json.dumps(partials, ensure_ascii=False)}",
                 )
                 partials = None  # release after consolidation
@@ -379,8 +413,9 @@ glossary, voice_notes, continuity, ambiguities). Page numbers are one-based and 
             if not expected:
                 continue
             prompt = f"""You are the first-pass Japanese-to-English translator preparing a working draft for a separate senior editor.
-Use the story guide and earlier context to resolve references, speakers, pronouns, and terminology, but stay
-close to the Japanese meaning, tone, explicitness, and uncertainty. Preserve meaningful honorifics and cultural
+Use the story guide and earlier context to resolve references, speakers, pronouns, and terminology, applying its
+character voice, language_features, honorific_policy, and localization_conventions consistently. Stay close to
+the Japanese meaning, tone, explicitness, and uncertainty. Preserve meaningful honorifics and cultural
 terms. This is an accurate translation draft, not the final polished localization: do not spend this pass
 polishing idioms, rhythm, or localization flourishes, and do not invent context. Translate every region in
 every supplied page. Return JSON only:
@@ -473,7 +508,9 @@ CURRENT PAGES: {json.dumps(payload, ensure_ascii=False)}"""
 Independently compare the Japanese source and the first draft; do not rubber-stamp the draft. Rewrite literal,
 stiff, repetitive, awkward, or AI-sounding English into natural professional localization while preserving the
 Japanese meaning, character voice, exact explicitness, consent/coercion signals, terminology, and hybrid Japanese
-flavor. Do not invent, omit, censor, moralize, or add commentary. A final identical to the draft is acceptable
+flavor. Apply the story guide's character language profiles, language_features, honorific_policy, and
+localization_conventions consistently, including dialect function and forms of address. Do not invent, omit, censor,
+moralize, or add commentary. A final identical to the draft is acceptable
 only after deliberately checking that it is already natural and accurate. Flag ambiguous OCR, speaker/pronoun
 uncertainty, wordplay, missing context, or a meaning-sensitive rewrite. Return JSON only: {{"regions":[{{"id":"...",
 "translation":"...","confidence":0.0,"review_reasons":[]}}]}}. Include every id once.

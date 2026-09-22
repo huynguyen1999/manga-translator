@@ -46,6 +46,7 @@ from .detection.bubble import (
 from .upscaling import dispatch as dispatch_upscaling, prepare as prepare_upscaling, unload as unload_upscaling
 from .ocr import dispatch as dispatch_ocr, prepare as prepare_ocr, unload as unload_ocr
 from .textline_merge import dispatch as dispatch_textline_merge
+from .typography import analyze_source_typography
 from .mask_refinement import dispatch as dispatch_mask_refinement
 from .inpainting import dispatch as dispatch_inpainting, prepare as prepare_inpainting, unload as unload_inpainting
 from .translators import (
@@ -1238,6 +1239,7 @@ class MangaTranslator:
             elif 'MANGA_OCR_RESULT_DIR' in os.environ:
                 del os.environ['MANGA_OCR_RESULT_DIR']
 
+        analyze_source_typography(textlines, ctx.img_rgb)
         new_textlines = []
         for textline in textlines:
             if textline.text.strip():
@@ -2036,12 +2038,23 @@ class MangaTranslator:
         if not hasattr(self, '_model_usage_timestamps'):
             self._model_usage_timestamps = {}
         self._model_usage_timestamps[("inpainting", config.inpainter.inpainter)] = current_time
-        return await self._mps_call(
+        result = await self._mps_call(
             dispatch_inpainting,
             config.inpainter.inpainter, ctx.img_rgb, ctx.mask,
             config.inpainter, config.inpainter.inpainting_size, getattr(self, 'device', None),
             self.verbose
         )
+        protected = getattr(ctx, 'protected_edge_mask', None)
+        if protected is not None and np.any(protected) and result is not None:
+            result = result.copy()
+            protected_pixels = protected > 0
+            result[protected_pixels] = ctx.img_rgb[protected_pixels]
+            bundle = getattr(ctx, 'mask_bundle', None)
+            if bundle is not None and getattr(bundle, 'metrics', None) is not None:
+                bundle.metrics.protected_edge_retention = float(
+                    np.array_equal(result[protected_pixels], ctx.img_rgb[protected_pixels])
+                )
+        return result
 
     async def _run_text_rendering(self, config: Config, ctx: Context):
         current_time = time.time()

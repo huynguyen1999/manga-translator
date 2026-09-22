@@ -21,6 +21,7 @@ class MaskMetrics:
     protected_edge_violations: int = 0
     residual_candidate_pixels_rejected: int = 0
     source_text_ink_coverage: float = 1.0
+    protected_edge_retention: float = 1.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -30,6 +31,7 @@ class MaskMetrics:
             "protected_edge_violations": int(self.protected_edge_violations),
             "residual_candidate_pixels_rejected": int(self.residual_candidate_pixels_rejected),
             "source_text_ink_coverage": float(self.source_text_ink_coverage),
+            "protected_edge_retention": float(self.protected_edge_retention),
         }
 
 
@@ -81,6 +83,37 @@ def build_detector_cleanup_mask(
 
 
 build_detector_rescue_mask = build_detector_cleanup_mask
+
+
+def _constrained_text_growth(
+    seed: np.ndarray,
+    text_regions: List[Any],
+    protected_edges: np.ndarray,
+    radius: int,
+) -> np.ndarray:
+    """Grow each text component only inside its owning bubble and safe pixels."""
+    result = np.zeros_like(seed, dtype=np.uint8)
+    binary = np.where(seed > 0, 1, 0).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    protected = protected_edges > 0
+    interiors = [
+        np.asarray(getattr(region, "_bubble_interior"), dtype=np.uint8) > 0
+        for region in (text_regions or [])
+        if getattr(region, "_bubble_interior", None) is not None
+    ]
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1)
+    )
+    for label in range(1, count):
+        component = labels == label
+        grown = cv2.dilate(component.astype(np.uint8), kernel) > 0
+        owning_interiors = [interior for interior in interiors if np.any(component & interior)]
+        if owning_interiors:
+            allowed = np.logical_or.reduce(owning_interiors)
+        else:
+            allowed = np.ones_like(component, dtype=bool)
+        result[grown & allowed & ~protected] = 255
+    return result
 
 
 def recover_bubble_residual_text(
@@ -435,17 +468,12 @@ async def build_inpaint_masks(
         config=config,
     )
 
-    # 6. Compose masks in fixed explicit order:
-    # recovery layers union -> small gap closing -> modest text dilation -> protected edge zeroing
-    final_inpaint = cv2.bitwise_or(text_mask, detector_rescue)
-    final_inpaint = cv2.bitwise_or(final_inpaint, bubble_residual)
-    final_inpaint = cv2.bitwise_or(final_inpaint, bubble_cleanup)
+    # 6. Text evidence is authoritative for erasure. Bubble geometry is only
+    # an allowed area/protection constraint, never a blanket cleanup mask.
+    erase_candidates = cv2.bitwise_or(text_mask, detector_rescue)
+    erase_candidates = cv2.bitwise_or(erase_candidates, bubble_residual)
 
-    # Close small internal gaps
-    close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    final_inpaint = cv2.morphologyEx(final_inpaint, cv2.MORPH_CLOSE, close_k)
-
-    # Modest text dilation relative to glyph size
+    # Grow individual text components, rather than a mixed page-wide mask.
     median_font_size = 20.0
     if text_regions:
         font_sizes = [
@@ -457,9 +485,12 @@ async def build_inpaint_masks(
             median_font_size = float(np.median(font_sizes))
 
     dilate_r = max(1, min(4, int(round(median_font_size * 0.08))))
-    if dilate_r > 0:
-        dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_r * 2 + 1, dilate_r * 2 + 1))
-        final_inpaint = cv2.dilate(final_inpaint, dilate_k)
+    final_inpaint = _constrained_text_growth(
+        erase_candidates,
+        text_regions,
+        protected_edges,
+        dilate_r,
+    )
 
     # Compute protected edge violations before invariant zeroing
     edge_violations = int(np.count_nonzero(np.bitwise_and(final_inpaint > 0, protected_edges > 0)))
@@ -498,6 +529,7 @@ async def build_inpaint_masks(
         protected_edge_violations=edge_violations,
         residual_candidate_pixels_rejected=rejected_candidate_pixels,
         source_text_ink_coverage=source_ink_cov,
+        protected_edge_retention=1.0,
     )
 
     return MaskBundle(

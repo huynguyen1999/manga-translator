@@ -52,6 +52,7 @@ class MaskBuilderTests(unittest.TestCase):
         metrics_dict = metrics.to_dict()
         self.assertEqual(metrics_dict["detector_rescue_pixels"], 50)
         self.assertEqual(metrics_dict["bubble_residual_pixels"], 120)
+        self.assertEqual(metrics_dict["protected_edge_retention"], 1.0)
 
     def test_detector_rescue_mask_retains_filtered_boxes(self):
         h, w = 200, 200
@@ -68,6 +69,28 @@ class MaskBuilderTests(unittest.TestCase):
         self.assertEqual(np.count_nonzero(rescue[40:120, 60:140]), (120 - 40) * (140 - 60))
         # Pixels outside the box should be zero
         self.assertEqual(np.count_nonzero(rescue[:40, :]), 0)
+
+    def test_detector_segmentation_is_erased_when_ocr_misses_it(self):
+        h, w = 120, 180
+        image = np.full((h, w, 3), 255, dtype=np.uint8)
+        detector_mask = np.zeros((h, w), dtype=np.uint8)
+        detector_mask[35:55, 30:145] = 255
+
+        class DetectorLine:
+            pts = np.array([[30, 35], [145, 35], [145, 55], [30, 55]], dtype=np.int32)
+
+        bundle = asyncio.run(build_inpaint_masks(
+            image=image,
+            detector_textlines=[DetectorLine()],
+            detector_mask=detector_mask,
+            text_regions=[],
+            bubble_detections=[],
+            config=self.config,
+            text_mask=np.zeros((h, w), dtype=np.uint8),
+        ))
+
+        self.assertGreater(np.count_nonzero(bundle.detector_rescue_mask), 0)
+        self.assertGreater(np.count_nonzero(bundle.final_inpaint_mask[35:55, 30:145]), 0)
 
     def test_bubble_residual_recovery_japanese_punctuation_regression_fixture(self):
         """

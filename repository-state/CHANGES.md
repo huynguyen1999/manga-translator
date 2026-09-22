@@ -2,6 +2,9 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-23 — Source typography measurements
+- Added pre-inpainting OCR-line measurements for relative size, stroke width, ink density, orientation, rotation, and OCR colors; preserved line-level metadata through merge and Pipeline Lab JSON reload. Rendering remains unchanged.
+
 ## 2026-09-23 — Fix duplicate PageDetailModal on in-flight / unfinished batch images
 
 - Removed duplicate external modal state syncing and redundant props (`selectedImageForModal`, `onCloseExternalModal`) from `ResultGallery`.
@@ -466,3 +469,14 @@ Record new features and large changes here. Keep implementation detail in code, 
 ## 2026-09-21 — Shape-safe editor lettering
 
 - Persisted the backend-validated lettering raster for each linked lobe and reused it in editor preview, reflow, and image export, preventing browser font metrics from moving glyphs outside the bubble.
+
+## 2026-09-23 — Constrained text erasure and protected bubble outlines
+
+- Removed bubble-wide dark-ink cleanup and page-wide final dilation from canonical inpaint mask composition.
+- Kept detector segmentation pixels as OCR-independent erase evidence, added per-component constrained growth, narrow source-image outline protection, and post-inpaint protected-pixel restoration.
+- Added detector-missed-text regression coverage and protected-edge retention metrics.
+
+## 2026-09-23 — Structured linguistic register analysis
+
+- Added character speech profiles and story-level honorific, language-feature, and localization-convention output to professional story analysis; the editor receives these through the existing story guide, and the Story Analysis panel displays them.
+- Added stage-specific system guidance: analysis uses compact neutral descriptions, while draft/editor requests preserve the source's meaning and explicitness; the editor is instructed to apply the structured language profile and story conventions.

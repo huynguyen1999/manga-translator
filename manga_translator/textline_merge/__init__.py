@@ -204,5 +204,6 @@ async def dispatch(textlines: List[Quadrilateral], width: int, height: int, verb
         texts = [txtln.text for txtln in txtlns]
         region = TextBlock(lines, texts, font_size=font_size, angle=angle, prob=np.exp(total_logprobs),
                            fg_color=fg_color, bg_color=bg_color)
+        region.source_line_styles = [getattr(txtln, "source_style", None) for txtln in txtlns]
         text_regions.append(region)
     return text_regions
