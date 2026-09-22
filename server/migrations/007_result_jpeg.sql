@@ -1,0 +1,2 @@
+ALTER TABLE pages
+    ADD COLUMN IF NOT EXISTS final_name TEXT NOT NULL DEFAULT 'final.png';

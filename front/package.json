@@ -1,0 +1,36 @@
+{
+  "name": "front",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "react-router build",
+    "dev": "react-router dev --port 6868 --strictPort",
+    "start": "PORT=6868 react-router-serve ./build/server/nodejs_eyJydW50aW1lIjoibm9kZWpzIn0/index.js",
+    "serve": "npm run build && npm run start",
+    "test": "vite-node app/components/PreviewImage.test.ts && vite-node app/components/TranslatingSection.test.ts && vite-node app/components/PageDetailModal.test.ts && vite-node app/components/mangaEditorGeometry.test.ts && vite-node app/components/Pagination.test.ts && vite-node app/components/GroupSelectionModal.test.ts && vite-node app/components/TranslationSubmitModal.test.ts && vite-node app/utils/api.test.ts && vite-node app/utils/batchSync.test.ts && vite-node app/utils/fileStorage.test.ts && vite-node app/utils/selectionUtils.test.ts && vite-node app/utils/translationScheduler.test.ts && vite-node app/utils/pipelineLab.test.ts && vite-node app/utils/mangaImageCache.test.ts && vite-node app/routes/result.test.ts && vite-node app/routes/stale-asset.test.ts && vite-node app/components/Tooltip.test.ts && vite-node app/components/ResultGallery.test.ts && vite-node app/utils/routeState.test.ts && vite-node app/utils/batchRename.test.ts && vite-node app/utils/mangaReaderJump.test.ts && vite-node app/utils/zipUtils.test.ts && vite-node app/utils/series.test.ts && vite-node app/utils/summaryJobs.test.ts && vite-node app/utils/searchLab.test.ts && vite-node app/components/JobsDrawer.test.ts && vite-node app/utils/storyPlan.test.ts",
+    "test:preview": "vite --config preview-check.config.ts --open /preview-check.html",
+    "typecheck": "react-router typegen && tsc"
+  },
+  "dependencies": {
+    "@headlessui/react": "^2.2.0",
+    "@react-router/node": "^7.3.0",
+    "@react-router/serve": "^7.3.0",
+    "@vercel/react-router": "^1.1.0",
+    "isbot": "^5.1.17",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router": "^7.3.0"
+  },
+  "devDependencies": {
+    "@iconify/react": "^5.2.0",
+    "@react-router/dev": "^7.3.0",
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/node": "^20",
+    "@types/react": "^19.0.1",
+    "@types/react-dom": "^19.0.1",
+    "tailwindcss": "^4.0.12",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vite-tsconfig-paths": "^5.1.4"
+  }
+}

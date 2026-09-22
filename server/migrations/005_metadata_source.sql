@@ -1,0 +1,2 @@
+ALTER TABLE pages
+    ADD COLUMN IF NOT EXISTS text_regions JSONB NOT NULL DEFAULT '[]'::jsonb;

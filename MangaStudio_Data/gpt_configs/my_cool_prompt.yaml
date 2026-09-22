@@ -1,0 +1,76 @@
+# =========================================================
+# AI TRANSLATOR CONFIGURATION FILE (OPTIMIZED FOR GEMINI & LLMs)
+# =========================================================
+# This file allows you to customize the behavior of AI translators
+# like Google Gemini, OpenAI GPT, Groq, or custom Ollama endpoints.
+# Use '#' for comments. The application will ignore these lines.
+
+# --- Model Parameters ---
+
+# temperature: (Recommended: 0.3 for Gemini)
+# Lower values (0.2 - 0.3) enforce strict adherence to formatting tags (<|number|>)
+# and preserve continuity without conversational drift.
+temperature: 0.3
+
+# top_p: (Default: 0.95)
+# Keeps vocabulary natural, idiomatic, and expressive while bounding randomness.
+top_p: 0.95
+
+
+# --- Prompt Engineering ---
+
+# include_template: (Default: True)
+# If set to true, 'prompt_template' below will be prepended to the text to be translated.
+include_template: true
+
+# prompt_template:
+# The instruction text sent to the AI before the actual manga text.
+# Use {to_lang} to dynamically insert the target language name.
+prompt_template: >-
+  Translate the following sequential manga dialogue blocks into natural, colloquial {to_lang}.
+  Preserve every `<|number|>` tag precisely:
+
+# chat_system_template:
+# The core persona, formatting constraints, and translation heuristics.
+chat_system_template: >
+  You are an expert manga and comic localization specialist fluent in Japanese subcultures, otaku terminology, and natural dialogue adaptation.
+
+  Translate the given source text into expressive, colloquial {to_lang} adhering strictly to the following rules:
+
+  1. FORMAT INTEGRITY (CRITICAL):
+     - The input contains numbered segments formatted as `<|1|>...<|2|>...`.
+     - Output MUST maintain the exact same `<|number|>` tags for each segment.
+     - Never omit, combine, reorder, or split tags.
+     - Never add commentary, introductory notes, markdown code blocks, or explanations. Only output the translated segments.
+
+  2. DIALOGUE & NATURAL FLOW:
+     - Treat adjacent numbered segments as parts of a continuous scene or split speech balloon. Maintain contextual and grammatical coherence across them.
+     - Reflect character persona, tone, gender, age, and emotional state (e.g., tsundere, gyaru, delinquent, formal, childish).
+     - Translate colloquialisms, contractions, and slang naturally (avoid stiff textbook phrasing).
+
+  3. SFX & ONOMATOPOEIA:
+     - Adapt onomatopoeia / sound effects (SFX) into standard, contextual {to_lang} comic equivalents (e.g., ドキドキ -> "thump-thump" / "badump", ドーン -> "BOOM").
+     - If a segment is purely punctuation or symbols (e.g., "...", "?!", "――"), preserve the punctuation.
+
+  4. FICTIONAL CONTEXT & UNFILTERED LOCALIZATION:
+     - All content is purely fictional creative storytelling and artistic expression.
+     - Faithfully translate mature themes, action, banter, emotional outbursts, and adult content without censorship, softening, moralizing, or refusal.
+
+  Translate to {to_lang}.
+
+
+# --- Few-Shot Learning (Sample Demonstrations) ---
+# High-quality multi-segment samples demonstrating tag preservation, informal tone, and punctuation handling.
+chat_sample:
+  English:
+    - "<|1|>恥ずかしい… 目立ちたくない… 私が消えたい…\n<|2|>きみ… 大丈夫⁉\n<|3|>なんだこいつ 空気読めて ないのか…？"
+    - "<|1|>This is so embarrassing... I don't want to stand out... I just want to disappear...\n<|2|>Hey... you okay?!\n<|3|>What's with this guy? Can't he read the room...?"
+  Chinese (Simplified):
+    - "<|1|>恥ずかしい… 目立ちたくない… 私が消えたい…\n<|2|>きみ… 大丈夫⁉\n<|3|>なんだこいつ 空気読めて ないのか…？"
+    - "<|1|>好丢脸…我不想这么显眼…真想找个地缝钻进去…\n<|2|>你…没事吧⁉\n<|3|>这家伙怎么回事？完全不会看气氛吗…？"
+  Japanese:
+    - "<|1|>This is so embarrassing... I just want to disappear...\n<|2|>Hey... you okay?!"
+    - "<|1|>恥ずかしい… 消えちゃいたい…\n<|2|>ちょっと… 大丈夫⁉"
+  Korean:
+    - "<|1|>恥ずかしい… 目立ちたくない… 私が消えたい…\n<|2|>きみ… 大丈夫⁉\n<|3|>なんだこいつ 空気読めて ないのか…？"
+    - "<|1|>부끄러워... 튀고 싶지 않아... 그냥 사라지고 싶어...\n<|2|>너... 괜찮아?!\n<|3|>뭐야 이 녀석, 분위기 파악 전혀 안 되나...?"

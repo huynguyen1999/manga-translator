@@ -1,0 +1,237 @@
+@import url('https://fonts.googleapis.com/css2?family=Bangers&family=Comic+Neue:ital,wght@0,300;0,400;0,700;1,400;1,700&display=swap');
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --color-iris-500: #6366f1;
+  --color-iris-600: #4f46e5;
+  --color-iris-700: #4338ca;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+  background-color: #fafafa;
+  color: #18181b;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html.dark,
+html.dark body {
+  background-color: #09090b;
+  color: #f4f4f5;
+  color-scheme: dark;
+}
+
+html:has(.manga-reader),
+body:has(.manga-reader) {
+  background-color: #09090b;
+  color-scheme: dark;
+}
+
+/* Custom discreet scrollbars */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(161, 161, 170, 0.5);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+html.dark ::-webkit-scrollbar-thumb {
+  background: rgba(161, 161, 170, 0.45);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(113, 113, 122, 0.8);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(212, 212, 216, 0.75);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Standard scrollbar properties for Firefox and compliant browsers */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(161, 161, 170, 0.5) transparent;
+}
+
+html.dark * {
+  scrollbar-color: rgba(161, 161, 170, 0.45) transparent;
+}
+
+/* Manga Reader high-visibility desktop scrollbars */
+.manga-reader,
+.manga-reader-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(212, 212, 216, 0.6) rgba(24, 24, 27, 0.85);
+}
+
+.manga-reader ::-webkit-scrollbar,
+.manga-reader-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.manga-reader ::-webkit-scrollbar-track,
+.manga-reader-scroll::-webkit-scrollbar-track {
+  background: rgba(24, 24, 27, 0.85);
+  border-left: 1px solid rgba(63, 63, 70, 0.35);
+}
+
+.manga-reader ::-webkit-scrollbar-thumb,
+.manga-reader-scroll::-webkit-scrollbar-thumb {
+  background: rgba(212, 212, 216, 0.6);
+  border-radius: 9999px;
+  border: 2px solid rgba(24, 24, 27, 0.85);
+  background-clip: padding-box;
+}
+
+.manga-reader ::-webkit-scrollbar-thumb:hover,
+.manga-reader-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.95);
+  border: 2px solid rgba(24, 24, 27, 0.85);
+}
+
+.manga-reader ::-webkit-scrollbar-thumb:active,
+.manga-reader-scroll::-webkit-scrollbar-thumb:active {
+  background: #818cf8;
+  border: 2px solid rgba(24, 24, 27, 0.85);
+}
+
+/* Synopsis and modal scrollbars */
+.synopsis-scroll-container,
+.modal-scroll-container {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(161, 161, 170, 0.6) transparent;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+}
+
+html.dark .synopsis-scroll-container,
+html.dark .modal-scroll-container {
+  scrollbar-color: rgba(161, 161, 170, 0.5) transparent;
+}
+
+.synopsis-scroll-container::-webkit-scrollbar,
+.modal-scroll-container::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.synopsis-scroll-container::-webkit-scrollbar-track,
+.modal-scroll-container::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 9999px;
+}
+
+html.dark .synopsis-scroll-container::-webkit-scrollbar-track,
+html.dark .modal-scroll-container::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 9999px;
+}
+
+.synopsis-scroll-container::-webkit-scrollbar-thumb,
+.modal-scroll-container::-webkit-scrollbar-thumb {
+  background: rgba(161, 161, 170, 0.6);
+  border-radius: 9999px;
+}
+
+html.dark .synopsis-scroll-container::-webkit-scrollbar-thumb,
+html.dark .modal-scroll-container::-webkit-scrollbar-thumb {
+  background: rgba(161, 161, 170, 0.5);
+  border-radius: 9999px;
+}
+
+.synopsis-scroll-container::-webkit-scrollbar-thumb:hover,
+.modal-scroll-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(113, 113, 122, 0.9);
+}
+
+html.dark .synopsis-scroll-container::-webkit-scrollbar-thumb:hover,
+html.dark .modal-scroll-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(212, 212, 216, 0.85);
+}
+
+/* Split slider handle styling */
+.split-slider {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: ew-resize;
+}
+
+.split-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 2px solid #6366f1;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  cursor: ew-resize;
+}
+
+.split-slider::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 2px solid #6366f1;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  cursor: ew-resize;
+}
+
+.manga-reader button:focus-visible,
+.manga-reader input:focus-visible {
+  outline: 2px solid #818cf8;
+  outline-offset: 2px;
+}
+
+button:focus-visible,
+a:focus-visible,
+select:focus-visible {
+  outline: 2px solid #818cf8;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .manga-reader *,
+  .manga-reader *::before,
+  .manga-reader *::after,
+  .translation-controls *,
+  .translation-controls *::before,
+  .translation-controls *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

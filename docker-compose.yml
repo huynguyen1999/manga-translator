@@ -1,0 +1,44 @@
+services:
+  backend:
+    image: manga-image-translator-backend
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MANGA_DATA_ROOT: /app/data
+    ports:
+      # Keep the API private by default; set BACKEND_BIND_ADDRESS=0.0.0.0 for LAN clients.
+      - "${BACKEND_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    volumes:
+      - ./workspace:/app/workspace
+      - "${MANGA_DATA_ROOT:-./workspace}:/app/data"
+      - ./result:/app/result:ro
+      - manga-models:/app/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/docs', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  front:
+    image: manga-image-translator-front
+    build:
+      context: ./front
+      dockerfile: Dockerfile
+      args:
+        DESKTOP_API_URL: ${DESKTOP_API_URL:-http://localhost:8000}
+        # Set PHONE_API_URL to the host's LAN URL when using a phone/tablet.
+        PHONE_API_URL: ${PHONE_API_URL:-http://localhost:8000}
+    environment:
+      NODE_ENV: production
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "6868:6868"
+
+volumes:
+  manga-models:

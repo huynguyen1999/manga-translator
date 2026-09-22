@@ -1,0 +1,30 @@
+{
+  "detector": {
+    "detector": "default",
+    "detection_size": 2560,
+    "text_threshold": 0.5,
+    "box_threshold": 0.45,
+    "unclip_ratio": 2.3
+  },
+  "ocr": {
+    "ocr": "48px",
+    "use_mocr_merge": false
+  },
+  "inpainter": {
+    "inpainter": "lama_large",
+    "inpainting_size": 1024,
+    "inpainting_precision": "bf16"
+  },
+  "translator": {
+    "translator": "deepseek",
+    "target_lang": "ENG"
+  },
+  "upscale": {
+    "upscaler": "4xultrasharp",
+    "revert_upscaling": true
+  },
+  "render": {
+    "renderer": "default",
+    "rtl": true
+  }
+}

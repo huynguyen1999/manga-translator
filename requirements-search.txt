@@ -1,0 +1,2 @@
+# Optional local Search Lab, on top of requirements.txt.
+qdrant-client==1.17.1
