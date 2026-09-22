@@ -861,9 +861,9 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-white/10 bg-zinc-950/95 shadow-2xl">
         {/* Top Header Bar */}
         <header
-          className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 bg-black/40 px-3 py-3 text-white sm:px-5"
+          className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-white/10 bg-black/40 px-3 py-2.5 text-white sm:px-4"
         >
-          <div className="min-w-0 flex items-center gap-3">
+          <div className="min-w-0 flex shrink items-center gap-3">
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-400">
                 {image.mangaTitle && (
@@ -883,25 +883,25 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-1.5">
             {/* Zoom Controls */}
-            <div className="flex items-center rounded-lg bg-white/10 p-1" aria-label="Zoom controls">
+            <div className="flex shrink-0 items-center rounded-md bg-white/10 p-0.5" aria-label="Zoom controls">
                 <button
                   type="button"
                   onClick={() => setZoomLevel((level) => Math.max(0.5, level - 0.25))}
-                  className="flex min-h-[38px] min-w-[38px] items-center justify-center rounded-md text-zinc-200 transition-colors hover:bg-white/15 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-400 cursor-pointer"
+                  className="flex min-h-8 min-w-8 items-center justify-center rounded text-zinc-200 transition-colors hover:bg-white/15 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-400 cursor-pointer"
                   aria-label="Zoom out (-)"
                   title="Zoom out (-)"
                 >
                   <Icon icon="carbon:zoom-out" className="h-4 w-4" />
                 </button>
-                <span className="min-w-12 px-1 text-center font-mono text-xs text-zinc-300" aria-live="polite">
+                <span className="min-w-10 px-0.5 text-center font-mono text-xs text-zinc-300" aria-live="polite">
                   {Math.round(zoomLevel * 100)}%
                 </span>
                 <button
                   type="button"
                   onClick={() => setZoomLevel((level) => Math.min(3, level + 0.25))}
-                  className="flex min-h-[38px] min-w-[38px] items-center justify-center rounded-md text-zinc-200 transition-colors hover:bg-white/15 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-400 cursor-pointer"
+                  className="flex min-h-8 min-w-8 items-center justify-center rounded text-zinc-200 transition-colors hover:bg-white/15 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-400 cursor-pointer"
                   aria-label="Zoom in (+)"
                   title="Zoom in (+)"
                 >
@@ -910,7 +910,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setZoomLevel(1)}
-                  className="flex min-h-[38px] min-w-[38px] items-center justify-center rounded-md text-zinc-200 transition-colors hover:bg-white/15 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-400 cursor-pointer"
+                  className="flex min-h-8 min-w-8 items-center justify-center rounded text-zinc-200 transition-colors hover:bg-white/15 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-400 cursor-pointer"
                   aria-label="Reset zoom (0)"
                   title="Reset zoom (0)"
                 >
@@ -920,14 +920,14 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
 
             {/* View Mode and Inspection Controls */}
           {(isOriginal ? originalTextAvailable : true) && (
-          <div className="flex flex-wrap items-center rounded-lg border border-white/10 bg-white/5 p-0.5" role="tablist">
+          <div className="flex min-w-0 flex-wrap items-center rounded-md border border-white/10 bg-white/5 p-0.5" role="tablist">
             {!isOriginal && (
             <>
               {resolvedOriginalUrl && resolvedResultUrl && (
                 <button
                   type="button"
                   onClick={() => setViewMode("split")}
-                  className={`flex min-h-[36px] items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors cursor-pointer ${
+                  className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${
                     viewMode === "split"
                       ? "bg-indigo-600 text-white shadow-xs"
                       : "text-zinc-300 hover:bg-white/10 hover:text-white"
@@ -942,7 +942,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setViewMode("translated")}
-                  className={`flex min-h-[36px] items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors cursor-pointer ${
+                  className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${
                     viewMode === "translated"
                       ? "bg-indigo-600 text-white shadow-xs"
                       : "text-zinc-300 hover:bg-white/10 hover:text-white"
@@ -957,7 +957,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setViewMode("inpainted")}
-                  className={`flex min-h-[36px] items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors cursor-pointer ${
+                  className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${
                     viewMode === "inpainted"
                       ? "bg-emerald-600 text-white shadow-xs"
                       : "text-zinc-300 hover:bg-white/10 hover:text-white"
@@ -972,7 +972,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setViewMode("bubble-mask")}
-                  className={`flex min-h-[36px] items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors cursor-pointer ${
+                  className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${
                     viewMode === "bubble-mask"
                       ? "bg-violet-600 text-white shadow-xs"
                       : "text-zinc-300 hover:bg-white/10 hover:text-white"
@@ -987,7 +987,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setViewMode("original")}
-                  className={`flex min-h-[36px] items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors cursor-pointer ${
+                  className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${
                     viewMode === "original"
                       ? "bg-indigo-600 text-white shadow-xs"
                       : "text-zinc-300 hover:bg-white/10 hover:text-white"
@@ -1006,7 +1006,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                   onMouseLeave={() => setIsHoldingOriginal(false)}
                   onTouchStart={() => setIsHoldingOriginal(true)}
                   onTouchEnd={() => setIsHoldingOriginal(false)}
-                  className="flex min-h-[36px] select-none items-center gap-1 rounded-md bg-zinc-800/80 px-2.5 text-xs font-semibold text-amber-300 transition-colors hover:bg-zinc-700 active:bg-amber-500 active:text-black cursor-pointer"
+                  className="flex min-h-8 select-none items-center gap-1 rounded bg-zinc-800/80 px-2 text-xs font-semibold text-amber-300 transition-colors hover:bg-zinc-700 active:bg-amber-500 active:text-black cursor-pointer"
                   title="Hold button to peek at original image"
                 >
                   Hold Peek
@@ -1020,7 +1020,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                 onClick={() => {
                   setShowBubbleBoxes((prev) => !prev);
                 }}
-                className={`flex min-h-[36px] items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors cursor-pointer ${
+                className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${
                   showBubbleBoxes
                     ? "bg-amber-600 text-white shadow-xs"
                     : "text-zinc-300 hover:bg-white/10 hover:text-white"
@@ -1046,7 +1046,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                 type="button"
                 disabled={!originalRegionCount}
                 onClick={() => setShowOriginalRegions((prev) => !prev)}
-                className={`flex min-h-[36px] items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
+                className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
                   showOriginalRegions
                     ? "bg-amber-600 text-white shadow-xs"
                     : "text-zinc-300 hover:bg-white/10 hover:text-white"
@@ -1078,12 +1078,13 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
             </div>
           )}
 
+            <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-l border-white/10 pl-1.5">
             {/* Edit / Typeset Button */}
             {onEdit && image.hasTextRegions && image.sourceType !== "original" && (
               <button
                 type="button"
                 onClick={() => onEdit(image)}
-                className="flex min-h-[36px] items-center gap-1.5 rounded-lg border border-indigo-500/40 bg-indigo-500/20 px-3 text-xs font-semibold text-indigo-200 transition-colors hover:bg-indigo-600 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-300 cursor-pointer"
+                className="flex min-h-8 items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/20 px-2.5 text-xs font-semibold text-indigo-200 transition-colors hover:bg-indigo-600 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-300 cursor-pointer"
                 title="Interactive Typesetter & Visual Editor"
               >
                 <Icon icon="carbon:text-annotation-toggle" className="h-3.5 w-3.5" />
@@ -1092,12 +1093,12 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
             )}
 
             {onRetry && image.sourceType !== "original" && (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => void handleRetry()}
                   disabled={isRetrying || retryStatus === "queued"}
-                  className="flex min-h-[36px] items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 text-xs font-semibold text-amber-200 transition-colors hover:bg-amber-500/25 hover:text-white focus-visible:outline-2 focus-visible:outline-amber-300 disabled:cursor-wait disabled:opacity-70"
+                  className="flex min-h-8 items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/15 px-2.5 text-xs font-semibold text-amber-200 transition-colors hover:bg-amber-500/25 hover:text-white focus-visible:outline-2 focus-visible:outline-amber-300 disabled:cursor-wait disabled:opacity-70"
                   aria-busy={isRetrying}
                   title="Run the translation pipeline again for this image"
                 >
@@ -1114,24 +1115,24 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
               </div>
             )}
 
-            {onRerender && image.sourceType !== "original" && image.hasTextRegions && (
-              <div className="flex items-center gap-2">
+            {onRerender && image.sourceType !== "original" && (
+              <div className="flex items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => void handleRerender()}
                   disabled={isRerendering || rerenderStatus === "queued"}
-                  className="flex min-h-[36px] items-center gap-1.5 rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-3 text-xs font-semibold text-indigo-200 transition-colors hover:bg-indigo-500/25 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-300 disabled:cursor-wait disabled:opacity-70"
+                  className="flex min-h-8 items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/15 px-2.5 text-xs font-semibold text-indigo-200 transition-colors hover:bg-indigo-500/25 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-300 disabled:cursor-wait disabled:opacity-70"
                   aria-busy={isRerendering}
-                  title="Rerun saved layout and render without translating again"
+                  title="Rerun pipeline stages (typesetting, retranslation, reprocess text, or full)"
                 >
                   <Icon icon="carbon:reset" className={`h-3.5 w-3.5 ${isRerendering ? "animate-spin" : ""}`} />
                   <span className="hidden sm:inline">
-                    {isRerendering ? "Rerendering…" : rerenderStatus === "queued" ? "Rerender queued" : "Rerun layout"}
+                    {isRerendering ? "Rerunning…" : rerenderStatus === "queued" ? "Rerun queued" : "Rerun pipeline"}
                   </span>
                 </button>
                 {rerenderStatus === "error" && (
                   <span className="text-xs font-medium text-rose-300" role="status">
-                    Rerender failed
+                    Rerun failed
                   </span>
                 )}
               </div>
@@ -1141,7 +1142,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
             <button
               type="button"
               onClick={handleDownload}
-              className="flex min-h-[36px] items-center gap-1.5 rounded-lg bg-indigo-600 px-3 text-xs font-semibold text-white transition-colors hover:bg-indigo-500 focus-visible:outline-2 focus-visible:outline-indigo-300 cursor-pointer"
+              className="flex min-h-8 items-center gap-1 rounded-md bg-indigo-600 px-2.5 text-xs font-semibold text-white transition-colors hover:bg-indigo-500 focus-visible:outline-2 focus-visible:outline-indigo-300 cursor-pointer"
               aria-label="Download image"
               title="Download image"
             >
@@ -1154,7 +1155,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
               <button
                 type="button"
                 onClick={() => onDelete(image)}
-                className="flex min-h-[36px] items-center gap-1.5 rounded-lg bg-zinc-800 hover:bg-red-600 px-3 text-xs font-semibold text-zinc-300 hover:text-white transition-colors cursor-pointer"
+                className="flex min-h-8 items-center gap-1 rounded-md bg-zinc-800 hover:bg-red-600 px-2.5 text-xs font-semibold text-zinc-300 hover:text-white transition-colors cursor-pointer"
                 title="Delete from server"
               >
                 <Icon icon="carbon:trash-can" className="h-3.5 w-3.5" />
@@ -1167,12 +1168,13 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
               ref={closeButtonRef}
               type="button"
               onClick={onClose}
-              className="flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg text-zinc-300 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-300 cursor-pointer"
+              className="flex min-h-8 min-w-8 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-300 cursor-pointer"
               aria-label="Close viewer (Escape)"
               title="Close viewer (Escape)"
             >
               <Icon icon="carbon:close" className="h-5 w-5" />
             </button>
+            </div>
           </div>
         </header>
 

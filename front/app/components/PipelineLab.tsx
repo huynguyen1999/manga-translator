@@ -119,7 +119,13 @@ function emptyLiveStages(stagePlan: PipelineStagePlan, hasFile: boolean): Pipeli
   }));
 }
 
-export function PipelineLab({ showHeader = true }: { showHeader?: boolean } = {}) {
+export function PipelineLab({
+  showHeader = true,
+  initialFile = null,
+}: {
+  showHeader?: boolean;
+  initialFile?: File | null;
+} = {}) {
   const [theme, setTheme] = useState<"light" | "dark">("dark");
   const [file, setFile] = useState<File | null>(null);
   const [settings, setSettings] = useState<PipelineLabSettings>(defaultPipelineLabSettings);
@@ -205,6 +211,12 @@ export function PipelineLab({ showHeader = true }: { showHeader?: boolean } = {}
     setRunState("idle");
     setError(null);
   }, []);
+
+  useEffect(() => {
+    if (initialFile) {
+      chooseFile(initialFile);
+    }
+  }, [initialFile, chooseFile]);
 
   useEffect(() => {
     const onPaste = (event: ClipboardEvent) => {
@@ -902,7 +914,29 @@ export function PipelineLab({ showHeader = true }: { showHeader?: boolean } = {}
                       </p>
                       {selected?.finishedAt && <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">Processed {formatTimestamp(selected.finishedAt)}</p>}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {selected?.id === "translation" && (
+                        <div className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2 py-1 dark:border-zinc-700 dark:bg-zinc-850">
+                          <Icon icon="carbon:language" className="h-3.5 w-3.5 text-zinc-400" />
+                          <label htmlFor="stage-inline-translator" className="text-xs font-medium text-zinc-500 dark:text-zinc-400 sr-only">Translator Provider</label>
+                          <select
+                            id="stage-inline-translator"
+                            value={settings.translator}
+                            onChange={(event) => updateSettings("translator", event.target.value)}
+                            className="bg-transparent text-xs font-medium text-zinc-800 outline-none dark:text-zinc-200"
+                            title="Select translator provider for this step"
+                          >
+                            <option value="original">Original (No Translation)</option>
+                            {Object.entries(translatorGroups).map(([group, list]) => (
+                              <optgroup key={group} label={group}>
+                                {list.map((item) => (
+                                  <option key={item.key} value={item.key}>{item.name}</option>
+                                ))}
+                              </optgroup>
+                            ))}
+                          </select>
+                        </div>
+                      )}
                       {selected?.durationMs != null && <span className="font-mono text-xs text-zinc-500">{selected.durationMs} ms</span>}
                       {selected && <button type="button" onClick={() => void openStageDetails(selected)} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100" title="View stage details" aria-label={`View ${selected.label} details`}><Icon icon="carbon:view" className="h-4 w-4" /></button>}
                       {selected?.id !== "input" && folder && runState !== "running" && (selected?.status === "completed" || selected?.status === "failed") && (

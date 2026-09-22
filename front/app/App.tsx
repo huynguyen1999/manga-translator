@@ -86,6 +86,7 @@ import {
   removeBatchItem,
   removeServerBatch,
   rerenderPages,
+  rerunPipeline,
   retryBatchItem,
   submitServerBatch,
   toTranslationBatch,
@@ -95,6 +96,8 @@ import {
   updateBatchTitle,
   updateBatchTranslator,
 } from "@/utils/serverBatches";
+import { PipelineRerunDialog } from "@/components/PipelineRerunDialog";
+
 import {
   dismissSummaryJob,
   fetchSummaryJobs,
@@ -556,6 +559,7 @@ export const App: React.FC = () => {
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [pendingTranslationTargets, setPendingTranslationTargets] = useState<StudioFile[]>([]);
   const [pendingFiles, setPendingFiles] = useState<PendingStudioFile[]>([]);
+  const [pipelineLabInitialFile, setPipelineLabInitialFile] = useState<File | null>(null);
   const [recentGroups, setRecentGroups] = useState<string[]>([]);
   const [translationBatchError, setTranslationBatchError] = useState<string | null>(null);
   const [isStudioMangaUploadModalOpen, setIsStudioMangaUploadModalOpen] = useState(false);
@@ -700,6 +704,7 @@ export const App: React.FC = () => {
   const [detectionResolution, setDetectionResolution] = useState("2048");
   const [textDetector, setTextDetector] = useState("default");
   const [ocr, setOcr] = useState("48px");
+  const [renderFont, setRenderFont] = useState("wildwords");
   const [renderTextDirection, setRenderTextDirection] = useState("auto");
   const [letterCase, setLetterCase] = useState<"none" | "uppercase" | "lowercase">("none");
   const [translator, setTranslator] = useState<TranslatorKey>("deepseek");
@@ -754,6 +759,7 @@ export const App: React.FC = () => {
     detectionResolution,
     textDetector,
     ocr,
+    renderFont,
     renderTextDirection,
     letterCase,
     uppercase: letterCase === "uppercase",
@@ -791,6 +797,7 @@ export const App: React.FC = () => {
     if (shouldRememberSettings && savedSettings.detectionResolution) setDetectionResolution(savedSettings.detectionResolution);
     if (shouldRememberSettings && savedSettings.textDetector) setTextDetector(savedSettings.textDetector);
     if (shouldRememberSettings && savedSettings.ocr && ocrOptions.some((option) => option.value === savedSettings.ocr)) setOcr(savedSettings.ocr);
+    if (shouldRememberSettings && savedSettings.renderFont) setRenderFont(savedSettings.renderFont);
     if (shouldRememberSettings && savedSettings.renderTextDirection) setRenderTextDirection(savedSettings.renderTextDirection);
     if (shouldRememberSettings && savedSettings.letterCase) {
       setLetterCase(savedSettings.letterCase);
@@ -2415,26 +2422,46 @@ export const App: React.FC = () => {
     return retryTranslationItem(match.batch.id, match.item.id);
   };
 
-  const rerenderImages = useCallback(async (images: FinishedImage[]) => {
-    const eligible = images.filter(
-      (image) => image.sourceType !== "original" && image.hasTextRegions && image.id,
-    );
+  const [pipelineRerunState, setPipelineRerunState] = useState<{
+    images: FinishedImage[];
+    groupId?: string;
+    mangaTitle?: string;
+  } | null>(null);
+
+  const handleOpenPipelineRerun = useCallback((images: FinishedImage[], groupId?: string, mangaTitle?: string) => {
+    const eligible = images.filter((img) => img.id);
     if (!eligible.length) {
-      throw new Error("No translated pages with saved text regions were selected.");
-    }
-    if (
-      eligible.length > 1 &&
-      typeof window !== "undefined" &&
-      !window.confirm(`Rerun layout and render for ${eligible.length} pages?`)
-    ) {
+      window.alert("No pages were selected for pipeline rerun.");
       return;
     }
-    const serverBatch = await rerenderPages(eligible.map((image) => image.id));
+    setPipelineRerunState({ images: eligible, groupId, mangaTitle });
+  }, []);
+
+  const handleExecutePipelineRerun = useCallback(async ({
+    mode,
+    settingsOverrides,
+  }: {
+    mode: any;
+    settingsOverrides?: any;
+  }) => {
+    if (!pipelineRerunState) return;
+    const pageIds = pipelineRerunState.images.map((img) => img.id);
+    const serverBatch = await rerunPipeline({
+      pageIds: pipelineRerunState.groupId ? undefined : pageIds,
+      groupId: pipelineRerunState.groupId,
+      mode,
+      settingsOverrides,
+    });
     setTranslationBatches((prev) => [
       toTranslationBatch(serverBatch),
       ...prev.filter((batch) => batch.id !== serverBatch.id),
     ]);
-  }, []);
+  }, [pipelineRerunState]);
+
+  const rerenderImages = useCallback(async (images: FinishedImage[]) => {
+    handleOpenPipelineRerun(images);
+  }, [handleOpenPipelineRerun]);
+
 
   const handleCloseJobs = useCallback(() => setIsJobsOpen(false), []);
 
@@ -2546,6 +2573,7 @@ export const App: React.FC = () => {
                 detectionResolution={detectionResolution}
                 textDetector={textDetector}
                 ocr={ocr}
+                renderFont={renderFont}
                 renderTextDirection={renderTextDirection}
                 letterCase={letterCase}
                 translator={translator}
@@ -2572,6 +2600,7 @@ export const App: React.FC = () => {
                 setDetectionResolution={setDetectionResolution}
                 setTextDetector={setTextDetector}
                 setOcr={setOcr}
+                setRenderFont={setRenderFont}
                 setRenderTextDirection={setRenderTextDirection}
                 setLetterCase={setLetterCase}
                 setTranslator={setTranslator}
@@ -2622,6 +2651,10 @@ export const App: React.FC = () => {
                 onSelectAll={selectAllFiles}
                 onDeselectAll={deselectAllFiles}
                 onOpenLightbox={handleOpenLightbox}
+                onOpenInPipelineLab={(targetFile) => {
+                  setPipelineLabInitialFile(targetFile);
+                  navigate("/pipeline");
+                }}
                 excludedColorFiles={excludedColorFiles}
                 autoDetectedColorFiles={autoDetectedColorFiles}
                 onToggleExcludeColor={toggleExcludeColorFile}
@@ -2691,11 +2724,6 @@ export const App: React.FC = () => {
               onReorderMangaPages={reorderMangaPages}
               onUpdateImage={updateFinishedImage}
               onUpdateMangaTitle={handleUpdateMangaTitle}
-              selectedImageForModal={selectedImageForModal}
-              onCloseExternalModal={() => {
-                setSelectedImageForModal(null);
-                setSelectedImageRetry(null);
-              }}
               onOpenPageView={handleOpenPageView}
               onOpenPageEdit={handleOpenPageEdit}
               onRetryImage={retryFinishedImage}
@@ -2737,7 +2765,7 @@ export const App: React.FC = () => {
         {activeView === "search" && <React.Suspense fallback={<p role="status">Loading Search Lab…</p>}><SearchLab /></React.Suspense>}
         {activeView === "pipeline" && (
           <div className="space-y-6">
-            <PipelineLab showHeader={false} />
+            <PipelineLab showHeader={false} initialFile={pipelineLabInitialFile} />
           </div>
         )}
       </main>
@@ -2792,12 +2820,23 @@ export const App: React.FC = () => {
           image={selectedImageForModal}
           onClose={closeStudioViewer}
           onRetry={selectedImageRetry ?? (selectedImageForModal.folder ? retryFinishedImage : undefined)}
-          onRerender={selectedImageForModal.folder ? (image) => rerenderImages([image]) : undefined}
+          onRerender={selectedImageForModal.folder ? (image) => handleOpenPipelineRerun([image], selectedImageForModal.groupId ?? undefined, selectedImageForModal.mangaTitle) : undefined}
           titlePrefix="Studio preview"
+        />
+      )}
+
+      {pipelineRerunState && (
+        <PipelineRerunDialog
+          images={pipelineRerunState.images}
+          groupId={pipelineRerunState.groupId}
+          mangaTitle={pipelineRerunState.mangaTitle}
+          onClose={() => setPipelineRerunState(null)}
+          onSubmit={handleExecutePipelineRerun}
         />
       )}
     </div>
   );
 };
+
 
 export default App;

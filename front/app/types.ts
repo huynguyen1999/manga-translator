@@ -9,6 +9,7 @@ export type StatusKey =
   | "inpainting"
   | "upscaling"
   | "translating"
+  | "translation_remap"
   | "rendering"
   | "skip-no-regions"
   | "finished"
@@ -159,7 +160,13 @@ export type TranslationBatchStatus =
   | "completed"
   | "error";
 
-export type TranslationBatchKind = "translation" | "manga-upload" | "rerender";
+export type TranslationBatchKind = "translation" | "manga-upload" | "rerender" | "pipeline-rerun";
+
+export type PipelineRerunMode =
+  | "full"
+  | "typesetting"
+  | "translation_typesetting"
+  | "reprocess_text";
 
 export interface MangaGroupSelection {
   title: string;

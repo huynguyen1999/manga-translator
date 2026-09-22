@@ -1,11 +1,20 @@
 # Current state
 
-Last reviewed: 2026-09-22
+Last reviewed: 2026-09-23
+
+## Active feature — preset-based pipeline rerun and translation remapping
+- Unified partial and full rerun execution into `server/pipeline_rerun.py` (`PipelineRerunMode`: `full`, `typesetting`, `translation_typesetting`, `reprocess_text`) and `server/batch_scheduler.py` (`_process_pipeline_rerun_item`).
+- Executes only selected canonical stages (`_run_detection`, `_run_ocr`, `_run_textline_merge`, `_detect_speech_bubbles`, `build_inpaint_masks`, `_run_inpainting`, `_run_text_translation`, `_run_text_rendering`) without creating duplicate pipeline runners.
+- Reprocess Text mode preserves user-edited or AI translations across detector and OCR changes using geometry-first translation remapping (`manga_translator/pipeline/translation_remap.py`).
+- Intermediate outputs stage in an isolated workspace directory (`.rerun/<job_id>`) and commit atomically upon successful execution, leaving live results untouched on failures.
+- Web Studio UI exposes `PipelineRerunDialog` with preset cards, collapsible step breakdowns, and context-relevant parameter overrides.
 
 ## Active feature — unified canonical layout, mask, and rendering pipeline
 
 - Studio (`MangaTranslator`, `batch_scheduler.py`) and devscripts (`pipeline_step_runner.py`) are unified into a single canonical pipeline.
-- Mask generation is unified into `manga_translator/mask_builder.py` (`MaskBundle`, `build_inpaint_masks`), computing identical detector cleanup, text, bubble, and inpaint masks across both batch studio jobs and CLI runner captures.
+- Mask generation is unified into `manga_translator/mask_builder.py` (`MaskBundle`, `MaskMetrics`, `build_inpaint_masks`, `recover_bubble_residual_text`, `create_mask_sources_overlay`), computing identical detector rescue, text, bubble residual, and inpaint masks across both batch studio jobs and CLI runner captures.
+- Residual text recovery inside speech bubbles (`recover_bubble_residual_text`) uses dual global & adaptive Gaussian thresholding, safe bubble interior erosion, orientation-aware text envelopes, and connected-component filtering to completely erase OCR-missed characters/punctuation (e.g. trailing `!?`, kana fragments, gray antialiased glyphs) while strictly protecting bubble outer borders (`final_mask ∩ protected_bubble_edge == ∅`).
+- Mask diagnostic artifacts (`mask_raw.png`, `text_mask.png`, `detector_rescue_mask.png`, `bubble_residual_mask.png`, `protected_bubble_edge.png`, `inpaint_mask.png`, `mask_final.png`, `mask_sources_overlay.png`) are persisted across Studio debug outputs and devscripts capture step data.
 - Speech bubble detections are serialized and persisted to `bubble_detections.json` during batch preparation and reloaded during translation/rendering, eliminating duplicate YOLO inference passes.
 - Studio stage serialization (`serialize_regions` and `deserialize_textblocks`) losslessly preserves `source_font_size`, `calibrated_font_size`, `placement_mode`, `source_region_ids`, `source_regions`, and `bubble_safe_shape`.
 - Text rendering is unified into the canonical `render_page()` function in `manga_translator/rendering/__init__.py`, guaranteeing bit-level pixel and geometry parity between Web Studio translations and devscripts fast renders.
@@ -52,6 +61,7 @@ Manga Image Translator translates text in manga and other images through a pipel
 - Raw text detection bounding boxes (`detection.json`) and OCR textlines (`ocr.json`) are persisted immediately to disk and database storage upon stage completion, guaranteeing access to raw segmentation data prior to any downstream bubble grouping or translation filtering.
 - The page-detail and preview image components display detector polygon outlines color-coded by confidence tier (emerald $\ge 85\%$, amber $65\%-84\%$, rose $< 65\%$) with interactive hover highlights and floating tooltips showing exact confidence percentages (e.g. `#4 · 94% · high`), eliminating visual clutter on multi-line Japanese text.
 - The web studio exposes OCR model selection and OCR Minimum Confidence threshold (`customOcrProb` / `ocrMinConfidence`), mapped to `OcrConfig.prob` and persisted across settings, batch jobs, pipeline lab, and pipeline manifest metadata.
+- Backend OCR defaults use the registered `48px_ctc` model; alternate OCR models remain selectable through the enum and shared web options.
 - Manga OCR (`mocr`, `kha-white/manga-ocr-base`) downloads complete model assets directly into `./models/ocr/` and loads offline from that directory when present; `docker_prepare.py` supports preparing `mocr` via `--models ocr.mocr` (or `mocr`).
 - Result metadata (`meta.json` and `pipeline_manifest.json`) captures comprehensive pipeline step parameters (detector, resolution, box threshold, unclip ratio, OCR model, OCR min confidence, bubble detection settings, inpainting parameters, rendering configurations, colorizer, and upscaler); the web studio `PageDetailModal` displays these in a tabbed resizable sidebar with four tabs — Pipeline Timing (started/ended/duration + per-stage breakdown), Professional Localization, Story Analysis, and Step Settings (translation details + all step parameters). The sidebar defaults to 480 px wide and is drag-resizable from its left edge (280–700 px range).
 - The web studio reacts to batch SSE events by refreshing active and completed batch item details in the background, ensuring completed page results, folders, and thumbnails are immediately clickable and viewable in the studio without page refresh.

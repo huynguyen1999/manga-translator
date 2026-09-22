@@ -95,6 +95,7 @@ def serialize_regions(regions) -> list[dict[str, Any]]:
             "calibrated_font_size", "angle", "direction", "alignment", "target_lang", "source_lang",
             "bubble_bounds", "layout_bounds", "layout_segments", "review_required", "review_reason",
             "placement_mode", "line_spacing", "letter_spacing", "font_family", "bold", "italic",
+            "provenance",
         ):
             value = getattr(region, key, None)
             if value is None and key == "confidence":
@@ -155,6 +156,9 @@ def serialize_editor_regions(regions) -> list[dict[str, Any]]:
             "bubble_safe_shape": encode_safe_shape(getattr(region, "_bubble_interior", None)),
             "review_required": bool(getattr(region, "review_required", False)),
             "review_reason": getattr(region, "review_reason", None),
+            "provenance": getattr(region, "provenance", None),
+            "translation_remap": getattr(region, "translation_remap", None),
+            "translation_source": getattr(region, "translation_source", None),
         })
     return result
 

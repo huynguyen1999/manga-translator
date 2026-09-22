@@ -52,8 +52,6 @@ interface ResultGalleryProps {
   onReorderMangaPages?: (groupId: string, pageIds: string[]) => Promise<void>;
   onUpdateImage?: (image: FinishedImage) => void;
   onUpdateMangaTitle?: (pageIds: string[], newMangaTitle: string, oldMangaTitle?: string, groupId?: string, folders?: string[]) => void;
-  selectedImageForModal?: FinishedImage | null;
-  onCloseExternalModal?: () => void;
   onOpenPageView?: (folder: string) => void;
   onOpenPageEdit?: (folder: string) => void;
   onRetryImage?: (image: FinishedImage) => void | Promise<void>;
@@ -694,7 +692,7 @@ const GalleryCardComponent: React.FC<GalleryCardProps> = ({
                       className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 min-h-[44px] transition-colors data-focus:bg-indigo-600 data-focus:text-white text-zinc-200 hover:bg-zinc-800"
                     >
                       <Icon icon="carbon:reset" className="w-4 h-4 text-indigo-400" />
-                      <span>Rerun layout &amp; render</span>
+                      <span>Rerun pipeline…</span>
                     </button>
                   </MenuItem>
                 )}
@@ -1257,8 +1255,6 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
   onReorderMangaPages,
   onUpdateImage,
   onUpdateMangaTitle,
-  selectedImageForModal = null,
-  onCloseExternalModal,
   onOpenPageView,
   onOpenPageEdit,
   onRetryImage,
@@ -1583,15 +1579,6 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
       document.body.style.overflow = previousOverflow;
     };
   }, [Boolean(summaryState)]);
-
-  // Sync external modal requests
-  useEffect(() => {
-    if (selectedImageForModal) {
-      setSelectedImage(selectedImageForModal);
-      setIsModalOpen(true);
-      setZoomLevel(1);
-    }
-  }, [selectedImageForModal]);
 
 
   // Fetch groups summary if not provided by parent
@@ -2545,15 +2532,13 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
     setZoomLevel(1);
     if (onCloseOverlay) {
       onCloseOverlay();
-    } else if (onCloseExternalModal) {
-      onCloseExternalModal();
     }
   };
 
   // Sync route-owned initialPageViewFolder deep link
   useEffect(() => {
     if (!initialPageViewFolder) {
-      if (isModalOpen && !selectedImageForModal) {
+      if (isModalOpen) {
         setIsModalOpen(false);
         setSelectedImage(null);
       }
@@ -3991,10 +3976,10 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
                     type="button"
                     onClick={() => requestRerender(currentSingleGroup.images)}
                     className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-200 bg-white px-3 text-xs font-semibold text-indigo-700 transition-colors hover:bg-indigo-50 dark:border-indigo-800 dark:bg-zinc-800 dark:text-indigo-300 dark:hover:bg-indigo-950/50 cursor-pointer"
-                    title="Rerun layout and render for translated pages in this manga"
+                    title="Rerun pipeline stages for translated pages in this manga"
                   >
                     <Icon icon="carbon:reset" className="h-4 w-4" />
-                    <span>Rerun layout</span>
+                    <span>Rerun pipeline…</span>
                   </button>
                 )}
 
@@ -4165,7 +4150,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
                     className="flex items-center space-x-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-indigo-500 transition-colors cursor-pointer"
                   >
                     <Icon icon="carbon:reset" className="w-4 h-4" />
-                    <span>Rerun layout</span>
+                    <span>Rerun pipeline…</span>
                   </button>
                 )}
                 <button
@@ -4405,7 +4390,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
                         className="flex items-center space-x-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-indigo-500 transition-colors cursor-pointer"
                       >
                         <Icon icon="carbon:reset" className="w-4 h-4" />
-                        <span>Rerun layout</span>
+                        <span>Rerun pipeline…</span>
                       </button>
                     )}
                     <button

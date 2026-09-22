@@ -2596,7 +2596,7 @@ class PostgresBatchStore(BatchStore):
         batch_dir = self._batch_dir(batch_id)
         if batch_dir.exists():
             raise BatchConflict(f"Batch {batch_id} already exists but is not indexed")
-        expected = set() if normalized.get("kind") == "rerender" else {
+        expected = set() if normalized.get("kind") in {"rerender", "pipeline-rerun"} else {
             item["id"] for item in normalized["items"] if item["status"] != "completed"
         }
         if set(files) != expected:
@@ -2615,7 +2615,7 @@ class PostgresBatchStore(BatchStore):
             for item in normalized["items"]:
                 if item["status"] == "completed":
                     continue
-                if normalized.get("kind") == "rerender":
+                if normalized.get("kind") in {"rerender", "pipeline-rerun"}:
                     continue
                 filename, content = files[item["id"]]
                 if not isinstance(filename, str) or Path(filename).name != filename:

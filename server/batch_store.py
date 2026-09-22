@@ -35,7 +35,7 @@ class InvalidBatch(BatchStoreError):
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ITEM_STATUSES = {"queued", "processing", "completed", "error"}
 _BATCH_STATUSES = {"waiting", "processing", "paused", "completed", "error", "stopping"}
-_BATCH_KINDS = {"translation", "manga-upload", "rerender"}
+_BATCH_KINDS = {"translation", "manga-upload", "rerender", "pipeline-rerun"}
 
 
 def _safe_id(value: Any, label: str) -> str:
@@ -480,7 +480,7 @@ class BatchStore:
                 return self._to_dto(existing)
             raise BatchConflict(f"Batch {batch_id} already exists with different data")
 
-        expected = set() if normalized.get("kind") == "rerender" else {
+        expected = set() if normalized.get("kind") in {"rerender", "pipeline-rerun"} else {
             item["id"] for item in normalized["items"] if item["status"] != "completed"
         }
         if set(files) != expected:
@@ -503,7 +503,7 @@ class BatchStore:
             for item in normalized["items"]:
                 if item["status"] == "completed":
                     continue
-                if normalized.get("kind") == "rerender":
+                if normalized.get("kind") in {"rerender", "pipeline-rerun"}:
                     continue
                 filename, content = files[item["id"]]
                 if not isinstance(filename, str) or Path(filename).name != filename:

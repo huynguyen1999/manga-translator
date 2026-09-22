@@ -1,6 +1,6 @@
 import unittest
 
-from manga_translator.config import Config, Detector, Translator, TranslatorChain
+from manga_translator.config import Config, Detector, Ocr, OcrConfig, Translator, TranslatorChain
 
 
 class TestConfig(unittest.TestCase):
@@ -50,6 +50,9 @@ class TestConfig(unittest.TestCase):
         config_none = Config.model_validate({"ocr": {}})
         self.assertIsNone(config_none.ocr.prob)
 
+    def test_ocr_default_is_48px_ctc(self):
+        self.assertEqual(OcrConfig().ocr, Ocr.ocr48px_ctc)
+
     def test_render_case_config_and_transformation(self):
         from manga_translator.config import RenderConfig
 
@@ -92,4 +95,3 @@ class TestConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

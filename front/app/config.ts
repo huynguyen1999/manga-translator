@@ -79,6 +79,17 @@ export const upscaleRatioOptions = [
   { value: "4", label: "4x" },
 ];
 
+export const fontOptions = [
+  { value: "wildwords", label: "Wild Words (Default Manga Lettering)" },
+  { value: "anime_ace", label: "Anime Ace" },
+  { value: "anime_ace_3", label: "Anime Ace 3" },
+  { value: "comic_shanns", label: "Comic Shanns" },
+  { value: "arial_unicode", label: "Arial Unicode (CJK Multilingual)" },
+  { value: "noto_sans", label: "Noto Sans CJK" },
+  { value: "msgothic", label: "MS Gothic (Japanese)" },
+  { value: "msyh", label: "MS YaHei (Chinese)" },
+];
+
 export const imageMimeTypes = [
   "image/png",
   "image/jpeg",

@@ -2,6 +2,34 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-23 — Duplicate PageDetailModal mounted on unfinished batch image click
+
+- Symptom: Clicking the close ('X') button on an unfinished batch item's detail view did not close the view on the first click; it required clicking 'X' a second time.
+- Root cause: When `handleOpenLightbox` set `selectedImageForModal` in `App.tsx`, both `App.tsx` and `ResultGallery.tsx` rendered duplicate `PageDetailModal` instances directly on top of each other because `ResultGallery` had an effect syncing `selectedImageForModal` into its own internal modal state (`isModalOpen = true`). Clicking 'X' on the top modal unmounted `App.tsx`'s modal, exposing `ResultGallery`'s duplicate modal underneath which required a second click to close.
+- Fix: Removed external modal syncing props (`selectedImageForModal`, `onCloseExternalModal`) from `ResultGallery`, keeping standalone in-flight / unfinished preview modals managed exclusively by `App.tsx` and gallery page modals managed by `ResultGallery`.
+- Prevention: Modal state should have a single source of truth; never duplicate modal components across parent and child components for the same data trigger.
+
+## 2026-09-23 — Pipeline rerun prerequisite check rejected database-backed pages
+
+- Symptom: Reprocess-text / rerun failed with `No eligible pages found for reprocess_text rerun. Previous translations are required to preserve and remap text` even though pages had active translations.
+- Root cause: `validate_rerun_prerequisites` only checked for physical `.json` files on disk (`translations.json`, `text_regions.json`), ignoring database-backed pages where text regions and translations are stored in PostgreSQL (`pages.text_regions` / `result_documents`).
+- Fix: Updated `validate_rerun_prerequisites` and `load_rerun_context` to accept `database` and `record` parameters, recognize database/record text region availability flags, and allow reprocess-text to run whenever a base canvas is present (handling empty initial translations naturally).
+- Prevention: Never assume result sidecars only exist as flat files on disk; always inspect database-backed models and page metadata alongside filesystem assets.
+
+## 2026-09-23 — Rerun OCR override omitted CTC and sent an unsupported value
+
+- Symptom: The rerun OCR selector had no `48px_ctc` option and could submit `offline`, which is not a valid `Ocr` value; backend paths also defaulted to `48px`.
+- Root cause: The selector duplicated OCR choices instead of using the shared option list, and backend fallbacks were hardcoded independently from the registered CTC model.
+- Fix: Use shared OCR options with `48px_ctc` selected by default and switch backend fallbacks to `Ocr.ocr48px_ctc.value`.
+- Prevention: Derive user-facing OCR choices and Python fallbacks from the canonical enum/options whenever adding a model.
+
+## 2026-09-23 — Pipeline capture pre-warmed the wrong detector
+
+- Symptom: `pipeline_step_runner.py capture` failed before processing an image with `AttributeError: 'Detector' object has no attribute 'model'`.
+- Root cause: The runner passed the text-detector enum to speech-bubble `prepare()`, which expects `BubbleDetectionConfig` and reads `.model`.
+- Fix: Restored the text-detector pre-warm call to `manga_translator.detection.prepare()` and added a focused regression test covering both pre-warm calls.
+- Prevention: Keep text detection and bubble detection imports/calls distinct in runner setup code.
+
 ## 2026-09-22 — Discrepancy between Web Studio and CLI runner in bubble typesetting and overflow
 
 - Symptom: Web Studio rendered speech bubbles with text overflowing the bubble boundary (e.g. "THE MEAT IS DELICIOUS!") and aggressive hyphenation ("DELI-CIOUS"), while the CLI runner produced a clean, smaller font size with zero overflow and zero hyphenation on identical inputs.

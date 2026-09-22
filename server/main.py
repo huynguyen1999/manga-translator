@@ -1433,20 +1433,35 @@ class SaveEditsRequest(BaseModel):
     final_image_base64: str | None = None
 
 
+class PipelineRerunRequest(BaseModel):
+    pageIds: list[str] = Field(default_factory=list, max_length=MAX_BATCH_ITEMS)
+    groupId: str | None = Field(default=None, max_length=MAX_MANGA_TITLE_LENGTH)
+    mode: str = Field(default="typesetting")
+    settingsOverrides: dict[str, Any] = Field(default_factory=dict)
+
+
 class RerenderRequest(BaseModel):
     pageIds: list[str] = Field(default_factory=list, max_length=MAX_BATCH_ITEMS)
     groupId: str | None = Field(default=None, max_length=MAX_MANGA_TITLE_LENGTH)
+    settingsOverrides: dict[str, Any] = Field(default_factory=dict)
 
 
-@app.post("/results/rerender", tags=["api", "batches"])
-@app.post("/api/results/rerender", tags=["api", "batches"])
-async def rerender_results(data: RerenderRequest):
+@app.post("/results/rerun", tags=["api", "batches"])
+@app.post("/api/results/rerun", tags=["api", "batches"])
+async def rerun_pipeline(data: PipelineRerunRequest):
+    from server.pipeline_rerun import PipelineRerunMode, resolve_rerun_plan, validate_rerun_prerequisites
+
     if not data.pageIds and not data.groupId:
         raise HTTPException(400, detail="pageIds or groupId is required")
     if data.pageIds and data.groupId:
         raise HTTPException(400, detail="Choose pageIds or groupId, not both")
     if len(set(data.pageIds)) != len(data.pageIds):
         raise HTTPException(400, detail="pageIds must be unique")
+
+    try:
+        plan = resolve_rerun_plan(data.mode)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
 
     store = _postgres()
     records: list[dict[str, Any]]
@@ -1529,12 +1544,33 @@ async def rerender_results(data: RerenderRequest):
                     "groupId": item.get("groupId"),
                 })
 
-    records = [record for record in records if record.get("sourceType") != "original"]
-    if not records:
-        raise HTTPException(400, detail="No translated pages were selected")
+    # Validate prerequisites for each page
+    eligible_records = []
+    ineligible = []
+    for record in records:
+        folder = record.get("folder")
+        if not folder:
+            ineligible.append({"pageId": record["id"], "reason": "No folder"})
+            continue
+        result_dir = (RESULT_ROOT / folder).resolve()
+        if not result_dir.is_dir() and (LEGACY_RESULT_ROOT / folder).is_dir():
+            result_dir = (LEGACY_RESULT_ROOT / folder).resolve()
+        valid, reason = validate_rerun_prerequisites(result_dir, plan.mode, database=store, record=record)
+        if valid:
+            eligible_records.append(record)
+        else:
+            ineligible.append({"pageId": record["id"], "reason": reason})
 
-    batch_id = f"rerender-{secrets.token_hex(8)}"
-    title = str(records[0].get("mangaTitle") or "Ungrouped")
+    if not eligible_records:
+        raise HTTPException(
+            400,
+            detail=f"No eligible pages found for {plan.mode.value} rerun. {ineligible[0]['reason'] if ineligible else ''}".strip(),
+        )
+
+    batch_id = f"rerun-{secrets.token_hex(8)}"
+    title = str(eligible_records[0].get("mangaTitle") or "Ungrouped")
+    initial_stage = "detection" if plan.mode in {PipelineRerunMode.FULL, PipelineRerunMode.REPROCESS_TEXT} else "translating" if plan.mode == PipelineRerunMode.TRANSLATION_TYPESETTING else "rendering"
+
     items = [
         {
             "id": f"page-{index}-{secrets.token_hex(4)}",
@@ -1544,19 +1580,21 @@ async def rerender_results(data: RerenderRequest):
             "pageId": record["id"],
             "pageOrder": record.get("pageOrder"),
             "resultFolder": record["folder"],
-            "settings": record.get("settings") or {},
+            "rerunMode": plan.mode.value,
+            "settings": {**(record.get("settings") or {}), **data.settingsOverrides},
             "status": "queued",
-            "stage": "rendering",
+            "stage": initial_stage,
         }
-        for index, record in enumerate(records)
+        for index, record in enumerate(eligible_records)
     ]
     manifest = {
         "id": batch_id,
-        "kind": "rerender",
+        "kind": "pipeline-rerun",
+        "rerunMode": plan.mode.value,
         "title": title,
         "mangaTitle": title,
-        "mangaGroupId": records[0].get("groupId"),
-        "settings": {},
+        "mangaGroupId": eligible_records[0].get("groupId"),
+        "settings": data.settingsOverrides or {},
         "status": "waiting",
         "items": items,
         "totalItems": len(items),
@@ -1567,6 +1605,21 @@ async def rerender_results(data: RerenderRequest):
         return result
     except Exception as error:
         raise _batch_http_error(error) from error
+
+
+@app.post("/results/rerender", tags=["api", "batches"])
+@app.post("/api/results/rerender", tags=["api", "batches"])
+async def rerender_results(data: RerenderRequest):
+    # Backward compatibility alias for typesetting rerun
+    return await rerun_pipeline(
+        PipelineRerunRequest(
+            pageIds=data.pageIds,
+            groupId=data.groupId,
+            mode="typesetting",
+            settingsOverrides=data.settingsOverrides,
+        )
+    )
+
 
 
 class LayoutSegmentRequest(BaseModel):
@@ -3155,7 +3208,7 @@ def _ocr_config(page: dict, target_language: str) -> Config:
         {item.value for item in Detector},
         Detector.default.value,
     )
-    ocr = _safe_setting(settings.get("ocr"), {item.value for item in Ocr}, Ocr.ocr48px.value)
+    ocr = _safe_setting(settings.get("ocr"), {item.value for item in Ocr}, Ocr.ocr48px_ctc.value)
     try:
         detection_size = max(256, min(8192, int(settings.get("detectionResolution", 2560))))
     except (TypeError, ValueError):

@@ -1,4 +1,5 @@
 import type {
+  PipelineRerunMode,
   QueuedImage,
   TranslationBatch,
   TranslationBatchKind,
@@ -58,8 +59,15 @@ export interface ServerBatch extends ServerBatchSummary {
   items: ServerBatchItem[];
 }
 
+export interface PipelineRerunRequest {
+  pageIds?: string[];
+  groupId?: string;
+  mode: PipelineRerunMode;
+  settingsOverrides?: Partial<TranslationSettings>;
+}
+
 export const getBatchKind = (batch: { id: string; kind?: TranslationBatchKind | null }): TranslationBatchKind =>
-  batch.kind ?? (batch.id.startsWith("upload-") || batch.id.startsWith("original-") ? "manga-upload" : "translation");
+  batch.kind ?? (batch.id.startsWith("upload-") || batch.id.startsWith("original-") ? "manga-upload" : batch.id.startsWith("rerun-") || batch.id.startsWith("rerender-") ? "pipeline-rerun" : "translation");
 
 export const formatStage = (step?: string): string => {
   if (!step) return "Starting";
@@ -88,6 +96,8 @@ export const formatStage = (step?: string): string => {
       return "Inpainting";
     case "translating":
       return "Translating with AI";
+    case "translation_remap":
+      return "Remapping translations";
     case "analyzing-story":
       return "Analyzing story";
     case "after-translating":
@@ -198,18 +208,28 @@ export const fetchServerBatch = async (batchId: string): Promise<ServerBatch> =>
   return (await response.json()) as ServerBatch;
 };
 
-export const rerenderPages = async (pageIds: string[]): Promise<ServerBatch> => {
-  const response = await fetch(apiUrl("/api/results/rerender"), {
+export const rerunPipeline = async ({
+  pageIds,
+  groupId,
+  mode,
+  settingsOverrides,
+}: PipelineRerunRequest): Promise<ServerBatch> => {
+  const response = await fetch(apiUrl("/api/results/rerun"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pageIds }),
+    body: JSON.stringify({ pageIds, groupId, mode, settingsOverrides }),
   });
   if (!response.ok) {
-    const detail = await response.json().catch(() => null) as { detail?: string } | null;
-    throw new Error(detail?.detail || `Could not queue rerender (${response.status})`);
+    const detail = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(detail?.detail || `Could not queue pipeline rerun (${response.status})`);
   }
   return (await response.json()) as ServerBatch;
 };
+
+export const rerenderPages = async (pageIds: string[]): Promise<ServerBatch> => {
+  return rerunPipeline({ pageIds, mode: "typesetting" });
+};
+
 
 export const subscribeServerBatches = (
   onBatches: (batches: ServerBatchSummary[]) => void,

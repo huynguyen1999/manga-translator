@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -57,12 +58,33 @@ from devscripts.pipeline_step_runner import (
     GAP_UNEXPLAINED,
 )
 from manga_translator.detection.bubble import BubbleDetection
-from manga_translator.config import Config, Renderer
+from manga_translator.config import Config, Detector, Renderer
 from manga_translator.rendering import get_default_eng_font, text_render
 from manga_translator.utils import Context, Quadrilateral, TextBlock
 
 
 class PipelineStepRunnerTests(unittest.TestCase):
+    def test_capture_prewarms_text_and_bubble_detectors_separately(self):
+        from devscripts import pipeline_step_runner as runner
+
+        config = Config()
+        with TemporaryDirectory() as tmp_dir, \
+                patch.object(runner, "MangaTranslator") as translator_cls, \
+                patch.object(runner, "prepare_detection", new_callable=AsyncMock) as prepare_detection, \
+                patch.object(runner, "prepare_ocr", new_callable=AsyncMock), \
+                patch.object(runner, "prepare_bubble_detection", new_callable=AsyncMock) as prepare_bubble, \
+                patch.object(runner, "prepare_inpainting", new_callable=AsyncMock), \
+                patch.object(runner, "prepare_translation", new_callable=AsyncMock):
+            translator_cls.return_value.device = "cpu"
+
+            self.assertEqual(
+                asyncio.run(runner.execute_capture([], Path(tmp_dir), config)),
+                [],
+            )
+
+        prepare_detection.assert_awaited_once_with(Detector.default)
+        prepare_bubble.assert_awaited_once_with(config.bubble_detection, "cpu")
+
     def test_joint_layout_caps_large_cartesian_candidate_search(self):
         plans = [
             _RegionLayoutPlan(region=object(), candidates=[object()] * 8)

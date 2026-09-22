@@ -71,10 +71,11 @@ from manga_translator.config import (
     Renderer,
     Translator,
 )
+from manga_translator.detection import prepare as prepare_detection
 from manga_translator.detection.bubble import BubbleDetection, prepare as prepare_bubble_detection, serialize_bubble_detections, deserialize_bubble_detections
 from manga_translator.inpainting import prepare as prepare_inpainting
 from manga_translator.manga_translator import MangaTranslator
-from manga_translator.mask_builder import build_inpaint_masks
+from manga_translator.mask_builder import build_inpaint_masks, create_mask_sources_overlay
 from manga_translator.ocr import prepare as prepare_ocr
 from manga_translator.translators import prepare as prepare_translation
 from manga_translator.rendering import (
@@ -897,11 +898,29 @@ def save_step_data(
         cv2.imwrite(str(sample_dir / "bubble_mask.png"), ctx.bubble_mask)
     if getattr(ctx, "mask_raw", None) is not None:
         cv2.imwrite(str(sample_dir / "mask_raw.png"), ctx.mask_raw)
+    detector_rescue = getattr(ctx, "detector_rescue_mask", None)
+    if detector_rescue is not None:
+        cv2.imwrite(str(sample_dir / "detector_rescue_mask.png"), detector_rescue)
+    bubble_residual = getattr(ctx, "bubble_residual_mask", None)
+    if bubble_residual is not None:
+        cv2.imwrite(str(sample_dir / "bubble_residual_mask.png"), bubble_residual)
+    protected_edge = getattr(ctx, "protected_edge_mask", None)
+    if protected_edge is not None:
+        cv2.imwrite(str(sample_dir / "protected_bubble_edge.png"), protected_edge)
     inpaint_mask = getattr(ctx, "inpaint_mask", None)
     if inpaint_mask is None:
         inpaint_mask = getattr(ctx, "mask", None)
     if inpaint_mask is not None:
         cv2.imwrite(str(sample_dir / "inpaint_mask.png"), inpaint_mask)
+
+    # Save mask sources overlay image
+    bundle = getattr(ctx, "mask_bundle", None)
+    if bundle is not None and ctx.img_rgb is not None:
+        try:
+            overlay = create_mask_sources_overlay(ctx.img_rgb, bundle)
+            cv2.imwrite(str(sample_dir / "mask_sources_overlay.png"), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+        except Exception as e:
+            logger.warning(f"Could not save mask_sources_overlay.png: {e}")
 
     # 5. Save human-readable text regions & OCR documents
     regions_json = serialize_text_regions_to_dict(ctx.text_regions or [])
@@ -1816,6 +1835,10 @@ async def _capture_single_image(
             )
             ctx.text_mask = bundle.text_mask
             ctx.bubble_mask = bundle.bubble_cleanup_mask
+            ctx.detector_rescue_mask = bundle.detector_rescue_mask
+            ctx.bubble_residual_mask = bundle.bubble_residual_mask
+            ctx.protected_edge_mask = bundle.protected_edge_mask
+            ctx.mask_bundle = bundle
             ctx.mask = bundle.final_inpaint_mask
             ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
 
@@ -2955,7 +2978,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cap.add_argument("--box-threshold", type=float, default=0.5, help="Threshold for bbox generation.")
     p_cap.add_argument("--unclip-ratio", type=float, default=2.3, help="How much to extend text skeleton to form bounding box.")
     p_cap.add_argument("--text-threshold", type=float, default=0.5, help="Threshold for text detection.")
-    p_cap.add_argument("--ocr", default="48px", help="OCR model (48px, 48px_ctc, mocr, 32px).")
+    p_cap.add_argument("--ocr", default="48px_ctc", help="OCR model (48px, 48px_ctc, mocr, 32px).")
     p_cap.add_argument("--ocr-min-confidence", "--ocr-prob", dest="ocr_prob", type=float, default=None, help="OCR minimum confidence threshold.")
     p_cap.add_argument("--inpainter", default="default", help="Inpainting model (default/aot, lama, none).")
     p_cap.add_argument("--inpainting-size", type=int, default=2048, help="Resolution for inpainting.")

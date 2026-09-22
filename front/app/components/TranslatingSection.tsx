@@ -389,8 +389,10 @@ export const BatchCard: React.FC<{
   const progress = batch.totalItems ? Math.round((completed / batch.totalItems) * 100) : 100;
   const isFinishedSummary = batch.status === "completed" && failed === 0;
   const batchKind = getBatchKind(batch);
-  const canChangeTranslator = batchKind !== "rerender" && canChangeBatchTranslator(batch);
-  const batchKindLabel = batchKind === "manga-upload" ? "Manga upload" : batchKind === "rerender" ? "Layout rerender" : "Translation";
+  const canChangeTranslator = batchKind !== "rerender" && batchKind !== "pipeline-rerun" && canChangeBatchTranslator(batch);
+  const rerunMode = (batch as any).rerunMode || ((batch as any).items?.[0] as any)?.rerunMode;
+  const rerunModeLabel = rerunMode === "full" ? "Full" : rerunMode === "translation_typesetting" ? "Retranslation" : rerunMode === "reprocess_text" ? "Reprocess text" : "Typesetting";
+  const batchKindLabel = batchKind === "manga-upload" ? "Manga upload" : batchKind === "rerender" ? "Layout rerender" : batchKind === "pipeline-rerun" ? `Pipeline rerun · ${rerunModeLabel}` : "Translation";
 
   useEffect(() => {
     setTitleInput(batch.mangaTitle);
@@ -564,11 +566,11 @@ export const BatchCard: React.FC<{
         <div className="flex min-w-0 flex-wrap items-center gap-2 pl-6 text-xs">
           <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 font-semibold ${batchKind === "manga-upload"
             ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300"
-            : batchKind === "rerender"
+            : batchKind === "rerender" || batchKind === "pipeline-rerun"
             ? "bg-violet-50 text-violet-700 dark:bg-violet-950/60 dark:text-violet-300"
             : "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300"
           }`} title={`${batchKindLabel} batch`}>
-            <Icon icon={batchKind === "manga-upload" ? "carbon:cloud-upload" : batchKind === "rerender" ? "carbon:reset" : "carbon:translate"} className="h-3 w-3" aria-hidden="true" />
+            <Icon icon={batchKind === "manga-upload" ? "carbon:cloud-upload" : batchKind === "rerender" || batchKind === "pipeline-rerun" ? "carbon:reset" : "carbon:translate"} className="h-3 w-3" aria-hidden="true" />
             {batchKindLabel}
           </span>
           <span className="shrink-0 text-zinc-500 dark:text-zinc-400">
@@ -595,7 +597,8 @@ export const BatchCard: React.FC<{
               </select>
             </label>
           )}
-          {batch.status !== "completed" && !isUploading && batchKind !== "rerender" && (
+          {batch.status !== "completed" && !isUploading && batchKind !== "rerender" && batchKind !== "pipeline-rerun" && (
+
             <label className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
               <input
                 type="checkbox"

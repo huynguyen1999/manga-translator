@@ -6,17 +6,17 @@ import asyncio
 import json
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from PIL import Image
 
-from manga_translator import Config
-from manga_translator.config import PipelineLabConfig
 from manga_translator import Config, Context
-from manga_translator.config import PipelineLabConfig
+from manga_translator.config import Ocr, PipelineLabConfig
 from manga_translator.pipeline_lab import PipelineLabRun, deserialize_textblocks
+from manga_translator.rendering import resolve_font_name_or_path
 from server.batch_store import BatchNotFound, BatchStore, InvalidBatch
 from server.logger import correlation_id_ctx, get_logger
 from server.image_variants import final_file
@@ -151,26 +151,26 @@ class BatchScheduler:
                 task.add_done_callback(lambda _, key=running_key: self._running.pop(key, None))
                 return True
 
-            if batch.get("kind") == "rerender":
+            if batch.get("kind") in {"rerender", "pipeline-rerun"}:
                 next_queued = self._find_next_queued_item(batch_id, items)
                 if next_queued:
                     instance = await self.executors.find_executor()
-                    claimed_item = await self._claim_rerender_item(batch_id, next_queued["id"])
+                    claimed_item = await self._claim_pipeline_rerun_item(batch_id, next_queued["id"])
                     if not claimed_item:
                         await self.executors.free_executor(instance)
                         continue
                     item_id = claimed_item["id"]
                     self._running_items.add((batch_id, item_id))
                     task = asyncio.create_task(
-                        self._process_rerender_item(batch_id, item_id, instance),
-                        name=f"batch-{batch_id[:8]}-rerender-{item_id[:8]}",
+                        self._process_pipeline_rerun_item(batch_id, item_id, instance),
+                        name=f"batch-{batch_id[:8]}-rerun-{item_id[:8]}",
                     )
-                    running_key = (batch_id, f"rerender:{item_id}")
+                    running_key = (batch_id, f"rerun:{item_id}")
                     self._running[running_key] = task
-                    def on_rerender_done(_, key=running_key, b_id=batch_id, i_id=item_id):
+                    def on_rerun_done(_, key=running_key, b_id=batch_id, i_id=item_id):
                         self._running.pop(key, None)
                         self._running_items.discard((b_id, i_id))
-                    task.add_done_callback(on_rerender_done)
+                    task.add_done_callback(on_rerun_done)
                     return True
                 continue
 
@@ -249,7 +249,7 @@ class BatchScheduler:
         await self.store.mutate(batch_id, mutate)
         return claimed
 
-    async def _claim_rerender_item(self, batch_id: str, item_id: str) -> dict[str, Any] | None:
+    async def _claim_pipeline_rerun_item(self, batch_id: str, item_id: str) -> dict[str, Any] | None:
         claimed: dict[str, Any] | None = None
 
         def mutate(manifest: dict[str, Any]):
@@ -258,7 +258,9 @@ class BatchScheduler:
                 return False
             for item in manifest.get("items", []):
                 if item.get("id") == item_id and item.get("status") == "queued":
-                    item.update(status="processing", stage="rendering")
+                    mode = item.get("rerunMode") or manifest.get("rerunMode") or "typesetting"
+                    initial_stage = "detection" if mode in {"full", "reprocess_text"} else "translating" if mode == "translation_typesetting" else "rendering"
+                    item.update(status="processing", stage=initial_stage)
                     claimed = dict(item)
                     manifest["status"] = "processing"
                     return True
@@ -266,6 +268,10 @@ class BatchScheduler:
 
         await self.store.mutate(batch_id, mutate)
         return claimed
+
+    async def _claim_rerender_item(self, batch_id: str, item_id: str) -> dict[str, Any] | None:
+        return await self._claim_pipeline_rerun_item(batch_id, item_id)
+
 
     async def _claim_translation_group(
         self, batch_id: str, group_items: list[dict[str, Any]]
@@ -464,128 +470,81 @@ class BatchScheduler:
             self._wake.set()
             correlation_id_ctx.reset(token)
 
-    async def _process_rerender_item(self, batch_id: str, item_id: str, instance: Any) -> None:
-        token = correlation_id_ctx.set(f"batch-{batch_id[:8]}/rerender-{item_id[:8]}")
-        staged_final: Path | None = None
-        staged_regions: Path | None = None
+    async def _process_pipeline_rerun_item(self, batch_id: str, item_id: str, instance: Any) -> None:
+        token = correlation_id_ctx.set(f"batch-{batch_id[:8]}/rerun-{item_id[:8]}")
+        staging_dir: Path | None = None
+        hook = None
         try:
             batch = await self.store.get_batch(batch_id)
             item = next(item for item in batch["items"] if item["id"] == item_id)
             folder = item.get("resultFolder")
             if not isinstance(folder, str) or Path(folder).name != folder:
-                raise RuntimeError("Rerender item has no valid result folder")
+                raise RuntimeError("Rerun item has no valid result folder")
             result_dir = (self.result_root / folder).resolve()
             if result_dir.parent != self.result_root or not result_dir.is_dir():
                 raise RuntimeError("Result folder is unavailable")
 
-            regions_path = result_dir / "text_regions.json"
-            regions = None
-            if regions_path.is_file():
-                regions = json.loads(regions_path.read_text("utf-8"))
-            database = getattr(self.store, "database", None)
-            if regions is None and database is not None:
-                documents = await database.get_documents(folder)
-                regions = documents.get("text_regions.json")
-                if regions is None:
-                    regions = await database.get_text_regions(folder)
-            if not isinstance(regions, list) or not regions:
-                raise RuntimeError("Saved translated text regions are unavailable")
+            from server.pipeline_rerun import (
+                commit_rerun_artifacts,
+                execute_rerun_plan,
+                load_rerun_context,
+                resolve_rerun_plan,
+                validate_rerun_prerequisites,
+            )
 
-            inpainted_path = find_asset(result_dir, "inpainted")
-            final_path = final_file(result_dir)
-            if inpainted_path is None or final_path is None:
-                raise RuntimeError("Saved inpainted and final images are required")
+            rerun_mode = item.get("rerunMode") or batch.get("rerunMode") or "typesetting"
+            plan = resolve_rerun_plan(rerun_mode)
+
+            database = getattr(self.store, "database", None)
+            valid, reason = validate_rerun_prerequisites(result_dir, plan.mode, database=database, record=item)
+            if not valid:
+                raise RuntimeError(reason or "Prerequisites check failed for pipeline rerun")
 
             saved_settings = item.get("settings") if isinstance(item.get("settings"), dict) else {}
             config_item = {**item, "settings": saved_settings}
             config = self._config_for(batch, config_item)
-            config.bubble_detection.enabled = False
-            config.translator.translator = "none"
-            config.translator.translation_quality = "fast"
-            config.upscale.upscale_ratio = None
-            config.upscale.revert_upscaling = False
+            if plan.mode == "typesetting":
+                config.bubble_detection.enabled = False
+                config.translator.translator = "none"
+                config.translator.translation_quality = "fast"
+                config.upscale.upscale_ratio = None
+                config.upscale.revert_upscaling = False
 
-            with Image.open(inpainted_path) as opened:
-                inpainted = np.array(opened.convert("RGB"))
+            ctx, state = await load_rerun_context(result_dir, plan, config, database=database, record_id=item.get("pageId"))
 
-            original_path = find_asset(result_dir, "original_canvas") or find_asset(result_dir, "input")
-            if original_path is not None:
-                with Image.open(original_path) as opened:
-                    orig_img = np.array(opened.convert("RGB"))
-            else:
-                orig_img = inpainted.copy()
+            async def progress_hook(stage: str):
+                def set_stage(manifest: dict[str, Any]):
+                    for entry in manifest.get("items", []):
+                        if entry.get("id") == item_id:
+                            entry["stage"] = stage
+                    return True
+                await self.store.mutate(batch_id, set_stage)
 
-            ctx = Context()
-            ctx.debug_folder = folder
-            ctx.image_context = {
-                "subfolder": folder,
-                "file_md5": folder.split("-")[-1] if "-" in folder else folder,
-                "request_id": item.get("requestId"),
-            }
-            ctx.img_rgb = orig_img.copy()
-            ctx.img_inpainted = inpainted.copy()
+            staging_dir = Path(tempfile.mkdtemp(prefix=f".rerun-{item_id[:8]}-", dir=result_dir))
+            translator = getattr(instance, "translator", instance)
 
-            inpaint_mask_path = result_dir / "inpaint_mask.png"
-            mask_final_path = result_dir / "mask_final.png"
-            if inpaint_mask_path.is_file():
-                ctx.inpaint_mask = cv2.imread(str(inpaint_mask_path), cv2.IMREAD_GRAYSCALE)
-            elif mask_final_path.is_file():
-                ctx.inpaint_mask = cv2.imread(str(mask_final_path), cv2.IMREAD_GRAYSCALE)
-            else:
-                ctx.inpaint_mask = None
-            ctx.mask = ctx.inpaint_mask
+            hook = lambda s: asyncio.create_task(progress_hook(s))
+            if hasattr(translator, "_progress_hooks"):
+                translator._progress_hooks.append(hook)
 
-            bubble_mask_path = result_dir / "bubble_mask.png"
-            if bubble_mask_path.is_file():
-                ctx.bubble_mask = cv2.imread(str(bubble_mask_path), cv2.IMREAD_GRAYSCALE)
-            else:
-                ctx.bubble_mask = None
-
-            bubble_detections_path = result_dir / "bubble_detections.json"
-            if bubble_detections_path.is_file():
-                try:
-                    from manga_translator.detection.bubble import deserialize_bubble_detections
-                    bds_raw = json.loads(bubble_detections_path.read_text("utf-8"))
-                    ctx.bubble_detections = deserialize_bubble_detections(bds_raw, orig_img.shape)
-                    ctx._bubble_detection_done = True
-                except Exception:
-                    pass
-
-            ctx.text_regions = deserialize_textblocks(regions)
-            for region in ctx.text_regions:
-                if not getattr(region, "target_lang", None):
-                    region.target_lang = config.translator.target_lang
-
-            if not hasattr(instance, "render_saved"):
-                raise RuntimeError("Executor instance does not support saved rendering")
-            rendered_ctx = await instance.render_saved(ctx, config)
-            error = getattr(rendered_ctx, "translation_error", None)
-            rendered = getattr(rendered_ctx, "result", None)
-            if error or rendered is None:
-                raise RuntimeError(error or "Saved rendering produced no image")
-
-            from manga_translator.pipeline_lab import serialize_editor_regions
-
-            updated_regions = serialize_editor_regions(rendered_ctx.text_regions)
-            staged_final = result_dir / f".{final_path.name}.rerender"
-            staged_regions = result_dir / ".text_regions.json.rerender"
-            if final_path.suffix.lower() in {".jpg", ".jpeg"}:
-                save_jpeg(rendered, staged_final)
-            else:
-                rendered.save(staged_final, format="PNG")
-            staged_regions.write_text(
-                json.dumps(updated_regions, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            executed_ctx, remap_result = await execute_rerun_plan(
+                translator=instance,
+                ctx=ctx,
+                config=config,
+                plan=plan,
+                state=state,
+                staging_dir=staging_dir,
+                progress_hook=progress_hook,
             )
 
-            if database is not None:
-                await database.save_documents(folder, {"text_regions.json": updated_regions})
-            os.replace(staged_final, final_path)
-            if database is None:
-                os.replace(staged_regions, regions_path)
-
-            for variant in ("batch.webp", "cover.webp", "preview.webp", "reader.webp"):
-                (result_dir / variant).unlink(missing_ok=True)
+            await commit_rerun_artifacts(
+                result_dir=result_dir,
+                staging_dir=staging_dir,
+                plan=plan,
+                remap_result=remap_result,
+                database=database,
+                job_id=f"{batch_id}:{item_id}",
+            )
 
             index_result = getattr(self.store, "register_result", None)
             if index_result is not None:
@@ -596,9 +555,8 @@ class BatchScheduler:
                 )
 
             needs_review = any(
-                bool(region.get("review_required"))
-                for region in updated_regions
-                if isinstance(region, dict)
+                bool(getattr(region, "review_required", False))
+                for region in (getattr(executed_ctx, "text_regions", None) or [])
             )
 
             def complete(manifest: dict[str, Any]):
@@ -621,26 +579,31 @@ class BatchScheduler:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.error("Error rerendering batch item %s: %s", item_id, exc)
+            logger.error("Error running pipeline rerun for item %s: %s", item_id, exc)
 
             def fail(manifest: dict[str, Any]):
                 for entry in manifest.get("items", []):
                     if entry.get("id") == item_id:
-                        entry.update(status="error", stage="rendering", error=str(exc))
+                        entry.update(status="error", stage="error", error=str(exc))
                 if not any(entry.get("status") in {"queued", "processing"} for entry in manifest.get("items", [])):
                     manifest["status"] = "error"
                 return True
 
             await self.store.mutate(batch_id, fail)
         finally:
-            if staged_final is not None:
-                staged_final.unlink(missing_ok=True)
-            if staged_regions is not None:
-                staged_regions.unlink(missing_ok=True)
+            if staging_dir is not None and staging_dir.exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            translator = getattr(instance, "translator", None)
+            if hook is not None and translator is not None and hook in getattr(translator, "_progress_hooks", []):
+                translator._progress_hooks.remove(hook)
             self._running_items.discard((batch_id, item_id))
             await self.executors.free_executor(instance)
             self._wake.set()
             correlation_id_ctx.reset(token)
+
+    async def _process_rerender_item(self, batch_id: str, item_id: str, instance: Any) -> None:
+        return await self._process_pipeline_rerun_item(batch_id, item_id, instance)
+
 
     async def _process_translation_group(
         self, batch_id: str, claimed: list[dict[str, Any]], instance: Any
@@ -1006,7 +969,7 @@ class BatchScheduler:
                     "unclip_ratio": settings.get("customUnclipRatio", 2.3),
                 },
                 "ocr": {
-                    "ocr": settings.get("ocr", "48px"),
+                    "ocr": settings.get("ocr", Ocr.ocr48px_ctc.value),
                     "prob": ocr_prob,
                     "min_text_length": int(settings.get("minTextLength", 1)),
                     "use_mocr_merge": bool(settings.get("useMocrMerge", False)),
@@ -1017,7 +980,8 @@ class BatchScheduler:
                     "lowercase": is_lower,
                     "renderer": settings.get("renderer", "default"),
                     "alignment": settings.get("renderAlignment", "auto"),
-                    "gimp_font": settings.get("renderFont", "Sans-serif"),
+                    "gimp_font": settings.get("renderFont", "wildwords"),
+                    "font_path": resolve_font_name_or_path(settings.get("renderFont", "wildwords")),
                     "font_size": settings.get("customFontSize") if settings.get("customFontSize") not in (None, "") else None,
                     "font_size_offset": int(settings.get("fontSizeOffset", 0) or 0),
                     "font_size_minimum": int(settings.get("fontSizeMinimum", 0) if settings.get("fontSizeMinimum") not in (None, "") else 0),

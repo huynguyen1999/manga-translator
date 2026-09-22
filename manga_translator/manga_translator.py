@@ -23,7 +23,7 @@ try:
 except ImportError:
     langid = None
 
-from .config import Config, Colorizer, Detector, Translator, Renderer, Inpainter
+from .config import Config, Colorizer, Detector, Translator, Renderer, Inpainter, Ocr
 from .utils import (
     BASE_PATH,
     LANGUAGE_ORIENTATION_PRESETS,
@@ -67,7 +67,7 @@ from .colorization import (
 from .rendering import dispatch as dispatch_rendering, dispatch_eng_render, dispatch_eng_render_pillow, get_default_eng_font, _composite_box_to_image, render_page
 from .rendering.bubble_layout import group_regions_by_bubbles, prepare_bubble_masks, prepare_bubbles, restore_original, encode_safe_shape, encode_rendered_box
 from .rendering.layout import layout_page, PlacementMode
-from .mask_builder import build_inpaint_masks
+from .mask_builder import build_inpaint_masks, create_mask_sources_overlay
 from .detection.bubble import serialize_bubble_detections, deserialize_bubble_detections
 from .pipeline_lab import PipelineLabRun, save_result_documents, serialize_regions
 from .utils.model_cache import get_model_executor, model_operation
@@ -683,6 +683,10 @@ class MangaTranslator:
             )
             ctx.text_mask = bundle.text_mask
             ctx.bubble_mask = bundle.bubble_cleanup_mask
+            ctx.detector_rescue_mask = bundle.detector_rescue_mask
+            ctx.bubble_residual_mask = bundle.bubble_residual_mask
+            ctx.protected_edge_mask = bundle.protected_edge_mask
+            ctx.mask_bundle = bundle
             ctx.mask = bundle.final_inpaint_mask
             ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
         except Exception as e:
@@ -692,7 +696,20 @@ class MangaTranslator:
         if (self.verbose or self._pipeline_lab_run is not None) and ctx.mask is not None:
             await self._async_imwrite(self._result_path('text_mask.png'), ctx.text_mask)
             await self._async_imwrite(self._result_path('bubble_mask.png'), ctx.bubble_mask)
+            if getattr(ctx, 'detector_rescue_mask', None) is not None:
+                await self._async_imwrite(self._result_path('detector_rescue_mask.png'), ctx.detector_rescue_mask)
+            if getattr(ctx, 'bubble_residual_mask', None) is not None:
+                await self._async_imwrite(self._result_path('bubble_residual_mask.png'), ctx.bubble_residual_mask)
+            if getattr(ctx, 'protected_edge_mask', None) is not None:
+                await self._async_imwrite(self._result_path('protected_bubble_edge.png'), ctx.protected_edge_mask)
             await self._async_imwrite(self._result_path('mask_final.png'), ctx.mask)
+            await self._async_imwrite(self._result_path('inpaint_mask.png'), ctx.inpaint_mask)
+            if ctx.img_rgb is not None and getattr(ctx, 'mask_bundle', None) is not None:
+                try:
+                    overlay = create_mask_sources_overlay(ctx.img_rgb, ctx.mask_bundle)
+                    await self._async_imwrite(self._result_path('mask_sources_overlay.png'), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+                except Exception as ex:
+                    logger.warning(f"Could not save mask_sources_overlay.png: {ex}")
             if self._pipeline_lab_run is not None:
                 self._pipeline_lab_run.refresh()
 
@@ -1014,7 +1031,7 @@ class MangaTranslator:
                         'textDetector': str(getattr(config.detector, 'detector', 'default')),
                         'customUnclipRatio': float(getattr(config.detector, 'unclip_ratio', 2.3)),
                         'customBoxThreshold': float(getattr(config.detector, 'box_threshold', 0.7)),
-                        'ocr': str(getattr(config.ocr, 'ocr', '48px')),
+                        'ocr': str(getattr(config.ocr, 'ocr', Ocr.ocr48px_ctc)),
                         'customOcrProb': float(getattr(config.ocr, 'prob')) if getattr(config.ocr, 'prob', None) is not None else None,
                         'ocrMinConfidence': float(getattr(config.ocr, 'prob')) if getattr(config.ocr, 'prob', None) is not None else None,
                         'useMocrMerge': bool(getattr(config.ocr, 'use_mocr_merge', False)),
@@ -2621,6 +2638,10 @@ class MangaTranslator:
             )
             ctx.text_mask = bundle.text_mask
             ctx.bubble_mask = bundle.bubble_cleanup_mask
+            ctx.detector_rescue_mask = bundle.detector_rescue_mask
+            ctx.bubble_residual_mask = bundle.bubble_residual_mask
+            ctx.protected_edge_mask = bundle.protected_edge_mask
+            ctx.mask_bundle = bundle
             ctx.mask = bundle.final_inpaint_mask
             ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
             await self._report_progress('inpainting')
@@ -2633,8 +2654,20 @@ class MangaTranslator:
                 )
                 await self._async_imwrite(self._result_path('text_mask.png'), ctx.text_mask)
                 await self._async_imwrite(self._result_path('bubble_mask.png'), ctx.bubble_mask)
+                if getattr(ctx, 'detector_rescue_mask', None) is not None:
+                    await self._async_imwrite(self._result_path('detector_rescue_mask.png'), ctx.detector_rescue_mask)
+                if getattr(ctx, 'bubble_residual_mask', None) is not None:
+                    await self._async_imwrite(self._result_path('bubble_residual_mask.png'), ctx.bubble_residual_mask)
+                if getattr(ctx, 'protected_edge_mask', None) is not None:
+                    await self._async_imwrite(self._result_path('protected_bubble_edge.png'), ctx.protected_edge_mask)
                 await self._async_imwrite(self._result_path('mask_final.png'), ctx.mask)
                 await self._async_imwrite(self._result_path('inpaint_mask.png'), ctx.inpaint_mask)
+                if ctx.img_rgb is not None and getattr(ctx, 'mask_bundle', None) is not None:
+                    try:
+                        overlay = create_mask_sources_overlay(ctx.img_rgb, ctx.mask_bundle)
+                        await self._async_imwrite(self._result_path('mask_sources_overlay.png'), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+                    except Exception as ex:
+                        logger.warning(f"Could not save mask_sources_overlay.png: {ex}")
                 if getattr(ctx, 'bubble_detections', None):
                     bd_path = self._result_path('bubble_detections.json')
                     with open(bd_path, 'w', encoding='utf-8') as f:

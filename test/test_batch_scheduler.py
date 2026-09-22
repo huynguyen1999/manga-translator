@@ -836,8 +836,8 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             {"id": "page-1", "name": "1.png"},
         )
         self.assertIsNone(config3.ocr.prob)
+        self.assertEqual(BatchScheduler._config_for({}, {"id": "page-1", "name": "1.png"}).ocr.ocr, "48px_ctc")
 
 
 if __name__ == "__main__":
     unittest.main()
-

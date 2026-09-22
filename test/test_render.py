@@ -83,11 +83,14 @@ async def test_text_rendering_preserves_clean_inpainted_canvas(monkeypatch, rend
     ))
 
     if dispatch_name:
-        async def mutating_renderer(canvas, *_args):
+        async def mutating_renderer(canvas, *_args, **_kwargs):
             canvas.fill(0)
             return canvas
 
+        import manga_translator.rendering as rendering_module
         monkeypatch.setattr(manga_translator_module, dispatch_name, mutating_renderer)
+        target_name = 'dispatch' if dispatch_name == 'dispatch_rendering' else dispatch_name
+        monkeypatch.setattr(rendering_module, target_name, mutating_renderer)
 
     output = await translator._run_text_rendering(config, ctx)
 
@@ -96,3 +99,22 @@ async def test_text_rendering_preserves_clean_inpainted_canvas(monkeypatch, rend
         np.testing.assert_array_equal(output, np.zeros_like(clean))
     else:
         np.testing.assert_array_equal(output, clean)
+
+
+def test_resolve_font_name_or_path():
+    from manga_translator.rendering import resolve_font_name_or_path, get_default_eng_font
+
+    default_font = get_default_eng_font()
+    assert resolve_font_name_or_path(None) == default_font
+    assert resolve_font_name_or_path("") == default_font
+    assert resolve_font_name_or_path("wildwords") == default_font
+    assert resolve_font_name_or_path("Sans-serif") == default_font
+
+    anime_ace = resolve_font_name_or_path("anime_ace")
+    assert "anime_ace.ttf" in anime_ace
+    assert os.path.isfile(anime_ace)
+
+    comic = resolve_font_name_or_path("comic_shanns")
+    assert "comic shanns 2.ttf" in comic
+    assert os.path.isfile(comic)
+

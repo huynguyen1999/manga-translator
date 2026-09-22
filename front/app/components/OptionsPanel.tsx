@@ -15,6 +15,7 @@ import {
   upscalerOptions,
   upscaleRatioOptions,
   summaryModelOptions,
+  fontOptions,
 } from "@/config";
 import { LabeledInput } from "@/components/LabeledInput";
 import { LabeledSelect } from "@/components/LabeledSelect";
@@ -23,6 +24,7 @@ type Props = {
   detectionResolution: string;
   textDetector: string;
   ocr: string;
+  renderFont: string;
   renderTextDirection: string;
   letterCase: "none" | "uppercase" | "lowercase";
   translator: TranslatorKey;
@@ -50,6 +52,7 @@ type Props = {
   setDetectionResolution: (val: string) => void;
   setTextDetector: (val: string) => void;
   setOcr: (val: string) => void;
+  setRenderFont: (val: string) => void;
   setRenderTextDirection: (val: string) => void;
   setLetterCase: (val: "none" | "uppercase" | "lowercase") => void;
   setTranslator: (val: TranslatorKey) => void;
@@ -79,6 +82,7 @@ export const OptionsPanel: React.FC<Props> = ({
   detectionResolution,
   textDetector,
   ocr,
+  renderFont,
   renderTextDirection,
   letterCase,
   translator,
@@ -105,6 +109,7 @@ export const OptionsPanel: React.FC<Props> = ({
   setDetectionResolution,
   setTextDetector,
   setOcr,
+  setRenderFont,
   setRenderTextDirection,
   setLetterCase,
   setTranslator,
@@ -136,6 +141,7 @@ export const OptionsPanel: React.FC<Props> = ({
     setDetectionResolution("2560");
     setTextDetector("default");
     setOcr("48px");
+    setRenderFont("wildwords");
     setRenderTextDirection("auto");
     setTranslator("deepseek");
     setSummaryModel("deepseek-flash");
@@ -240,6 +246,18 @@ export const OptionsPanel: React.FC<Props> = ({
           onChange={setSummaryModel}
           options={summaryModelOptions}
           tooltip="Global model used when generating manga synopses. This is separate from image translation."
+        />
+
+        {/* Font Type */}
+        <LabeledSelect
+          id="renderFont"
+          label="Font Type"
+          icon="carbon:text-font"
+          title="Font used for rendering dialogue and sound effects"
+          value={renderFont || "wildwords"}
+          onChange={setRenderFont}
+          options={fontOptions}
+          tooltip="Lettering font used for speech bubble rendering. Defaults to Wild Words."
         />
 
         {/* Text Direction */}
