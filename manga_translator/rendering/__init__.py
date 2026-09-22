@@ -3,7 +3,7 @@ import threading
 import cv2
 import functools
 import numpy as np
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 from shapely import affinity
 from shapely.geometry import Polygon
 from tqdm import tqdm
@@ -12,6 +12,8 @@ from .ballon_extractor import extract_ballon_region
 from . import text_render
 from .text_render_eng import render_textblock_list_eng
 from .text_render_pillow_eng import render_textblock_list_eng as render_textblock_list_eng_pillow
+from .bubble_layout import restore_original
+from ..config import Renderer
 from .constants import (
     DIRECTION_AUTO,
     DIRECTION_HORIZONTAL,
@@ -30,6 +32,7 @@ from ..utils import (
     color_difference,
     get_logger,
     rotate_polygons,
+    LANGUAGE_ORIENTATION_PRESETS,
 )
 
 logger = get_logger('render')
@@ -895,3 +898,93 @@ async def dispatch_eng_render_pillow(img_canvas: np.ndarray, original_img: np.nd
     text_render.set_font(font_path)
 
     return render_textblock_list_eng_pillow(font_path, img_canvas, text_regions, original_img=original_img, downscale_constraint=0.95)
+
+
+async def render_page(
+    ctx: Any,
+    config: Any,
+    font_path: Optional[str] = None,
+) -> np.ndarray:
+    """Canonical production page rendering function.
+    
+    Renders placed dialogue/free-text directly onto the inpainted canvas
+    without reflowing or rewrapping solved lines, and restores original
+    pixels for unplaced or review-flagged regions.
+    """
+    if getattr(ctx, "img_inpainted", None) is None:
+        raise ValueError("render_page requires ctx.img_inpainted")
+
+    render_canvas = ctx.img_inpainted.copy()
+    if getattr(ctx, "img_rgb", None) is not None:
+        render_canvas = restore_original(render_canvas, ctx.img_rgb, ctx.text_regions or [])
+
+    active_font = font_path or getattr(getattr(config, "render", None), "font_path", None) or get_default_eng_font()
+
+    transform_text_case = getattr(getattr(config, "render", None), "transform_text_case", None)
+    for region in (ctx.text_regions or []):
+        if transform_text_case and getattr(region, "translation", None) and isinstance(region.translation, str):
+            region.translation = transform_text_case(region.translation)
+
+    from .layout.models import PlacementMode
+    render_regions = [
+        region for region in (ctx.text_regions or [])
+        if getattr(region, "translation", None)
+        and str(region.translation).strip()
+        and not (
+            getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
+            and not getattr(region, "_free_text_solver_applied", False)
+        )
+    ]
+    free_regions = [
+        region for region in render_regions
+        if getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
+        and getattr(region, "_free_text_solver_applied", False)
+    ]
+    free_ids = {id(region) for region in free_regions}
+    bubble_and_legacy = [region for region in render_regions if id(region) not in free_ids]
+
+    if not render_regions and (ctx.text_regions or []):
+        bubble_and_legacy = list(ctx.text_regions or [])
+
+    render_cfg = getattr(config, "render", None)
+    renderer_type = getattr(render_cfg, "renderer", Renderer.default)
+
+    if renderer_type == Renderer.none:
+        output = render_canvas
+    elif (
+        renderer_type in (Renderer.manga2Eng, Renderer.manga2EngPillow)
+        and bubble_and_legacy
+        and LANGUAGE_ORIENTATION_PRESETS.get(getattr(bubble_and_legacy[0], "target_lang", "ENG")) == "h"
+    ):
+        if renderer_type == Renderer.manga2EngPillow:
+            output = await dispatch_eng_render_pillow(
+                render_canvas, ctx.img_rgb, bubble_and_legacy, active_font, render_cfg.line_spacing
+            )
+        else:
+            output = await dispatch_eng_render(
+                render_canvas, ctx.img_rgb, bubble_and_legacy, active_font, render_cfg.line_spacing
+            )
+    else:
+        output = await dispatch(
+            render_canvas,
+            bubble_and_legacy,
+            active_font,
+            render_cfg.font_size,
+            render_cfg.font_size_offset,
+            render_cfg.font_size_minimum,
+            not render_cfg.no_hyphenation,
+            getattr(ctx, "render_mask", None),
+            render_cfg.line_spacing,
+        )
+
+    for region in free_regions:
+        box = getattr(region, "_bubble_box", None)
+        points = getattr(region, "_bubble_points", None)
+        if box is not None and points is not None and np.any(box[:, :, 3]):
+            output = _composite_box_to_image(output, box, points)
+
+    if getattr(ctx, "img_rgb", None) is not None:
+        output = restore_original(output, ctx.img_rgb, ctx.text_regions or [])
+
+    return output
+

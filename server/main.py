@@ -1604,11 +1604,12 @@ async def layout_preview(folder_name: str, data: LayoutPreviewRequest):
 
     def _layout():
         from manga_translator.rendering import _RENDER_LOCK, text_render, get_default_eng_font
-        from manga_translator.rendering.bubble_layout import _fit_lobe_text, decode_safe_shape, encode_rendered_box
-        from manga_translator.utils import TextBlock
+        from manga_translator.rendering.bubble_layout import decode_safe_shape, encode_rendered_box
+        from manga_translator.rendering.layout import layout_page
+        from manga_translator.utils import TextBlock, Context
+        from manga_translator.config import Config, RenderConfig
         import cv2
 
-        rects = [[s.x, s.y, s.x + s.width, s.y + s.height] for s in data.segments]
         lines = [[[s.x, s.y], [s.x + s.width, s.y], [s.x + s.width, s.y + s.height], [s.x, s.y + s.height]] for s in data.segments]
         region = TextBlock(lines, texts=[""], translation=data.translation,
                            font_size=data.font_size, target_lang=data.target_lang,
@@ -1620,41 +1621,59 @@ async def layout_preview(folder_name: str, data: LayoutPreviewRequest):
             saved = []
         stored = next((item for item in saved if isinstance(item, dict) and item.get("id") == data.group_id), None)
         shape = stored.get("bubble_safe_shape") if stored else None
-        original_path = final_file(folder_path)
+        original_path = find_asset(folder_path, "original_canvas") or final_file(folder_path)
         original = cv2.imread(str(original_path)) if original_path is not None else None
-        if original is not None:
+        if original is None:
+            max_x = max((s.x + s.width for s in data.segments), default=500) + 50
+            max_y = max((s.y + s.height for s in data.segments), default=500) + 50
+            original = np.zeros((max_y, max_x, 3), dtype=np.uint8)
+
+        if shape:
             region._bubble_interior = decode_safe_shape(shape, *original.shape[:2])
         shape_available = getattr(region, "_bubble_interior", None) is not None
+
         font_path = get_default_eng_font()
+        cfg = Config(
+            render=RenderConfig(
+                font_size=data.font_size if data.font_size and data.font_size > 0 else None,
+                font_size_minimum=data.minimum_font_size,
+                line_spacing=data.line_spacing,
+                alignment=data.alignment,
+                direction="auto",
+            )
+        )
+        ctx = Context(img_rgb=original, text_regions=[region])
         with _RENDER_LOCK:
             text_render.set_font(font_path)
-            fitted = _fit_lobe_text(
-                region, rects, data.translation, data.font_size,
-                data.minimum_font_size, True, data.line_spacing,
-            )
-        if fitted is None:
-            return {"fits": False, "font_size": data.font_size, "layout_segments": [],
-                    "needs_review": True}
-        font_size, segments = fitted
+            layout_page(ctx, cfg, font_path)
+
+        segments = getattr(region, "layout_segments", None) or []
+        if not segments:
+            return {"fits": False, "font_size": data.font_size, "layout_segments": [], "needs_review": True}
+
+        font_size = getattr(region, "font_size", data.font_size)
+        box = getattr(region, "_bubble_box", None)
+        rendered_png = encode_rendered_box(box) if box is not None and np.any(box[:, :, 3]) else None
+
         return {
             "fits": True,
             "needs_review": not shape_available,
             "font_size": font_size,
             "layout_segments": [
                 {
-                    "x": segment["bounds"][0],
-                    "y": segment["bounds"][1],
-                    "width": segment["bounds"][2] - segment["bounds"][0],
-                    "height": segment["bounds"][3] - segment["bounds"][1],
-                    "text": segment["text"],
+                    "x": segment.get("x", 0),
+                    "y": segment.get("y", 0),
+                    "width": segment.get("width", 0),
+                    "height": segment.get("height", 0),
+                    "text": segment.get("text", data.translation),
                     "font_size": segment.get("font_size", font_size),
-                    "rendered_png": encode_rendered_box(segment["box"]) if shape_available else None,
+                    "rendered_png": rendered_png if idx == 0 else None,
                     "positioned_lines": [
-                        {"text": line["text"], "x": line["x"], "y": line["y"]}
+                        {"text": line.get("text", ""), "x": line.get("x", 0), "y": line.get("y", 0)}
                         for line in segment.get("lines", [])
                     ],
                 }
-                for segment in segments
+                for idx, segment in enumerate(segments)
             ],
         }
 

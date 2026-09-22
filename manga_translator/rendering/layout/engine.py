@@ -58,6 +58,8 @@ def _region_layout(region: Any, font_path: Optional[str]) -> RegionLayout:
         source_region_ids=list(getattr(region, "source_region_ids", [region.region_id])),
         placement_mode=mode,
         font=font_path,
+        source_font_size=int(getattr(region, "source_font_size", 0) or getattr(region, "font_size", 0) or 0),
+        calibrated_font_size=int(getattr(region, "calibrated_font_size", 0) or getattr(region, "font_size", 0) or 0),
         font_size=int(getattr(region, "font_size", 0) or 0),
         lines=lines,
         target_geometry=(

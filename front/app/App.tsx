@@ -697,7 +697,7 @@ export const App: React.FC = () => {
 
 
   // Translation Options State Hooks
-  const [detectionResolution, setDetectionResolution] = useState("2560");
+  const [detectionResolution, setDetectionResolution] = useState("2048");
   const [textDetector, setTextDetector] = useState("default");
   const [ocr, setOcr] = useState("48px");
   const [renderTextDirection, setRenderTextDirection] = useState("auto");
@@ -709,10 +709,11 @@ export const App: React.FC = () => {
 
   const [inpaintingSize, setInpaintingSize] = useState("2048");
   const [customUnclipRatio, setCustomUnclipRatio] = useState<number>(2.3);
-  const [customBoxThreshold, setCustomBoxThreshold] = useState<number>(0.45);
+  const [customBoxThreshold, setCustomBoxThreshold] = useState<number>(0.5);
   const [customOcrProb, setCustomOcrProb] = useState<number | undefined>(undefined);
-  const [maskDilationOffset, setMaskDilationOffset] = useState<number>(30);
+  const [maskDilationOffset, setMaskDilationOffset] = useState<number>(20);
   const [bubbleDetection, setBubbleDetection] = useState(true);
+  const [bubbleModel, setBubbleModel] = useState("yolov8m");
   const [inpainter, setInpainter] = useState("default");
   const [colorizer, setColorizer] = useState("none");
   const [colorizeOnly, setColorizeOnly] = useState(false);
@@ -767,6 +768,7 @@ export const App: React.FC = () => {
     ocrMinConfidence: customOcrProb,
     maskDilationOffset,
     bubbleDetection,
+    bubbleModel,
     inpainter,
     colorizer,
     colorizeOnly,
@@ -1090,6 +1092,7 @@ export const App: React.FC = () => {
       ocrMinConfidence: customOcrProb,
       maskDilationOffset,
       bubbleDetection,
+      bubbleModel,
       inpainter,
       colorizer,
       colorizeOnly,
@@ -1124,6 +1127,7 @@ export const App: React.FC = () => {
     customOcrProb,
     maskDilationOffset,
     bubbleDetection,
+    bubbleModel,
     inpainter,
     colorizer,
     colorizeOnly,

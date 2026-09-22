@@ -17,7 +17,7 @@ fi
 # Large multipart manga imports temporarily use one file descriptor per page.
 ulimit -n 4096 2>/dev/null || true
 
-"$PYTHON" "$ROOT_DIR/server/main.py" --host 127.0.0.1 --port 8000 --no-gpu --workers 1 &
+"$PYTHON" "$ROOT_DIR/server/main.py" --host 127.0.0.1 --port 8000 --workers 1 &
 BACKEND_PID=$!
 trap 'kill "$BACKEND_PID" 2>/dev/null || true' EXIT INT TERM
 

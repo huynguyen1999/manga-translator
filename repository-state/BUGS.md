@@ -2,6 +2,13 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-22 — Discrepancy between Web Studio and CLI runner in bubble typesetting and overflow
+
+- Symptom: Web Studio rendered speech bubbles with text overflowing the bubble boundary (e.g. "THE MEAT IS DELICIOUS!") and aggressive hyphenation ("DELI-CIOUS"), while the CLI runner produced a clean, smaller font size with zero overflow and zero hyphenation on identical inputs.
+- Root cause: (1) `pipeline_step_runner.py` accidentally ran `layout_page` twice (during `capture` and again during `render`), which mutated `region.font_size` down from Japanese OCR size (~50px) to an intermediate value (~24px) before the final layout pass, while Web Studio ran layout once using the raw Japanese font size as `source_font_size`, biasing candidate generation toward oversized fonts with hyphenation. (2) Bubble detection defaulted to `manga109` instead of `yolov8m` in several batch paths, and was turned off by default in older frontend settings presets (`detectionResolution: 2560`, `box_threshold: 0.45`, `mask_dilation: 30`). (3) Web Studio `/layout-preview` used legacy `_fit_lobe_text()` instead of the canonical `layout_page()` engine.
+- Fix: (1) Implemented internal two-stage font calibration in `_build_region_layout_plan()` (`_estimate_adaptive_font_size` from interior bubble area and word count) so a single pass yields the optimal ~55-65% target font size without double-run hacks. (2) Stored `source_font_size` and `calibrated_font_size` in `RegionLayout`. (3) Unified all layout execution paths (CLI capture/render, batch scheduler, interactive `/layout-preview`) to call `layout_page()`. (4) Updated default settings to `bubbleDetection = true`, `model = yolov8m`, `detectionResolution = 2048`, `customBoxThreshold = 0.5`, `maskDilationOffset = 20`.
+- Prevention: Always compute target font sizes geometrically from bubble interior dimensions and target text length rather than relying on Japanese OCR font priors, and keep all CLI, batch, and interactive layout entrypoints routing through the single canonical `layout_page()` solver.
+
 ## 2026-09-22 — Production text rendering bypassed shape-aware layout solver
 
 - Symptom: Production translated manga pages rendered with jumbled, overlapping text, thick distorted borders, squished dialogue, and misaligned free-text.

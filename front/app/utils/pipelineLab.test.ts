@@ -9,18 +9,19 @@ import {
 } from "@/utils/pipelineLab";
 
 const settings = defaultPipelineLabSettings();
-assert.equal(settings.detectionResolution, "2560");
+assert.equal(settings.detectionResolution, "2048");
 assert.equal(settings.ocr, "48px");
 assert.equal(settings.translator, "deepseek");
 assert.equal(settings.colorizer, "mc2");
 assert.equal(settings.colorizeOnly, false);
-assert.equal(settings.customBoxThreshold, 0.45);
+assert.equal(settings.customBoxThreshold, 0.5);
 assert.equal(settings.customUnclipRatio, 2.3);
-assert.equal(settings.maskDilationOffset, 30);
+assert.equal(settings.maskDilationOffset, 20);
 assert.equal(settings.denoiseSigma, 25);
 assert.equal(settings.colorThreshold, 31);
 assert.equal(settings.letterCase, "none");
 assert.equal(settings.revertUpscaling, true);
+assert.equal(settings.bubbleDetection, true);
 assert.equal(DEFAULT_STAGE_PLAN.upscaling, false);
 
 const config = buildPipelineLabConfig(settings, { ...DEFAULT_STAGE_PLAN, upscaling: false }, "page.png");
@@ -30,9 +31,9 @@ assert.equal(config.ocr.ocr, "48px");
 assert.equal(buildPipelineLabConfig({ ...settings, ocr: "mocr" }, DEFAULT_STAGE_PLAN, "page.png").ocr.ocr, "mocr");
 assert.equal(buildPipelineLabConfig({ ...settings, letterCase: "uppercase" }, DEFAULT_STAGE_PLAN, "page.png").render.uppercase, true);
 assert.equal(buildPipelineLabConfig({ ...settings, letterCase: "lowercase" }, DEFAULT_STAGE_PLAN, "page.png").render.lowercase, true);
-assert.equal(config.detector.box_threshold, 0.45);
+assert.equal(config.detector.box_threshold, 0.5);
 assert.equal(config.detector.unclip_ratio, 2.3);
-assert.equal(config.mask_dilation_offset, 30);
+assert.equal(config.mask_dilation_offset, 20);
 assert.equal(config.colorizer.colorizer, "mc2");
 assert.equal(config.colorizer.denoise_sigma, 25);
 assert.equal(config.colorizer.color_threshold, 31);

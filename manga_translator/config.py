@@ -271,8 +271,8 @@ class RenderConfig(BaseModel):
     """Disable font border"""
     font_size_offset: int = 0
     """Offset font size by a given amount, positive number increase font size and vice versa"""
-    font_size_minimum: int = -1
-    """Minimum output font size. Default is image_sides_sum/200"""
+    font_size_minimum: int = 0
+    """Minimum output font size. Defaults to 0 (permissive, normalized to 1 in layout solver)"""
     direction: Direction = Direction.auto
     """Force text to be rendered horizontally/vertically/none"""
     uppercase: bool = False
@@ -381,7 +381,7 @@ class TranslatorConfig(BaseModel):
     """Optional one-based story ranges, for example 1-12,13-24."""
     story_plan: Optional[dict[str, Any]] = None
     """Structured story boundaries submitted by the web studio."""
-    no_text_lang_skip: bool = False
+    no_text_lang_skip: bool = True
     """Dont skip text that is seemingly already in the target language."""
     skip_lang: Optional[str] = None
     """Skip translation if source image is one of the provide languages, use comma to separate multiple languages. Example: JPN,ENG"""
@@ -449,7 +449,7 @@ class DetectorConfig(BaseModel):
     """"""
     detector: Detector =Detector.default
     """"Text detector used for creating a text mask from an image, DO NOT use craft for manga, it\'s not designed for it"""
-    detection_size: int = 2560
+    detection_size: int = 2048
     """Size of image used for detection"""
     text_threshold: float = 0.5
     """Threshold for text detection"""
@@ -461,7 +461,7 @@ class DetectorConfig(BaseModel):
     """Invert the image colors for detection. Might improve detection."""
     det_gamma_correct: bool = False
     """Applies gamma correction for detection. Might improve detection."""
-    box_threshold: float = 0.45
+    box_threshold: float = 0.5
     """Threshold for bbox generation"""
     unclip_ratio: float = 2.3
     """How much to extend text skeleton to form bounding box"""
@@ -499,7 +499,7 @@ class OcrConfig(BaseModel):
     """Use bbox merge when Manga OCR inference."""
     ocr: Ocr = Ocr.ocr48px
     """Optical character recognition (OCR) model to use"""
-    min_text_length: int = 0
+    min_text_length: int = 1
     """Minimum text length of a text region"""
     ignore_bubble: int = 0
     """The threshold for ignoring text in non bubble areas, with valid values ranging from 1 to 50, does not ignore others. Recommendation 5 to 10. If it is too low, normal bubble areas may be ignored, and if it is too large, non bubble areas may be considered normal bubbles"""
@@ -507,9 +507,9 @@ class OcrConfig(BaseModel):
     """Minimum probability of a text region to be considered valid. If None, uses the model default."""
 
 class BubbleDetectionConfig(BaseModel):
-    enabled: bool = False
-    """Use the optional Manga109 speech-bubble segmenter."""
-    model: str = "manga109"
+    enabled: bool = True
+    """Use the optional speech-bubble segmenter."""
+    model: str = "yolov8m"
     confidence: float = 0.25
     mask_threshold: float = 0.5
     image_size: int = 512

@@ -199,6 +199,8 @@ class RegionLayout:
     source_region_ids: List[str] = field(default_factory=list)
     placement_mode: Optional[PlacementMode] = None
     font: Optional[str] = None
+    source_font_size: int = 0
+    calibrated_font_size: int = 0
     font_size: int = 0
     lines: List[PlacedLine] = field(default_factory=list)
     target_geometry: Any = None

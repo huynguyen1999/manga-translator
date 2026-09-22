@@ -541,6 +541,16 @@ class BatchScheduler:
             else:
                 ctx.bubble_mask = None
 
+            bubble_detections_path = result_dir / "bubble_detections.json"
+            if bubble_detections_path.is_file():
+                try:
+                    from manga_translator.detection.bubble import deserialize_bubble_detections
+                    bds_raw = json.loads(bubble_detections_path.read_text("utf-8"))
+                    ctx.bubble_detections = deserialize_bubble_detections(bds_raw, orig_img.shape)
+                    ctx._bubble_detection_done = True
+                except Exception:
+                    pass
+
             ctx.text_regions = deserialize_textblocks(regions)
             for region in ctx.text_regions:
                 if not getattr(region, "target_lang", None):
@@ -998,7 +1008,7 @@ class BatchScheduler:
                 "ocr": {
                     "ocr": settings.get("ocr", "48px"),
                     "prob": ocr_prob,
-                    "min_text_length": int(settings.get("minTextLength", 0)),
+                    "min_text_length": int(settings.get("minTextLength", 1)),
                     "use_mocr_merge": bool(settings.get("useMocrMerge", False)),
                 },
                 "render": {
@@ -1008,6 +1018,11 @@ class BatchScheduler:
                     "renderer": settings.get("renderer", "default"),
                     "alignment": settings.get("renderAlignment", "auto"),
                     "gimp_font": settings.get("renderFont", "Sans-serif"),
+                    "font_size": settings.get("customFontSize") if settings.get("customFontSize") not in (None, "") else None,
+                    "font_size_offset": int(settings.get("fontSizeOffset", 0) or 0),
+                    "font_size_minimum": int(settings.get("fontSizeMinimum", 0) if settings.get("fontSizeMinimum") not in (None, "") else 0),
+                    "line_spacing": float(settings.get("lineSpacing")) if settings.get("lineSpacing") not in (None, "") else None,
+                    "no_hyphenation": bool(settings.get("noHyphenation", False)),
                 },
                 "translator": {
                     "translator": "none" if settings.get("colorizeOnly") else settings.get("translator", "deepseek"),
@@ -1016,6 +1031,7 @@ class BatchScheduler:
                     "translation_batch_size": settings.get("translationBatchSize", 20),
                     "story_page_ranges": settings.get("storyPageRanges") or None,
                     "story_plan": settings.get("storyPlan"),
+                    "no_text_lang_skip": bool(settings.get("noTextLangSkip", True)),
                     "keep_failed_pages_for_editing": bool(settings.get("keepFailedPagesForEditing", True)),
                 },
                 "inpainter": {
@@ -1034,10 +1050,14 @@ class BatchScheduler:
                     "upscale_ratio": settings.get("upscaleRatio"),
                     "revert_upscaling": bool(settings.get("upscaleRatio")) and bool(settings.get("revertUpscaling", True)),
                 },
-                "mask_dilation_offset": settings.get("maskDilationOffset", 30),
+                "mask_dilation_offset": settings.get("maskDilationOffset", 20),
                 "bubble_detection": {
                     "enabled": bool(settings.get("bubbleDetection", True)),
-                    "model": "manga109",
+                    "model": settings.get("bubbleModel", "yolov8m"),
+                    "confidence": float(settings.get("bubbleConfidence", 0.25)),
+                    "mask_threshold": float(settings.get("bubbleMaskThreshold", 0.5)),
+                    "padding": int(settings.get("bubblePadding", 9)),
+                    "group_regions": bool(settings.get("bubbleGroupRegions", False)),
                 },
             }
         config = Config.parse_raw(json.dumps(raw))

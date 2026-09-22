@@ -118,13 +118,14 @@ def test_pipeline_lab_publishes_folder_after_input_artifact(tmp_path, monkeypatc
     async def report(state, *_args, **_kwargs):
         events.append(state)
 
-    async def write(*_args, **_kwargs):
+    def write(*_args, **_kwargs):
         events.append("input_written")
         return True
 
     translator._translate = lambda _config, _ctx: _empty_context()
     translator._report_progress = report
     translator._async_imwrite = write
+    monkeypatch.setattr("manga_translator.manga_translator.save_jpeg", write)
     monkeypatch.setattr("manga_translator.manga_translator.BASE_PATH", str(tmp_path))
 
     asyncio.run(translator.translate(Image.new("RGB", (4, 4)), Config(pipeline_lab=PipelineLabConfig(enabled=True))))

@@ -1060,6 +1060,10 @@ class PipelineStepRunnerTests(unittest.TestCase):
         self.assertLess(target.centroid_x, 100)
         self.assertFalse(bool(target.mask[25, 180]))
 
+    @unittest.skipUnless(
+        (Path(__file__).parents[1] / "devscripts" / "data" / "input").is_dir(),
+        "devscripts/data/input fixture not captured on this machine",
+    )
     def test_non_bubble_fixture_preserves_content_and_inpaint_centering(self):
         fixture = Path(__file__).parents[1] / "devscripts" / "data" / "input"
         ctx, config = load_step_data(fixture)

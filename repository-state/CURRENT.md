@@ -2,17 +2,20 @@
 
 Last reviewed: 2026-09-22
 
-## Active feature — saved layout rerender
+## Active feature — unified canonical layout, mask, and rendering pipeline
 
-- The web studio can queue layout-and-render reruns for one or more translated pages, using each page's saved text regions and settings without uploads, OCR, translation, or inpainting.
-- Rerender jobs replace only the final image after a successful render, retain input/inpainted assets, refresh gallery caches, and report per-page failures without discarding prior finals.
+- Studio (`MangaTranslator`, `batch_scheduler.py`) and devscripts (`pipeline_step_runner.py`) are unified into a single canonical pipeline.
+- Mask generation is unified into `manga_translator/mask_builder.py` (`MaskBundle`, `build_inpaint_masks`), computing identical detector cleanup, text, bubble, and inpaint masks across both batch studio jobs and CLI runner captures.
+- Speech bubble detections are serialized and persisted to `bubble_detections.json` during batch preparation and reloaded during translation/rendering, eliminating duplicate YOLO inference passes.
+- Studio stage serialization (`serialize_regions` and `deserialize_textblocks`) losslessly preserves `source_font_size`, `calibrated_font_size`, `placement_mode`, `source_region_ids`, `source_regions`, and `bubble_safe_shape`.
+- Text rendering is unified into the canonical `render_page()` function in `manga_translator/rendering/__init__.py`, guaranteeing bit-level pixel and geometry parity between Web Studio translations and devscripts fast renders.
 
 ## Active migration — production layout boundary
 
-- `manga_translator/rendering/layout/` now owns the page-layout data contracts, extracted bubble-mask geometry/lobe detection, page obstacle masks, free-text ownership targets, and non-fatal layout validation.
-- `layout_page()` is called after final mask generation and before inpainting; it now runs the shared shape-aware solver used by the pipeline runner, then freezes the result for rendering and diagnostics. Enclosed-bubble inference remains the production seed when detector masks are unavailable.
-- `TextBlock` and grouped bubble regions preserve `region_id`, `source_region_ids`, and per-source geometry snapshots for ID-based edits and later multi-region placement.
-- Bubble association now keeps same-bubble OCR regions separate by default; merging is opt-in through `BubbleDetectionConfig.group_regions` or the dev runner's `--bubble-grouping` flag.
+- `manga_translator/rendering/layout/` owns page-layout data contracts, extracted bubble-mask geometry/lobe detection, page obstacle masks, free-text ownership targets, and non-fatal layout validation.
+- `layout_page()` runs after final mask generation and before inpainting; it runs the shared shape-aware solver used by the pipeline runner, then freezes the result for rendering and diagnostics.
+- `TextBlock` and grouped bubble regions preserve `region_id`, `source_region_ids`, and per-source geometry snapshots for ID-based edits and multi-region placement.
+- Bubble association keeps same-bubble OCR regions separate by default; merging is opt-in through `BubbleDetectionConfig.group_regions` or the dev runner's `--bubble-grouping` flag.
 
 ## Purpose
 

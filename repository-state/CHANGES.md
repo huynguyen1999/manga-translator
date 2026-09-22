@@ -2,6 +2,23 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-22 — Canonical layout, mask, and rendering pipeline unification
+
+- Created `manga_translator/mask_builder.py` with `MaskBundle`, `build_inpaint_masks`, and `build_detector_cleanup_mask`, unifying mask generation across Studio `MangaTranslator` (`_prepare_single_context`, `_complete_translation_pipeline`, `prepare`) and CLI runner `pipeline_step_runner.py capture`.
+- Unified production and dev rendering through `render_page()` in `manga_translator/rendering/__init__.py`.
+- Persisted detected speech bubbles to `bubble_detections.json` in batch preparation and rehydrated during translation/rendering, eliminating redundant YOLO model inferences.
+- Losslessly preserved layout fields (`source_font_size`, `calibrated_font_size`, `placement_mode`, `source_region_ids`, `source_regions`, `bubble_safe_shape`) across `pipeline_lab.py` serialization boundaries.
+- Set configuration defaults across CLI, Studio backend, and frontend: detection resolution 2048, box threshold 0.5, mask dilation 20, YOLOv8m bubble detection enabled, bubble padding 9, `font_size_minimum = 0` (normalized to 1 in solver), `min_text_length = 1`, `no_text_lang_skip = True`.
+- Added end-to-end regression and parity tests in `test/test_pipeline_parity.py`.
+
+## 2026-09-22 — Unified pipeline typography parity & two-stage bubble font calibration
+
+- Implemented geometry-driven two-stage font calibration inside `manga_translator/rendering/layout/solver.py`'s `_build_region_layout_plan()`: estimates target font size directly from bubble interior area and target text word count, preventing Japanese OCR font priors from forcing excessive font sizes and hyphenation in single-pass executions.
+- Saved both `source_font_size` and `calibrated_font_size` in `RegionLayout` and `manga_translator/rendering/layout/models.py` / `engine.py`.
+- Replaced legacy `_fit_lobe_text()` in `/layout-preview` endpoint with canonical `layout_page()`.
+- Standardized default detection resolution to 2048, box threshold to 0.5, mask dilation offset to 20, bubble detection to enabled with `yolov8m` across backend configs (`config.py`, `batch_scheduler.py`) and frontend settings (`App.tsx`, `pipelineLab.ts`).
+- Added migration flag `migratedDefaultBubbleDetection` in frontend state to auto-migrate existing browser sessions.
+
 ## 2026-09-22 — Enable speech bubble detection by default across Web Studio
 
 - Defaulted `bubbleDetection` to `true` in `front/app/App.tsx`, `front/app/utils/pipelineLab.ts`, and `server/batch_scheduler.py`'s `_config_for()`.

@@ -6,6 +6,7 @@ downloads the YOLO stack.
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
+from typing import Any, Optional
 import logging
 import shutil
 
@@ -128,3 +129,76 @@ async def dispatch(image: np.ndarray, config, device: str = "cpu") -> list[Bubbl
 @model_operation
 async def unload():
     get_model_cache('bubble_detector', _bubble_cache).clear()
+
+
+def serialize_bubble_detections(
+    bubble_detections: list[Any],
+    lobe_graphs: list[Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Convert BubbleDetection objects into JSON serializable dictionaries."""
+    serialized = []
+    for idx, bd in enumerate(bubble_detections or []):
+        mask = getattr(bd, "mask", None)
+        conf = float(getattr(bd, "confidence", 1.0))
+        entry: dict[str, Any] = {
+            "index": idx,
+            "confidence": conf,
+            "xyxy": [],
+            "xywh": [],
+            "area_pixels": 0,
+            "polygon": [],
+            "polygons": [],
+        }
+        if mask is not None and np.any(mask):
+            mask_arr = np.asarray(mask, dtype=np.uint8)
+            ys, xs = np.where(mask_arr > 0)
+            if len(xs) > 0 and len(ys) > 0:
+                x1, x2 = int(xs.min()), int(xs.max())
+                y1, y2 = int(ys.min()), int(ys.max())
+                entry["xyxy"] = [x1, y1, x2, y2]
+                entry["xywh"] = [x1, y1, x2 - x1, y2 - y1]
+                entry["area_pixels"] = int(np.count_nonzero(mask_arr))
+
+                contours, _ = cv2.findContours(mask_arr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                polys = []
+                for cnt in contours:
+                    if len(cnt) >= 3:
+                        peri = cv2.arcLength(cnt, True)
+                        approx = cv2.approxPolyDP(cnt, 0.01 * peri, True)
+                        polys.append(approx.reshape(-1, 2).tolist())
+                entry["polygons"] = polys
+                if polys:
+                    entry["polygon"] = polys[0]
+        if lobe_graphs is not None and idx < len(lobe_graphs):
+            graph = lobe_graphs[idx]
+            if hasattr(graph, "to_dict"):
+                entry["lobe_graph"] = graph.to_dict()
+            elif isinstance(graph, dict):
+                entry["lobe_graph"] = graph
+        serialized.append(entry)
+    return serialized
+
+
+def deserialize_bubble_detections(
+    data: list[dict[str, Any]],
+    image_shape: tuple[int, ...],
+) -> list[BubbleDetection]:
+    """Reconstruct BubbleDetection objects from serialized JSON dictionaries."""
+    reconstructed = []
+    for item in data or []:
+        conf = float(item.get("confidence", 0.9))
+        mask = np.zeros(image_shape[:2], dtype=np.uint8)
+        polys = item.get("polygons")
+        if not polys and "polygon" in item and item["polygon"]:
+            polys = [item["polygon"]]
+        if polys:
+            for poly in polys:
+                pts = np.asarray(poly, dtype=np.int32)
+                if len(pts) >= 3:
+                    cv2.fillPoly(mask, [pts], 255)
+        elif "xyxy" in item and item["xyxy"]:
+            x1, y1, x2, y2 = item["xyxy"]
+            mask[y1:y2, x1:x2] = 255
+        reconstructed.append(BubbleDetection(mask=mask, confidence=conf))
+    return reconstructed
+

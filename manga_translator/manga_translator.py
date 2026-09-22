@@ -64,9 +64,11 @@ from .colorization import (
     unload as unload_colorization,
     is_image_colored,
 )
-from .rendering import dispatch as dispatch_rendering, dispatch_eng_render, dispatch_eng_render_pillow, get_default_eng_font, _composite_box_to_image
+from .rendering import dispatch as dispatch_rendering, dispatch_eng_render, dispatch_eng_render_pillow, get_default_eng_font, _composite_box_to_image, render_page
 from .rendering.bubble_layout import group_regions_by_bubbles, prepare_bubble_masks, prepare_bubbles, restore_original, encode_safe_shape, encode_rendered_box
 from .rendering.layout import layout_page, PlacementMode
+from .mask_builder import build_inpaint_masks
+from .detection.bubble import serialize_bubble_detections, deserialize_bubble_detections
 from .pipeline_lab import PipelineLabRun, save_result_documents, serialize_regions
 from .utils.model_cache import get_model_executor, model_operation
 from .utils.device_memory import empty_device_cache, configure_device_memory_limits
@@ -345,6 +347,18 @@ class MangaTranslator:
     def using_gpu(self):
         return self.device.startswith('cuda') or self.device == 'mps' or self.device == 'xpu'
 
+    @property
+    def result_root(self) -> str:
+        return getattr(
+            self,
+            '_result_root',
+            os.path.abspath(os.getenv('MANGA_RESULT_ROOT') or os.path.join(BASE_PATH, 'result')),
+        )
+
+    @result_root.setter
+    def result_root(self, value: str):
+        self._result_root = os.path.abspath(value) if value else os.path.abspath(os.path.join(BASE_PATH, 'result'))
+
     def _empty_device_cache(self):
         # In-process MPS model work runs on the shared model thread. Calling
         # empty_cache from a worker thread can race an active Metal kernel and
@@ -406,18 +420,19 @@ class MangaTranslator:
             await self._report_progress(f'debug_folder:{self._get_image_subfolder()}')
 
         # preload and download models (not strictly necessary, remove to lazy load)
-        if ( self.models_ttl == 0 ):
+        if getattr(self, 'models_ttl', 0) == 0:
             logger.info('Loading models')
             if config.upscale.upscale_ratio:
                 await prepare_upscaling(config.upscale.upscaler)
             await prepare_detection(config.detector.detector)
-            await prepare_ocr(config.ocr.ocr, self.device)
-            await prepare_inpainting(config.inpainter.inpainter, self.device)
+            device = getattr(self, 'device', 'cpu')
+            await prepare_ocr(config.ocr.ocr, device)
+            await prepare_inpainting(config.inpainter.inpainter, device)
             await prepare_translation(config.translator.translator_gen)
             if config.colorizer.colorizer != Colorizer.none:
                 await prepare_colorization(config.colorizer.colorizer)
             if bool(getattr(getattr(config, 'bubble_detection', None), 'enabled', False)):
-                await prepare_bubble_detection(config.bubble_detection, self.device)
+                await prepare_bubble_detection(config.bubble_detection, device)
 
         # translate
         try:
@@ -658,15 +673,18 @@ class MangaTranslator:
         # (Delayed to take advantage of the region filtering done after ocr and translation)
         await self._report_progress('mask-generation')
         try:
-            ctx.text_mask = await self._run_mask_refinement(config, ctx)
-            pad = int(getattr(getattr(config, 'bubble_detection', None), 'padding', 9))
-            ctx.bubble_mask = prepare_bubble_masks(ctx.img_rgb, ctx.text_regions, padding=pad)
-            ctx.mask = np.maximum(ctx.text_mask, ctx.bubble_mask)
-            for r in (ctx.text_regions or []):
-                edge = getattr(r, '_bubble_protected_edge', None)
-                if edge is not None and np.any(edge):
-                    ctx.mask[edge > 0] = 0
-            ctx.inpaint_mask = ctx.mask.copy()
+            bundle = await build_inpaint_masks(
+                image=ctx.img_rgb,
+                detector_textlines=getattr(ctx, 'textlines', None),
+                detector_mask=getattr(ctx, 'mask_raw', None),
+                text_regions=ctx.text_regions or [],
+                bubble_detections=getattr(ctx, 'bubble_detections', None),
+                config=config,
+            )
+            ctx.text_mask = bundle.text_mask
+            ctx.bubble_mask = bundle.bubble_cleanup_mask
+            ctx.mask = bundle.final_inpaint_mask
+            ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
         except Exception as e:
             logger.error(f"Error during mask-generation:\n{traceback.format_exc()}")
             raise
@@ -2034,63 +2052,7 @@ class MangaTranslator:
                 ctx.mask = getattr(ctx, 'bubble_mask', None)
             ctx.img_inpainted = ctx.img_rgb.copy()
 
-        # Renderers update their canvas in place; keep the clean inpainted layer for the editor.
-        render_canvas = ctx.img_inpainted.copy()
-        if getattr(ctx, 'img_rgb', None) is not None:
-            render_canvas = restore_original(render_canvas, ctx.img_rgb, ctx.text_regions or [])
-
-        render_regions = [
-            region for region in (ctx.text_regions or [])
-            if getattr(region, "translation", None)
-            and str(region.translation).strip()
-            and not (
-                getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
-                and not getattr(region, "_free_text_solver_applied", False)
-            )
-        ]
-        free_regions = [
-            region for region in render_regions
-            if getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
-            and getattr(region, "_free_text_solver_applied", False)
-        ]
-        free_ids = {id(region) for region in free_regions}
-        bubble_and_legacy = [region for region in render_regions if id(region) not in free_ids]
-
-        # For tests or caller expectations where no regions have non-empty translation but text_regions exists
-        if not render_regions and (ctx.text_regions or []):
-            bubble_and_legacy = list(ctx.text_regions or [])
-
-        if config.render.renderer == Renderer.none:
-            output = render_canvas
-        elif (
-            config.render.renderer in (Renderer.manga2Eng, Renderer.manga2EngPillow)
-            and bubble_and_legacy
-            and LANGUAGE_ORIENTATION_PRESETS.get(getattr(bubble_and_legacy[0], 'target_lang', 'ENG')) == 'h'
-        ):
-            if config.render.renderer == Renderer.manga2EngPillow:
-                output = await dispatch_eng_render_pillow(render_canvas, ctx.img_rgb, bubble_and_legacy, active_font, config.render.line_spacing)
-            else:
-                output = await dispatch_eng_render(render_canvas, ctx.img_rgb, bubble_and_legacy, active_font, config.render.line_spacing)
-        else:
-            output = await dispatch_rendering(
-                render_canvas,
-                bubble_and_legacy,
-                active_font,
-                config.render.font_size,
-                config.render.font_size_offset,
-                config.render.font_size_minimum,
-                not config.render.no_hyphenation,
-                ctx.render_mask,
-                config.render.line_spacing,
-            )
-
-        for region in free_regions:
-            box = getattr(region, "_bubble_box", None)
-            points = getattr(region, "_bubble_points", None)
-            if box is not None and points is not None and np.any(box[:, :, 3]):
-                output = _composite_box_to_image(output, box, points)
-
-        return restore_original(output, ctx.img_rgb, ctx.text_regions or [])
+        return await render_page(ctx, config, active_font)
 
     def _result_path(self, path: str) -> str:
         """
@@ -2646,16 +2608,21 @@ class MangaTranslator:
         if prepare_canvas and ctx.text_regions:
             merged = serialize_regions(ctx.text_regions)
             ctx.result_documents['text_regions_merged.json'] = merged
+            if getattr(ctx, 'bubble_detections', None):
+                ctx.result_documents['bubble_detections.json'] = serialize_bubble_detections(ctx.bubble_detections)
             await self._report_progress('mask-generation')
-            ctx.text_mask = await self._run_mask_refinement(config, ctx)
-            pad = int(getattr(getattr(config, 'bubble_detection', None), 'padding', 9))
-            ctx.bubble_mask = prepare_bubble_masks(ctx.img_rgb, ctx.text_regions, padding=pad)
-            ctx.mask = np.maximum(ctx.text_mask, ctx.bubble_mask)
-            for r in (ctx.text_regions or []):
-                edge = getattr(r, '_bubble_protected_edge', None)
-                if edge is not None and np.any(edge):
-                    ctx.mask[edge > 0] = 0
-            ctx.inpaint_mask = ctx.mask.copy()
+            bundle = await build_inpaint_masks(
+                image=ctx.img_rgb,
+                detector_textlines=getattr(ctx, 'textlines', None),
+                detector_mask=getattr(ctx, 'mask_raw', None),
+                text_regions=ctx.text_regions or [],
+                bubble_detections=getattr(ctx, 'bubble_detections', None),
+                config=config,
+            )
+            ctx.text_mask = bundle.text_mask
+            ctx.bubble_mask = bundle.bubble_cleanup_mask
+            ctx.mask = bundle.final_inpaint_mask
+            ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
             await self._report_progress('inpainting')
             ctx.img_inpainted = await self._run_inpainting(config, ctx)
             ctx.gimp_mask = np.dstack((cv2.cvtColor(ctx.img_inpainted, cv2.COLOR_RGB2BGR), ctx.mask))
@@ -2668,18 +2635,27 @@ class MangaTranslator:
                 await self._async_imwrite(self._result_path('bubble_mask.png'), ctx.bubble_mask)
                 await self._async_imwrite(self._result_path('mask_final.png'), ctx.mask)
                 await self._async_imwrite(self._result_path('inpaint_mask.png'), ctx.inpaint_mask)
+                if getattr(ctx, 'bubble_detections', None):
+                    bd_path = self._result_path('bubble_detections.json')
+                    with open(bd_path, 'w', encoding='utf-8') as f:
+                        json.dump(serialize_bubble_detections(ctx.bubble_detections), f, indent=2)
                 await self._async_imwrite(
                     self._result_path('inpainted.png'),
                     cv2.cvtColor(ctx.img_inpainted, cv2.COLOR_RGB2BGR),
                 )
                 await asyncio.to_thread(save_jpeg, ctx.img_inpainted, self._result_path('inpainted.jpg'))
+                saved_docs = {'text_regions_merged.json': merged}
+                if getattr(ctx, 'bubble_detections', None):
+                    saved_docs['bubble_detections.json'] = serialize_bubble_detections(ctx.bubble_detections)
                 if self._pipeline_lab_run is not None:
                     self._pipeline_lab_run.write_json('text_regions_merged.json', merged)
+                    if getattr(ctx, 'bubble_detections', None):
+                        self._pipeline_lab_run.write_json('bubble_detections.json', serialize_bubble_detections(ctx.bubble_detections))
                     await self._pipeline_lab_run.checkpoint()
                 else:
                     await save_result_documents(
                         self._current_image_context['subfolder'],
-                        {'text_regions_merged.json': merged},
+                        saved_docs,
                     )
             await self._report_progress('awaiting_translation')
 
@@ -3470,6 +3446,21 @@ class MangaTranslator:
         if getattr(ctx, 'img_rgb', None) is None and getattr(ctx, 'upscaled', None) is not None:
             ctx.img_rgb, ctx.img_alpha = load_image(ctx.upscaled)
 
+        if getattr(ctx, 'bubble_detections', None) is None:
+            bd_path = self._result_path('bubble_detections.json')
+            if os.path.exists(bd_path) and getattr(ctx, 'img_rgb', None) is not None:
+                try:
+                    with open(bd_path, 'r', encoding='utf-8') as f:
+                        bds_raw = json.load(f)
+                    ctx.bubble_detections = deserialize_bubble_detections(bds_raw, ctx.img_rgb.shape)
+                    ctx._bubble_detection_done = True
+                    group_regions = getattr(config.bubble_detection, 'group_regions', False)
+                    ctx.text_regions = group_regions_by_bubbles(
+                        ctx.text_regions, ctx.bubble_detections, group=group_regions
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to load existing bubble_detections.json: {e}")
+
         if (config.bubble_detection.enabled
                 and not getattr(ctx, '_bubble_detection_done', False)):
             await self._detect_speech_bubbles(config, ctx, report_progress=False)
@@ -3497,15 +3488,18 @@ class MangaTranslator:
         if ctx.mask is None and ctx.img_inpainted is None:
             await self._report_progress('mask-generation')
             try:
-                ctx.text_mask = await self._run_mask_refinement(config, ctx)
-                pad = int(getattr(getattr(config, 'bubble_detection', None), 'padding', 9))
-                ctx.bubble_mask = prepare_bubble_masks(ctx.img_rgb, ctx.text_regions, padding=pad)
-                ctx.mask = np.maximum(ctx.text_mask, ctx.bubble_mask)
-                for r in (ctx.text_regions or []):
-                    edge = getattr(r, '_bubble_protected_edge', None)
-                    if edge is not None and np.any(edge):
-                        ctx.mask[edge > 0] = 0
-                ctx.inpaint_mask = ctx.mask.copy()
+                bundle = await build_inpaint_masks(
+                    image=ctx.img_rgb,
+                    detector_textlines=getattr(ctx, 'textlines', None),
+                    detector_mask=getattr(ctx, 'mask_raw', None),
+                    text_regions=ctx.text_regions or [],
+                    bubble_detections=getattr(ctx, 'bubble_detections', None),
+                    config=config,
+                )
+                ctx.text_mask = bundle.text_mask
+                ctx.bubble_mask = bundle.bubble_cleanup_mask
+                ctx.mask = bundle.final_inpaint_mask
+                ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
             except Exception as e:  
                 logger.error(f"Error during mask-generation:\n{traceback.format_exc()}")  
                 raise

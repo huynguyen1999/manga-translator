@@ -101,7 +101,7 @@ export const DEFAULT_STAGE_PLAN: PipelineStagePlan = {
 export const defaultPipelineLabSettings = (): PipelineLabSettings => {
   const stored = loadSettings();
   return {
-    detectionResolution: stored.detectionResolution ?? "2560",
+    detectionResolution: stored.detectionResolution ?? "2048",
     textDetector: stored.textDetector ?? "default",
     renderTextDirection: stored.renderTextDirection ?? "auto",
     letterCase: stored.letterCase ?? (stored.uppercase ? "uppercase" : stored.lowercase ? "lowercase" : "none"),
@@ -109,9 +109,9 @@ export const defaultPipelineLabSettings = (): PipelineLabSettings => {
     targetLanguage: stored.targetLanguage ?? "ENG",
     inpaintingSize: stored.inpaintingSize ?? "2048",
     customUnclipRatio: stored.customUnclipRatio ?? 2.3,
-    customBoxThreshold: stored.customBoxThreshold ?? 0.45,
+    customBoxThreshold: stored.customBoxThreshold ?? 0.5,
     customOcrProb: stored.customOcrProb ?? stored.ocrMinConfidence ?? undefined,
-    maskDilationOffset: stored.maskDilationOffset ?? 30,
+    maskDilationOffset: stored.maskDilationOffset ?? 20,
     bubbleDetection: stored.bubbleDetection ?? true,
     inpainter: stored.inpainter ?? "default",
     colorizer: "mc2",

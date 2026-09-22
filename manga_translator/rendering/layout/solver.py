@@ -3714,9 +3714,22 @@ def _build_region_layout_plan(
     if minimum == -1:
         minimum = round(sum(image_shape) / 200)
     minimum = max(1, minimum)
-    target = max(minimum, render_cfg.font_size or region.font_size + render_cfg.font_size_offset)
-    if render_cfg.font_size is None:
-        target = max(target, _estimate_adaptive_font_size(interior, text, minimum))
+
+    source_font = getattr(region, "source_font_size", None)
+    if source_font is None:
+        source_font = int(getattr(region, "font_size", 0) or 0)
+        region.source_font_size = source_font
+
+    if render_cfg.font_size is not None and render_cfg.font_size > 0:
+        calibrated_target = max(minimum, int(render_cfg.font_size))
+    else:
+        # Two-stage calibration: calculate feasible translated font target directly from bubble interior
+        adaptive_target = _estimate_adaptive_font_size(interior, text, minimum)
+        offset = getattr(render_cfg, "font_size_offset", 0) or 0
+        calibrated_target = max(minimum, adaptive_target + offset)
+
+    region.calibrated_font_size = calibrated_target
+    target = calibrated_target
 
     fg, bg = fg_bg_compare(*region.get_font_colors())
     stroke_width = max(1, int(target * 0.07)) if bg is not None else 0

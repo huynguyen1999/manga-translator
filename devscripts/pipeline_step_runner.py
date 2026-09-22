@@ -71,16 +71,17 @@ from manga_translator.config import (
     Renderer,
     Translator,
 )
-from manga_translator.detection import prepare as prepare_detection
-from manga_translator.detection.bubble import BubbleDetection, prepare as prepare_bubble_detection
+from manga_translator.detection.bubble import BubbleDetection, prepare as prepare_bubble_detection, serialize_bubble_detections, deserialize_bubble_detections
 from manga_translator.inpainting import prepare as prepare_inpainting
 from manga_translator.manga_translator import MangaTranslator
+from manga_translator.mask_builder import build_inpaint_masks
 from manga_translator.ocr import prepare as prepare_ocr
 from manga_translator.translators import prepare as prepare_translation
 from manga_translator.rendering import (
     dispatch as dispatch_rendering,
     dispatch_eng_render,
     dispatch_eng_render_pillow,
+    render_page,
 )
 from manga_translator.rendering.bubble_layout import (
     decode_safe_shape,
@@ -133,6 +134,7 @@ from manga_translator.rendering.layout.solver import (
     reset_solver_profile,
     solve_layout,
 )
+from manga_translator.rendering.layout import layout_page
 from manga_translator.rendering.layout.obstacles import _region_source_mask
 from manga_translator.rendering import (
     _RENDER_LOCK,
@@ -855,29 +857,8 @@ def deserialize_text_regions_from_dict(items: List[Dict[str, Any]], image_shape:
     return regions
 
 
-def _detector_cleanup_mask(
-    textlines: List[Any],
-    detector_mask: Optional[np.ndarray],
-    image_shape: Tuple[int, ...],
-) -> np.ndarray:
-    """Keep detector pixels inside detector boxes even when OCR drops a box."""
-    fallback = np.zeros(image_shape[:2], dtype=np.uint8)
-    if detector_mask is None or not textlines or not np.size(detector_mask):
-        return fallback
-
-    geometry = np.zeros_like(fallback)
-    for textline in textlines:
-        points = getattr(textline, "pts", None)
-        if points is not None:
-            cv2.fillPoly(geometry, [np.asarray(points, dtype=np.int32)], 255)
-
-    mask = np.asarray(detector_mask)
-    if mask.ndim == 3:
-        mask = cv2.cvtColor(mask, cv2.COLOR_RGB2GRAY)
-    if mask.shape != fallback.shape:
-        mask = cv2.resize(mask, (fallback.shape[1], fallback.shape[0]), interpolation=cv2.INTER_NEAREST)
-    mask = np.where(mask > 0, 255, 0).astype(np.uint8)
-    return cv2.bitwise_and(mask, geometry)
+from manga_translator.mask_builder import build_detector_cleanup_mask
+_detector_cleanup_mask = build_detector_cleanup_mask
 
 
 def save_step_data(
@@ -1216,178 +1197,15 @@ async def _run_isolated_text_rendering(
     config: Config,
     ctx: Context,
 ) -> np.ndarray:
-    """Render frozen bubble regions and prepared free text through separate paths."""
-    render_canvas = ctx.img_inpainted.copy()
-    if getattr(ctx, "img_rgb", None) is not None:
-        render_canvas = restore_original(render_canvas, ctx.img_rgb, ctx.text_regions or [])
-
+    """Render frozen bubble regions and prepared free text through the canonical production render_page."""
     for region in (ctx.text_regions or []):
         if getattr(region, "translation", None) and isinstance(region.translation, str):
             region.translation = config.render.transform_text_case(region.translation)
     _record_content_trace(ctx.text_regions, "render-input")
     _validate_render_integrity(ctx, strict=bool(getattr(ctx, "_strict_layout_validation", False)))
 
-    render_regions = [
-        region for region in (ctx.text_regions or [])
-        if getattr(region, "translation", None)
-        and region.translation.strip()
-        and not (
-            getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
-            and not getattr(region, "_free_text_solver_applied", False)
-        )
-    ]
-    free_regions = [
-        region for region in render_regions
-        if getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
-        and getattr(region, "_free_text_solver_applied", False)
-    ]
-    free_ids = {id(region) for region in free_regions}
-    bubble_and_legacy = [region for region in render_regions if id(region) not in free_ids]
-
-    dispatch_log: List[Dict[str, Any]] = []
-    draw_operations: List[Dict[str, Any]] = []
-
-    if config.render.renderer == Renderer.none:
-        output = render_canvas
-    elif (
-        config.render.renderer in (Renderer.manga2Eng, Renderer.manga2EngPillow)
-        and bubble_and_legacy
-        and LANGUAGE_ORIENTATION_PRESETS.get(bubble_and_legacy[0].target_lang) == "h"
-    ):
-        func_name = "dispatch_eng_render_pillow" if config.render.renderer == Renderer.manga2EngPillow else "dispatch_eng_render"
-        for region in bubble_and_legacy:
-            mode_val = getattr(getattr(region, "placement_mode", None), "value", str(getattr(region, "placement_mode", "")))
-            entry = {
-                "region_id": str(region.region_id),
-                "placement_mode": mode_val,
-                "renderer": config.render.renderer.value if hasattr(config.render.renderer, "value") else str(config.render.renderer),
-                "function": func_name,
-                "text": _render_text(region),
-            }
-            dispatch_log.append(entry)
-            logger.info(
-                f"RENDER DISPATCH region={entry['region_id']} mode={entry['placement_mode']} "
-                f"renderer={entry['renderer']} function={entry['function']} text={entry['text']!r}"
-            )
-
-        if config.render.renderer == Renderer.manga2EngPillow:
-            output = await dispatch_eng_render_pillow(
-                render_canvas, ctx.img_rgb, bubble_and_legacy, translator.font_path, config.render.line_spacing
-            )
-        else:
-            output = await dispatch_eng_render(
-                render_canvas, ctx.img_rgb, bubble_and_legacy, translator.font_path, config.render.line_spacing
-            )
-    else:
-        for region in bubble_and_legacy:
-            mode_val = getattr(getattr(region, "placement_mode", None), "value", str(getattr(region, "placement_mode", "")))
-            entry = {
-                "region_id": str(region.region_id),
-                "placement_mode": mode_val,
-                "renderer": config.render.renderer.value if hasattr(config.render.renderer, "value") else str(config.render.renderer),
-                "function": "dispatch_rendering",
-                "text": _render_text(region),
-            }
-            dispatch_log.append(entry)
-            logger.info(
-                f"RENDER DISPATCH region={entry['region_id']} mode={entry['placement_mode']} "
-                f"renderer={entry['renderer']} function={entry['function']} text={entry['text']!r}"
-            )
-
-        output = await dispatch_rendering(
-            render_canvas,
-            bubble_and_legacy,
-            translator.font_path,
-            config.render.font_size,
-            config.render.font_size_offset,
-            config.render.font_size_minimum,
-            not config.render.no_hyphenation,
-            ctx.render_mask,
-            config.render.line_spacing,
-        )
-
-    for region in bubble_and_legacy:
-        ops = getattr(region, "_draw_operations", None)
-        if ops:
-            for op in ops:
-                draw_operations.append(op)
-                logger.info(
-                    f"DRAW region_id={op.get('region_id')} text={op.get('text')!r} "
-                    f"x={op.get('x')} y={op.get('y')} font_size={op.get('font_size')} "
-                    f"bbox={op.get('bbox')} renderer={op.get('renderer')}"
-                )
-        else:
-            bounds = getattr(region, "layout_bounds", None) or getattr(region, "xyxy", [0, 0, 0, 0])
-            op = {
-                "region_id": str(region.region_id),
-                "text": _render_text(region),
-                "x": int(bounds[0]),
-                "y": int(bounds[1]),
-                "width": int(bounds[2] - bounds[0]),
-                "height": int(bounds[3] - bounds[1]),
-                "font_size": getattr(region, "font_size", 0),
-                "bbox": [int(b) for b in bounds],
-                "renderer": config.render.renderer.value if hasattr(config.render.renderer, "value") else str(config.render.renderer),
-            }
-            region._draw_operations = [op]
-            draw_operations.append(op)
-            logger.info(
-                f"DRAW region_id={op['region_id']} text={op['text']!r} "
-                f"x={op['x']} y={op['y']} font_size={op['font_size']} "
-                f"bbox={op['bbox']} renderer={op['renderer']}"
-            )
-
-    for region in free_regions:
-        mode_val = getattr(getattr(region, "placement_mode", None), "value", str(getattr(region, "placement_mode", "")))
-        entry = {
-            "region_id": str(region.region_id),
-            "placement_mode": mode_val,
-            "renderer": "free_text_direct",
-            "function": "_composite_box_to_image",
-            "text": _render_text(region),
-        }
-        dispatch_log.append(entry)
-        logger.info(
-            f"RENDER DISPATCH region={entry['region_id']} mode={entry['placement_mode']} "
-            f"renderer={entry['renderer']} function={entry['function']} text={entry['text']!r}"
-        )
-        box = getattr(region, "_bubble_box", None)
-        points = getattr(region, "_bubble_points", None)
-        if box is not None and points is not None and np.any(box[:, :, 3]):
-            output = _composite_box_to_image(output, box, points)
-            ops = getattr(region, "_draw_operations", None)
-            if ops:
-                for op in ops:
-                    draw_operations.append(op)
-                    logger.info(
-                        f"DRAW region_id={op.get('region_id')} text={op.get('text')!r} "
-                        f"x={op.get('x')} y={op.get('y')} font_size={op.get('font_size')} "
-                        f"bbox={op.get('bbox')} renderer={op.get('renderer')}"
-                    )
-            else:
-                bounds = getattr(region, "layout_bounds", None) or [0, 0, 0, 0]
-                op = {
-                    "region_id": str(region.region_id),
-                    "text": _render_text(region),
-                    "x": int(bounds[0]),
-                    "y": int(bounds[1]),
-                    "width": int(bounds[2] - bounds[0]),
-                    "height": int(bounds[3] - bounds[1]),
-                    "font_size": getattr(region, "font_size", 0),
-                    "bbox": [int(b) for b in bounds],
-                    "renderer": "free_text_direct",
-                }
-                region._draw_operations = [op]
-                draw_operations.append(op)
-                logger.info(
-                    f"DRAW region_id={op['region_id']} text={op['text']!r} "
-                    f"x={op['x']} y={op['y']} font_size={op['font_size']} "
-                    f"bbox={op['bbox']} renderer={op['renderer']}"
-                )
-
-    ctx._render_dispatch_log = dispatch_log
-    ctx._draw_operations = draw_operations
-    return restore_original(output, ctx.img_rgb, ctx.text_regions or [])
+    active_font = translator.font_path or getattr(getattr(config, "render", None), "font_path", None)
+    return await render_page(ctx, config, active_font)
 
 
 def run_fast_placement_and_render(
@@ -1491,14 +1309,10 @@ def run_fast_placement_and_render(
     t_layout = perf_counter()
     if enable_bubble_layout and getattr(ctx, "img_rgb", None) is not None:
         try:
-            apply_shape_aware_bubble_layout(
+            layout_page(
                 ctx=ctx,
                 config=config,
                 font_path=active_font,
-                solver_margin=solver_margin if solver_margin is not None else 2.0,
-                solver_max_y_trials=solver_max_y_trials if solver_max_y_trials is not None else 12,
-                legacy_only=legacy_only,
-                timing=layout_timing,
             )
         except Exception as e:
             logger.warning(f"Shape-aware bubble layout failed, falling back to standard placement: {e}")
@@ -1991,33 +1805,24 @@ async def _capture_single_image(
             _ensure_region_identities(ctx.text_regions)
             _record_content_trace(ctx.text_regions, "translation")
 
-            # 6. Mask Refinement (keep detector pixels for OCR-dropped boxes)
-            if detected_textlines or ctx.text_regions or getattr(ctx, "bubble_detections", None):
-                ctx.text_mask = (
-                    await translator._run_mask_refinement(config, ctx)
-                    if ctx.text_regions
-                    else np.zeros(ctx.img_rgb.shape[:2], dtype=np.uint8)
-                )
-                ctx.bubble_mask = prepare_bubble_masks(ctx.img_rgb, ctx.text_regions)
-                ctx.mask = ctx.text_mask.copy()
-                detector_cleanup = _detector_cleanup_mask(
-                    detected_textlines,
-                    detector_mask if detector_mask is not None else ctx.mask_raw,
-                    ctx.img_rgb.shape,
-                )
-                ctx.mask = np.maximum(ctx.mask, detector_cleanup)
-            else:
-                ctx.text_mask = np.zeros(ctx.img_rgb.shape[:2], dtype=np.uint8)
-                ctx.bubble_mask = np.zeros(ctx.img_rgb.shape[:2], dtype=np.uint8)
-                ctx.mask = np.zeros(ctx.img_rgb.shape[:2], dtype=np.uint8)
-            # This is the mask passed to the inpainting model. Layout must use
-            # this exact mask, not a reconstructed text bounding box.
-            ctx.inpaint_mask = ctx.mask.copy()
+            # 6. Canonical Mask Construction (keep detector pixels for OCR-dropped boxes)
+            bundle = await build_inpaint_masks(
+                image=ctx.img_rgb,
+                detector_textlines=detected_textlines,
+                detector_mask=detector_mask if detector_mask is not None else getattr(ctx, "mask_raw", None),
+                text_regions=ctx.text_regions or [],
+                bubble_detections=getattr(ctx, "bubble_detections", None),
+                config=config,
+            )
+            ctx.text_mask = bundle.text_mask
+            ctx.bubble_mask = bundle.bubble_cleanup_mask
+            ctx.mask = bundle.final_inpaint_mask
+            ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
 
             # 7. Speech Bubble Layout Geometry, now anchored to the final mask.
             if config.bubble_detection.enabled and getattr(ctx, "img_rgb", None) is not None:
                 try:
-                    apply_shape_aware_bubble_layout(
+                    layout_page(
                         ctx=ctx,
                         config=config,
                         font_path=translator.font_path,

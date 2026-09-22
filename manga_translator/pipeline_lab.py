@@ -84,20 +84,33 @@ def _json_default(value: Any):
 
 
 def serialize_regions(regions) -> list[dict[str, Any]]:
-    """Keep useful OCR/translation facts without serializing model objects."""
+    """Keep useful OCR/translation/layout facts without serializing model objects."""
+    from .rendering.bubble_layout import encode_safe_shape
     result = []
     for index, region in enumerate(regions or []):
         item: dict[str, Any] = {"index": index}
         for key in (
-            "region_id", "source_region_ids", "source_regions", "group_id", "group_members", "text", "text_raw", "translation",
-            "confidence", "font_size", "angle", "direction", "bubble_bounds", "layout_bounds",
-            "layout_segments", "review_required", "review_reason",
+            "region_id", "source_region_ids", "source_regions", "group_id", "group_members",
+            "text", "text_raw", "translation", "confidence", "font_size", "source_font_size",
+            "calibrated_font_size", "angle", "direction", "alignment", "target_lang", "source_lang",
+            "bubble_bounds", "layout_bounds", "layout_segments", "review_required", "review_reason",
+            "placement_mode", "line_spacing", "letter_spacing", "font_family", "bold", "italic",
         ):
             value = getattr(region, key, None)
             if value is None and key == "confidence":
                 value = getattr(region, "prob", None)
             if value is not None:
                 item[key] = _json_default(value)
+        fg_col, bg_col = region.get_font_colors() if hasattr(region, "get_font_colors") else (getattr(region, "fg_color", None), getattr(region, "bg_color", None))
+        if fg_col is not None:
+            item["fg_color"] = _json_default(fg_col)
+        if bg_col is not None:
+            item["bg_color"] = _json_default(bg_col)
+        interior = getattr(region, "_bubble_interior", None)
+        if interior is not None and np.any(interior):
+            item["bubble_safe_shape"] = encode_safe_shape(interior)
+        elif getattr(region, "bubble_safe_shape", None):
+            item["bubble_safe_shape"] = region.bubble_safe_shape
         for key in ("xywh", "pts", "lines"):
             value = getattr(region, key, None)
             if value is not None:
@@ -224,8 +237,13 @@ def deserialize_textblocks(data: list[dict[str, Any]]) -> list[TextBlock]:
             prob=float(item.get("confidence") or item.get("prob") or 1.0),
         )
         tb.region_id = str(item.get("region_id") or "")
-        for key in ("group_id", "group_members", "bubble_bounds", "layout_bounds", "layout_segments", "bubble_safe_shape", "review_required", "review_reason"):
-            if key in item:
+        for key in (
+            "group_id", "group_members", "source_region_ids", "source_regions",
+            "source_font_size", "calibrated_font_size", "placement_mode",
+            "bubble_bounds", "layout_bounds", "layout_segments",
+            "bubble_safe_shape", "review_required", "review_reason",
+        ):
+            if key in item and item[key] is not None:
                 setattr(tb, key, item[key])
         if not getattr(tb, "group_id", None):
             tb.group_id = str(item.get("id") or tb.region_id or "")
@@ -328,13 +346,19 @@ class PipelineLabRun:
         return run
 
     def _write(self):
-        self.manifest["updatedAt"] = _now()
+        if getattr(self, "manifest", None) is not None:
+            self.manifest["updatedAt"] = _now()
 
     async def checkpoint(self):
+        folder_name = getattr(self, "path", None).name if getattr(self, "path", None) is not None else (getattr(self, "manifest", {}) or {}).get("folder")
+        if not folder_name:
+            return
+        manifest = getattr(self, "manifest", None) or {}
+        documents = getattr(self, "documents", None) or {}
         await save_result_documents(
-            self.path.name,
+            folder_name,
             json.loads(json.dumps(
-                {"pipeline_manifest.json": self.manifest, **self.documents},
+                {"pipeline_manifest.json": manifest, **documents},
                 default=_json_default,
             )),
         )
@@ -531,12 +555,13 @@ class PipelineLabRun:
             (self.path / name).unlink(missing_ok=True)
 
     def release_runtime(self):
-        translator = self.translator
+        translator = getattr(self, "translator", None)
         self.ctx = None
         self.translator = None
         if translator is not None and getattr(translator, "_pipeline_lab_run", None) is self:
             translator._pipeline_lab_run = None
-        folder = self.manifest.get("folder")
+        manifest = getattr(self, "manifest", None)
+        folder = manifest.get("folder") if isinstance(manifest, dict) else None
         if folder and ACTIVE_RUNS.get(folder) is self:
             ACTIVE_RUNS.pop(folder, None)
 
