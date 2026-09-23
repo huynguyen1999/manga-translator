@@ -88,6 +88,7 @@ class BubbleLayoutGroup:
     bubble_mask: np.ndarray
     interior: np.ndarray
     regions: List[Any]
+    bubble_id: Optional[str] = None
     lobe_graph: Optional[LobeGraph] = None
     zones: List[np.ndarray] = field(default_factory=list)
 
@@ -208,6 +209,61 @@ class RegionLayout:
     solver_path: Optional[str] = None
     solver_status: Optional[str] = None
     qa_metrics: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class FrozenLine:
+    text: str
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+@dataclass
+class FrozenLayoutSegment:
+    x: int
+    y: int
+    width: int
+    height: int
+    text: str
+    font_size: int
+    lines: List[FrozenLine] = field(default_factory=list)
+    rendered_png: Optional[str] = None
+
+
+@dataclass
+class FrozenRegionLayout:
+    region_id: str
+    bubble_id: Optional[str]
+    state: str
+    placement_mode: Optional[str]
+    font: Optional[str]
+    font_size: int
+    source_font_size: int
+    line_spacing: float
+    layout_bounds: List[int]
+    segments: List[FrozenLayoutSegment] = field(default_factory=list)
+    alignment: Optional[str] = None
+    direction: Optional[str] = None
+    language: Optional[str] = None
+    fg_color: Optional[List[int]] = None
+    bg_color: Optional[List[int]] = None
+    font_family: Optional[str] = None
+    bold: bool = False
+    italic: bool = False
+    solver_path: Optional[str] = None
+    solver_status: Optional[str] = None
+    render_suppressed: bool = False
+    bubble_safe_shape: Optional[Any] = None
+
+
+@dataclass
+class FrozenLayout:
+    version: int
+    input_fingerprint: str
+    input_fingerprints: Dict[str, str]
+    regions: List[FrozenRegionLayout] = field(default_factory=list)
 
 
 @dataclass

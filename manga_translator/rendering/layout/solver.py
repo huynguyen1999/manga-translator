@@ -3073,10 +3073,19 @@ def _shared_bubble_groups(regions: List[Any]) -> List[BubbleLayoutGroup]:
     for region in regions:
         interior = getattr(region, "_bubble_interior", None)
         bubble_mask = getattr(region, "_bubble_mask", None)
+        bubble_id = str(getattr(region, "bubble_id", "") or "")
+        if bubble_id:
+            shared = next((group for group in groups if group.bubble_id == bubble_id), None)
+            if shared is not None:
+                shared.regions.append(region)
+                continue
         if interior is None or not np.any(interior):
             empty_mask = bubble_mask if bubble_mask is not None else np.zeros((0, 0), dtype=np.uint8)
             empty_interior = interior if interior is not None else np.zeros((0, 0), dtype=np.uint8)
-            groups.append(BubbleLayoutGroup(bubble_mask=empty_mask, interior=empty_interior, regions=[region]))
+            groups.append(BubbleLayoutGroup(
+                bubble_mask=empty_mask, interior=empty_interior, regions=[region],
+                bubble_id=bubble_id or None,
+            ))
             continue
         for group in groups:
             other_interior = group.interior
@@ -3090,12 +3099,14 @@ def _shared_bubble_groups(regions: List[Any]) -> List[BubbleLayoutGroup]:
                 and other_interior.shape == interior.shape
                 and np.array_equal(other_interior, interior)
             )
-            if same_mask or same_interior:
+            if same_mask or same_interior or (bubble_id and group.bubble_id == bubble_id):
                 group.regions.append(region)
                 break
         else:
             b_mask = bubble_mask if bubble_mask is not None else interior.copy()
-            groups.append(BubbleLayoutGroup(bubble_mask=b_mask, interior=interior, regions=[region]))
+            groups.append(BubbleLayoutGroup(
+                bubble_mask=b_mask, interior=interior, regions=[region], bubble_id=bubble_id or None,
+            ))
     return groups
 
 
@@ -3359,7 +3370,7 @@ def _build_region_layout_plan(
         font_size_max=target,
         font_size_min=minimum,
         language=getattr(region, "target_lang", "en_US") or "en_US",
-        hyphenate=not render_cfg.no_hyphenation,
+        hyphenate=False,
         line_spacing=render_cfg.line_spacing or 0.0,
         stroke_width=stroke_width,
         margin=solver_margin,

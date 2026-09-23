@@ -151,7 +151,8 @@ class BatchRenderCpuLaneTest(unittest.IsolatedAsyncioTestCase):
         translator._model_usage_timestamps = {}
         translator.font_path = None
         translator._pipeline_run = SimpleNamespace(
-            manifest={"stages": [{"id": "layout", "status": "completed"}]}
+            manifest={"stages": [{"id": "layout", "status": "completed"}]},
+            _document=lambda _name: [],
         )
         ctx = Context()
         ctx.img_rgb = object()

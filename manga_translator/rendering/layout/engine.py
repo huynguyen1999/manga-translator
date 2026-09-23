@@ -73,7 +73,9 @@ def layout_page(ctx: Any, config: Any, font_path: Optional[str] = None, options:
     ctx._layout_obstacles = build_page_obstacle_map(regions, ctx.img_rgb.shape[:2])
 
     for region in regions:
-        result.regions[str(region.region_id)] = _region_layout(region, active_font)
+        region_layout = _region_layout(region, active_font)
+        region._layout_frozen = bool(region_layout.lines)
+        result.regions[str(region.region_id)] = region_layout
     result.timings.update(timing)
     result.timings["total_ms"] = (perf_counter() - started) * 1000.0
     validate_layout(ctx, result)

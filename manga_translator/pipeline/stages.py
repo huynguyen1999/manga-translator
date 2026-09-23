@@ -148,6 +148,7 @@ _SETTING_STAGE = {
     "font_size": PipelineStage.LAYOUT,
     "font_size_offset": PipelineStage.LAYOUT,
     "font_size_minimum": PipelineStage.LAYOUT,
+    "font_color": PipelineStage.LAYOUT,
     "line_spacing": PipelineStage.LAYOUT,
     "no_hyphenation": PipelineStage.LAYOUT,
     "alignment": PipelineStage.LAYOUT,

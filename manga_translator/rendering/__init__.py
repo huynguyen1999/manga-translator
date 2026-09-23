@@ -12,7 +12,7 @@ from .ballon_extractor import extract_ballon_region
 from . import text_render
 from .text_render_eng import render_textblock_list_eng
 from .text_render_pillow_eng import render_textblock_list_eng as render_textblock_list_eng_pillow
-from .bubble_layout import restore_original
+from .bubble_layout import decode_rendered_box, restore_original, render_positioned_lines
 from ..config import Renderer
 from .constants import (
     DIRECTION_AUTO,
@@ -884,6 +884,36 @@ def _composite_box_to_image(img: np.ndarray, box: np.ndarray, dst_points: np.nda
     return img
 
 
+def _render_frozen_region(img: np.ndarray, region: TextBlock, font_path: str) -> np.ndarray:
+    text_render.set_font(font_path)
+    fg, bg = fg_bg_compare(*region.get_font_colors())
+    for segment in getattr(region, "layout_segments", []) or []:
+        lines = segment.get("lines") or []
+        x, y = int(segment.get("x", 0)), int(segment.get("y", 0))
+        width, height = int(segment.get("width", 0)), int(segment.get("height", 0))
+        if width <= 0 or height <= 0:
+            continue
+        box = decode_rendered_box(segment.get("rendered_png")) if not lines else None
+        if not lines and box is None:
+            continue
+        if lines:
+            font_size = int(segment.get("font_size", getattr(region, "font_size", 0)) or 0)
+            box = render_positioned_lines(
+                lines,
+                [x, y, x + width, y + height],
+                font_size,
+                fg,
+                bg,
+                float(getattr(region, "line_spacing", 0.0) or 0.0),
+                getattr(region, "target_lang", "ENG") or "ENG",
+                getattr(region, "direction", "") == "hr",
+            )
+        if box is not None and np.any(box[:, :, 3]):
+            points = _points_for_rect(region, [x, y, x + width, y + height], img.shape[1], img.shape[0])
+            img = _composite_box_to_image(img, box, points)
+    return img
+
+
 def render(
     img,
     region: TextBlock,
@@ -971,23 +1001,14 @@ async def render_page(
         if transform_text_case and getattr(region, "translation", None) and isinstance(region.translation, str):
             region.translation = transform_text_case(region.translation)
 
-    from .layout.models import PlacementMode
     render_regions = [
         region for region in (ctx.text_regions or [])
         if getattr(region, "translation", None)
         and str(region.translation).strip()
-        and not (
-            getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
-            and not getattr(region, "_free_text_solver_applied", False)
-        )
     ]
-    free_regions = [
-        region for region in render_regions
-        if getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
-        and getattr(region, "_free_text_solver_applied", False)
-    ]
-    free_ids = {id(region) for region in free_regions}
-    bubble_and_legacy = [region for region in render_regions if id(region) not in free_ids]
+    frozen_regions = [region for region in render_regions if getattr(region, "_layout_frozen", False)]
+    frozen_ids = {id(region) for region in frozen_regions}
+    bubble_and_legacy = [region for region in render_regions if id(region) not in frozen_ids]
 
     if not render_regions and (ctx.text_regions or []):
         bubble_and_legacy = list(ctx.text_regions or [])
@@ -1018,19 +1039,17 @@ async def render_page(
             render_cfg.font_size,
             render_cfg.font_size_offset,
             render_cfg.font_size_minimum,
-            not render_cfg.no_hyphenation,
+            False,
             getattr(ctx, "render_mask", None),
             render_cfg.line_spacing,
         )
 
-    for region in free_regions:
-        box = getattr(region, "_bubble_box", None)
-        points = getattr(region, "_bubble_points", None)
-        if box is not None and points is not None and np.any(box[:, :, 3]):
-            output = _composite_box_to_image(output, box, points)
+    if renderer_type != Renderer.none:
+        with _RENDER_LOCK:
+            for region in frozen_regions:
+                output = _render_frozen_region(output, region, active_font)
 
     if getattr(ctx, "img_rgb", None) is not None:
         output = restore_original(output, ctx.img_rgb, ctx.text_regions or [])
 
     return output
-

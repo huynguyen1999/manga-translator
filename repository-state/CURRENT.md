@@ -38,8 +38,9 @@ Last reviewed: 2026-09-23
 
 - `manga_translator/rendering/layout/` owns page-layout data contracts, extracted bubble-mask geometry/lobe detection, page obstacle masks, shared free-text ownership targets, region identities, crop-local candidate rasterization, and non-fatal layout validation.
 - `layout_page()` runs after final mask generation and before inpainting; it runs the shared shape-aware solver used by the pipeline runner, then freezes the result for rendering and diagnostics.
+- Versioned `layout.json` is the authoritative `FrozenLayout`: it stores stable region/bubble IDs, selected styles, safe bubble shape, exact positioned lines, and fingerprints for translations, source geometry, bubble geometry, mask, font, settings, and page size. Rendering hydrates by region ID and rasterizes those lines without reflow; `translations.json` remains the text source. Rare unresolved legacy placements retain their validated RGBA crop.
 - `TextBlock` and grouped bubble regions preserve `region_id`, `source_region_ids`, and per-source geometry snapshots for ID-based edits and multi-region placement.
-- Bubble association keeps same-bubble OCR regions separate by default; merging is opt-in through `BubbleDetectionConfig.group_regions` or the dev runner's `--bubble-grouping` flag.
+- Bubble association persists stable `bubble_id` values so separate OCR regions in one speech bubble remain jointly optimized after checkpoint reload. Merging remains opt-in through `BubbleDetectionConfig.group_regions` or the dev runner's `--bubble-grouping` flag.
 
 ## Purpose
 

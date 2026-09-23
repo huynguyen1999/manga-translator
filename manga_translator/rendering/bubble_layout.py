@@ -56,6 +56,19 @@ def encode_rendered_box(box, scale_x=1.0, scale_y=1.0):
     return base64.b64encode(encoded).decode('ascii') if ok else None
 
 
+def decode_rendered_box(encoded_box):
+    if not isinstance(encoded_box, str) or len(encoded_box) > 8_000_000:
+        return None
+    try:
+        raw = np.frombuffer(base64.b64decode(encoded_box, validate=True), np.uint8)
+        box = cv2.imdecode(raw, cv2.IMREAD_UNCHANGED)
+        if box is None or box.ndim != 3 or box.shape[2] != 4:
+            return None
+        return cv2.cvtColor(box, cv2.COLOR_BGRA2RGBA)
+    except (ValueError, cv2.error):
+        return None
+
+
 def _largest_rect_containing(mask, x, y):
     """Largest all-mask rectangle containing one interior point."""
     # ponytail: O(h²) per lobe is small for speech bubbles; use a histogram-stack
@@ -1257,11 +1270,13 @@ def group_regions_by_bubbles(regions, detections, minimum_overlap: float = 0.35,
         if not group:
             for _, region in members:
                 region._bubble_mask = detections[detection_index].mask
+                region.bubble_id = f"bubble_{detection_index}"
                 region._bubble_detection_confidence = detections[detection_index].confidence
                 result.append(region)
         elif len(members) == 1:
             region = members[0][1]
             region._bubble_mask = detections[detection_index].mask
+            region.bubble_id = f"bubble_{detection_index}"
             region._bubble_detection_confidence = detections[detection_index].confidence
             result.append(region)
         else:
@@ -1273,6 +1288,7 @@ def group_regions_by_bubbles(regions, detections, minimum_overlap: float = 0.35,
             region.texts = [item.text for _, item in members]
             region.text = "\n".join(region.texts)
             region.group_id = f"bubble_{detection_index}"
+            region.bubble_id = f"bubble_{detection_index}"
             region.region_id = region.group_id
             region.source_region_ids = [
                 str(getattr(item, "region_id", f"source_{source_index}"))
@@ -1286,6 +1302,22 @@ def group_regions_by_bubbles(regions, detections, minimum_overlap: float = 0.35,
             region._bubble_detection_confidence = detections[detection_index].confidence
             result.append(region)
     return sorted(result, key=lambda item: getattr(item, "_bubble_source_order", 0))
+
+
+def restore_bubble_assignments(regions, detections):
+    """Reconnect persisted region bubble IDs to the reloaded detection masks."""
+    by_id = {f"bubble_{index}": detection for index, detection in enumerate(detections or [])}
+    missing = []
+    for region in regions or []:
+        detection = by_id.get(str(getattr(region, "bubble_id", "")))
+        if detection is None:
+            missing.append(region)
+            continue
+        region._bubble_mask = detection.mask
+        region._bubble_detection_confidence = detection.confidence
+    if missing:
+        group_regions_by_bubbles(missing, detections, group=False)
+    return regions
 
 
 def _source_region_snapshot(region, reading_order: int):
@@ -1544,7 +1576,7 @@ def prepare_bubbles(image, regions, font_path, render_config, group: bool = True
             if len(lobe_rects) > 1 or off_center_lobe:
                 lobe_layout = _fit_lobe_text(
                     region, lobe_rects, text, target, minimum,
-                    not render_config.no_hyphenation, render_config.line_spacing or 0,
+                    False, render_config.line_spacing or 0,
                 )
                 if lobe_layout is None:
                     region.review_reason = region.review_reason or "text_does_not_fit"
@@ -1580,18 +1612,18 @@ def prepare_bubbles(image, regions, font_path, render_config, group: bool = True
                 # Single-lobe bubbles fallback to centered rectangular placement path.
                 placement = _find_horizontal_placement(
                     region, region.bubble_bounds, image.shape, target, preferred_minimum,
-                    text, not render_config.no_hyphenation,
+                    text, False,
                     render_config.line_spacing or 0, [], is_bubble=True)
                 if placement is None:
                     # Try relaxed placement in consistent range before emergency fallback
                     placement = _find_horizontal_placement(
                         region, region.bubble_bounds, image.shape, target, preferred_minimum,
-                        text, not render_config.no_hyphenation,
+                        text, False,
                         render_config.line_spacing or 0, [], is_bubble=False)
                     if placement is None:
                         placement = _find_horizontal_placement(
                             region, region.bubble_bounds, image.shape, minimum, 1,
-                            text, not render_config.no_hyphenation,
+                            text, False,
                             render_config.line_spacing or 0, [], is_bubble=False)
                     if placement is None:
                         placement = (preferred_minimum, region.bubble_bounds)
@@ -1605,14 +1637,14 @@ def prepare_bubbles(image, regions, font_path, render_config, group: bool = True
                     region.font_size, region.get_translation_for_rendering(),
                     max(1, rect[2] - rect[0]), max(1, rect[3] - rect[1]), region.alignment,
                     region.direction == 'hr', fg, bg, region.target_lang,
-                    not render_config.no_hyphenation, render_config.line_spacing,
+                    False, render_config.line_spacing,
                     font_size_minimum=1)
                 if box is None or not np.any(box[:, :, 3]):
                     box = text_render.put_text_horizontal(
                         max(1, region.font_size), region.get_translation_for_rendering(),
                         max(1, rect[2] - rect[0]), max(1, rect[3] - rect[1]), region.alignment,
                         region.direction == 'hr', fg, bg, region.target_lang,
-                        not render_config.no_hyphenation, render_config.line_spacing)
+                        False, render_config.line_spacing)
                 if box is not None and np.any(box[:, :, 3]):
                     region._bubble_box = box
                     region._bubble_cleanup = interior * 255

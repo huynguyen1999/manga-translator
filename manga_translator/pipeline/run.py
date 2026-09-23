@@ -103,7 +103,7 @@ def serialize_regions(regions) -> list[dict[str, Any]]:
     for index, region in enumerate(regions or []):
         item: dict[str, Any] = {"index": index}
         for key in (
-            "region_id", "source_region_ids", "source_regions", "group_id", "group_members",
+            "region_id", "source_region_ids", "source_regions", "group_id", "group_members", "bubble_id",
             "text", "text_raw", "translation", "confidence", "font_size", "source_font_size",
             "calibrated_font_size", "angle", "direction", "alignment", "target_lang", "source_lang",
             "bubble_bounds", "layout_bounds", "layout_segments", "review_required", "review_reason",
@@ -265,7 +265,7 @@ def deserialize_textblocks(data: list[dict[str, Any]]) -> list[TextBlock]:
             if key in item:
                 setattr(tb, key, item[key])
         for key in (
-            "group_id", "group_members", "source_region_ids", "source_regions",
+            "group_id", "group_members", "source_region_ids", "source_regions", "bubble_id",
             "source_font_size", "calibrated_font_size", "placement_mode",
             "bubble_bounds", "layout_bounds", "layout_segments",
             "bubble_safe_shape", "review_required", "review_reason",
@@ -818,6 +818,7 @@ class PipelineRun:
 
             elif stage_id == "layout":
                 from ..rendering.layout import layout_page
+                from ..rendering.layout.frozen import serialize_frozen_layout
 
                 if getattr(ctx, "inpaint_mask", None) is None:
                     mask_final_path = self.path / "mask_final.png"
@@ -830,6 +831,22 @@ class PipelineRun:
                         ctx.text_regions = deserialize_textblocks(source)
                 if not getattr(ctx, "text_regions", None):
                     raise RuntimeError("No text regions available for layout")
+                bubble_data = self._document("bubble_detections.json")
+                if bubble_data is not None:
+                    from ..detection.bubble import deserialize_bubble_detections
+                    from ..rendering.bubble_layout import restore_bubble_assignments
+
+                    ctx.bubble_detections = deserialize_bubble_detections(bubble_data, ctx.img_rgb.shape)
+                    if ctx.bubble_detections:
+                        restore_bubble_assignments(ctx.text_regions, ctx.bubble_detections)
+                    ctx._bubble_detection_done = True
+                else:
+                    bubble_data = []
+                transform = getattr(getattr(config, "render", None), "transform_text_case", None)
+                if transform:
+                    for region in ctx.text_regions:
+                        if getattr(region, "translation", None):
+                            region.translation = transform(region.translation)
                 await run_cpu_stage(
                     layout_page,
                     ctx,
@@ -838,7 +855,16 @@ class PipelineRun:
                     or getattr(getattr(config, "render", None), "font_path", None),
                     priority=CPU_PRIORITY_BACKGROUND,
                 )
-                self.write_json("translations.json", serialize_regions(ctx.text_regions))
+                font_path = (
+                    getattr(translator, "font_path", None)
+                    or getattr(getattr(config, "render", None), "font_path", None)
+                )
+                if not font_path:
+                    from ..rendering import get_default_eng_font
+                    font_path = get_default_eng_font()
+                self.write_json("layout.json", serialize_frozen_layout(
+                    ctx, config, font_path, bubble_data
+                ))
 
             elif stage_id == "inpainting":
                 if ctx.img_rgb is None:
@@ -857,6 +883,8 @@ class PipelineRun:
                     (self.path / "inpainted.png").unlink(missing_ok=True)
 
             elif stage_id == "rendering":
+                from ..rendering.layout.frozen import hydrate_layout, layout_input_fingerprints
+
                 if getattr(ctx, "img_inpainted", None) is None:
                     inpainted_path = find_asset(self.path, "inpainted")
                     if inpainted_path is not None:
@@ -870,6 +898,39 @@ class PipelineRun:
                         ctx.text_regions = deserialize_textblocks(translations)
                 if ctx.img_inpainted is None:
                     raise RuntimeError("No inpainted canvas available for rendering")
+                layout_data = self._document("layout.json")
+                if layout_data is not None:
+                    bubble_data = self._document("bubble_detections.json")
+                    if bubble_data is not None:
+                        from ..detection.bubble import deserialize_bubble_detections
+                        from ..rendering.bubble_layout import restore_bubble_assignments
+
+                        ctx.bubble_detections = deserialize_bubble_detections(bubble_data, ctx.img_rgb.shape)
+                        if ctx.bubble_detections:
+                            restore_bubble_assignments(ctx.text_regions or [], ctx.bubble_detections)
+                        ctx._bubble_detection_done = True
+                    else:
+                        bubble_data = []
+                    font_path = (
+                        getattr(translator, "font_path", None)
+                        or getattr(getattr(config, "render", None), "font_path", None)
+                    )
+                    if not font_path:
+                        from ..rendering import get_default_eng_font
+                        font_path = get_default_eng_font()
+                    mask_path = self.path / "mask_final.png"
+                    if mask_path.is_file():
+                        ctx.inpaint_mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                    input_fingerprints = layout_data.get("input_fingerprints", {}) if isinstance(layout_data, dict) else {}
+                    inputs = layout_input_fingerprints(
+                        ctx.text_regions or [], config, font_path, bubble_data,
+                        getattr(ctx.img_rgb, "shape", None),
+                        getattr(ctx, "inpaint_mask", None),
+                        input_fingerprints.get("mask") if getattr(ctx, "inpaint_mask", None) is None else None,
+                    )
+                    hydrate_layout(ctx, layout_data, inputs["fingerprint"])
+                    ctx._bubble_detection_done = True
+                    ctx._bubble_layout_ready = True
                 ctx.img_rendered = await translator._run_text_rendering(config, ctx)
                 ctx.result = dump_image(ctx.input, ctx.img_rendered, ctx.img_alpha)
                 self.write_json("text_regions.json", serialize_editor_regions(ctx.text_regions))

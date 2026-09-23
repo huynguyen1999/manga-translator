@@ -36,6 +36,24 @@ from manga_translator.utils.image_storage import find_asset, save_jpeg
 from server.image_variants import final_file
 
 
+def _frozen_layout_document(ctx, translator, config):
+    from manga_translator.detection.bubble import serialize_bubble_detections
+    from manga_translator.rendering import get_default_eng_font
+    from manga_translator.rendering.layout.frozen import serialize_frozen_layout
+
+    font_path = (
+        getattr(translator, "font_path", None)
+        or getattr(config.render, "font_path", None)
+        or get_default_eng_font()
+    )
+    return serialize_frozen_layout(
+        ctx,
+        config,
+        font_path,
+        serialize_bubble_detections(getattr(ctx, "bubble_detections", None) or []),
+    )
+
+
 class PipelineRerunMode(str, Enum):
     FULL = "full"
     TYPESETTING = "typesetting"
@@ -475,8 +493,8 @@ async def execute_rerun_plan(
             raise RuntimeError("Full pipeline rerun produced no final image")
         ctx.debug_folder = state.get("folder") or ctx.debug_folder
         documents = dict(getattr(ctx, "result_documents", None) or {})
-        documents["translations.json"] = serialize_regions(ctx.text_regions or [])
-        documents["layout.json"] = serialize_regions(ctx.text_regions or [])
+        documents.setdefault("translations.json", serialize_regions(ctx.text_regions or []))
+        documents["layout.json"] = _frozen_layout_document(ctx, translator, config)
         documents["text_regions.json"] = serialize_editor_regions(ctx.text_regions or [])
         if getattr(ctx, "bubble_detections", None) is not None:
             from manga_translator.detection.bubble import serialize_bubble_detections
@@ -617,6 +635,10 @@ async def execute_rerun_plan(
         await report("layout")
         await report("rendering")
         ctx.img_rendered = await translator._run_text_rendering(config, ctx)
+        (staging_dir / "layout.json").write_text(
+            json.dumps(_frozen_layout_document(ctx, translator, config), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         ctx.result = dump_image(ctx.input, ctx.img_rendered, ctx.img_alpha)
         save_jpeg(np.array(ctx.result), staging_dir / "final.jpg")
         (staging_dir / "text_regions.json").write_text(
@@ -637,6 +659,10 @@ async def execute_rerun_plan(
         await report("layout")
         await report("rendering")
         ctx.img_rendered = await translator._run_text_rendering(config, ctx)
+        (staging_dir / "layout.json").write_text(
+            json.dumps(_frozen_layout_document(ctx, translator, config), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         ctx.result = dump_image(ctx.input, ctx.img_rendered, ctx.img_alpha)
         save_jpeg(np.array(ctx.result), staging_dir / "final.jpg")
         (staging_dir / "text_regions.json").write_text(
@@ -654,6 +680,11 @@ async def execute_rerun_plan(
         else:
             ctx.img_rendered = await translator._run_text_rendering(config, ctx)
             ctx.result = dump_image(ctx.input, ctx.img_rendered, ctx.img_alpha)
+
+        (staging_dir / "layout.json").write_text(
+            json.dumps(_frozen_layout_document(ctx, translator, config), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
         save_jpeg(np.array(ctx.result), staging_dir / "final.jpg")
         (staging_dir / "text_regions.json").write_text(

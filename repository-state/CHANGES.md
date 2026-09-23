@@ -2,6 +2,12 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-23 — Freeze layout across stage checkpoints
+
+- Made versioned `layout.json` authoritative for selected fonts, positions, exact line strings, bubble geometry, and input fingerprints; rendering restores it by stable region ID and paints saved lines without reflow.
+- Persisted stable bubble IDs through translation checkpoints so multiple regions in one bubble retain joint collision-safe layout after restart. Solved manga dialogue now uses whole-word wrapping.
+- Added a context-destruction regression comparing rendered pixels before and after hydration, plus a checkpoint test for shared bubble identity.
+
 ## 2026-09-23 — Job-wide manga stage barriers
 
 - Changed mutable-store translation batches to finish each pipeline stage for all active pages before scheduling the next stage, with OCR → bubble detection → text grouping before translation.

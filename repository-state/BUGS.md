@@ -18,10 +18,10 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 
 ## 2026-09-23 — Checkpointed batch rendering repeated the layout solver
 
-- Symptom: Batch logs showed layout after inpainting, and pages appeared stalled while the UI said they were waiting for batch AI.
-- Root cause: Layout ran after mask generation, but its checkpoint reload did not restore the saved mask. Later, rendering rebuilt a fresh `Context` and did not restore `_bubble_layout_ready`, rerunning the expensive solver. Log IDs used a shared prefix, obscuring per-page ordering, and the waiting badge described the former inpaint-before-translation flow.
-- Fix: Layout reloads the persisted mask and declares that dependency; rendering trusts a completed persisted layout stage; per-page log/task IDs use unique suffixes; and the badge says pages are prepared and waiting for batch translation.
-- Prevention: Restore required artifacts and ephemeral context flags from persisted stage state before downstream retries.
+- Symptom: Layout quality changed after a checkpoint; render retries could fail with `Frozen layout is stale` on unchanged pages.
+- Root cause: Text-line merge assigns `region_id` after construction, leaving provenance empty. Layout fills provenance and may choose a new font size before fingerprinting, while rendering fingerprinted the raw translation checkpoint first; equivalent stage inputs therefore hashed differently. Repeated hydration also needed the source font size retained.
+- Fix: Canonicalize region identities, provenance, and source font size before fingerprinting; keep the source size in `layout.json` and across hydration. Frozen lines render directly, and solved dialogue uses whole-word wrapping.
+- Prevention: Test checkpoint fingerprints from the same translation document before and after layout, including IDs assigned after region construction, then verify repeat hydration and pixel parity.
 
 ## 2026-09-23 — CPU lane workers were garbage-collected while idle
 

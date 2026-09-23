@@ -1,6 +1,5 @@
 """Shared region identity and source-geometry preparation."""
 
-import uuid
 from typing import Any, List, Optional
 
 import numpy as np
@@ -8,10 +7,12 @@ import numpy as np
 
 def prepare_regions(regions: Optional[List[Any]]) -> List[Any]:
     """Assign stable IDs and capture source geometry once before layout edits."""
-    for region in regions or []:
+    for index, region in enumerate(regions or []):
+        if not hasattr(region, "lines"):
+            continue
         region_id = str(getattr(region, "region_id", "") or "")
         if not region_id:
-            region.region_id = uuid.uuid4().hex
+            region.region_id = f"region_{index}"
             region_id = region.region_id
 
         source_ids = getattr(region, "source_region_ids", None)
@@ -33,4 +34,6 @@ def prepare_regions(regions: Optional[List[Any]]) -> List[Any]:
                 "source_text": str(getattr(region, "text", "") or ""),
                 "reading_order": 0,
             }]
+        if getattr(region, "source_font_size", None) is None:
+            region.source_font_size = int(getattr(region, "font_size", 0) or 0)
     return regions or []

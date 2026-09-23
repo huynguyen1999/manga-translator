@@ -74,6 +74,7 @@ from .colorization import (
 from .rendering import dispatch as dispatch_rendering, dispatch_eng_render, dispatch_eng_render_pillow, get_default_eng_font, _composite_box_to_image, render_page
 from .rendering.bubble_layout import group_regions_by_bubbles, prepare_bubbles, restore_original, encode_safe_shape, encode_rendered_box
 from .rendering.layout import layout_page, PlacementMode
+from .rendering.layout.frozen import hydrate_layout, layout_input_fingerprints, serialize_frozen_layout
 from .mask_builder import build_inpaint_masks, create_mask_sources_overlay
 from .geometry.bubbles import prepare_page_geometry
 from .detection.bubble import serialize_bubble_detections, deserialize_bubble_detections
@@ -671,10 +672,15 @@ class MangaTranslator:
             logger.error(f"Error during translating:\n{traceback.format_exc()}")  
             raise
 
+        translations_doc = serialize_regions(ctx.text_regions if isinstance(ctx.text_regions, list) else [])
+        ctx.result_documents['translations.json'] = translations_doc
         if self._pipeline_run is not None:
-            self._pipeline_run.write_json(
-                'translations.json',
-                serialize_regions(ctx.text_regions if isinstance(ctx.text_regions, list) else []),
+            self._pipeline_run.write_json('translations.json', translations_doc)
+        elif self._current_image_context:
+            await save_result_documents(
+                self._current_image_context['subfolder'],
+                {'translations.json': translations_doc},
+                self.result_root,
             )
 
         await self._report_progress('after-translating')
@@ -749,9 +755,13 @@ class MangaTranslator:
                 for region in (ctx.text_regions or []):
                     if getattr(region, "translation", None) and isinstance(region.translation, str):
                         region.translation = transform_text_case(region.translation)
-            await run_cpu_stage(layout_page, ctx, config, self.font_path, priority=CPU_PRIORITY_BACKGROUND)
+            layout_font = self.font_path or getattr(config.render, 'font_path', None) or get_default_eng_font()
+            await run_cpu_stage(layout_page, ctx, config, layout_font, priority=CPU_PRIORITY_BACKGROUND)
             if self._pipeline_run is not None:
-                self._pipeline_run.write_json('layout.json', serialize_regions(ctx.text_regions))
+                self._pipeline_run.write_json('layout.json', serialize_frozen_layout(
+                    ctx, config, layout_font,
+                    serialize_bubble_detections(getattr(ctx, 'bubble_detections', None) or []),
+                ))
         except Exception as error:
             logger.warning('Production layout failed; preserving the existing render path: %s', error)
 
@@ -2205,9 +2215,6 @@ class MangaTranslator:
             else CPU_PRIORITY_NORMAL
         )
         bubble_detection_enabled = bool(getattr(getattr(config, 'bubble_detection', None), 'enabled', False))
-        if (bubble_detection_enabled
-                and not getattr(ctx, '_bubble_detection_done', False)):
-            await self._detect_speech_bubbles(config, ctx, report_progress=False)
 
         transform_text_case = getattr(config.render, "transform_text_case", None)
         if transform_text_case:
@@ -2220,8 +2227,27 @@ class MangaTranslator:
             stage for stage in getattr(pipeline_run, 'manifest', {}).get('stages', [])
             if stage.get('id') == 'layout'
         ), None)
-        if layout_stage and layout_stage.get('status') == 'completed':
-            ctx._bubble_layout_ready = True
+        if layout_stage and layout_stage.get('status') == 'completed' and pipeline_run is not None:
+            layout_doc = pipeline_run._document('layout.json')
+            if layout_doc is not None:
+                bubble_doc = pipeline_run._document('bubble_detections.json')
+                if bubble_doc is None:
+                    bubble_doc = serialize_bubble_detections(getattr(ctx, 'bubble_detections', None) or [])
+                inputs = layout_input_fingerprints(
+                    ctx.text_regions or [], config, active_font, bubble_doc,
+                    getattr(ctx.img_rgb, 'shape', None),
+                    getattr(ctx, 'inpaint_mask', None) if getattr(ctx, 'inpaint_mask', None) is not None else getattr(ctx, 'mask', None),
+                    layout_doc.get('input_fingerprints', {}).get('mask')
+                    if isinstance(layout_doc, dict) and getattr(ctx, 'inpaint_mask', None) is None and getattr(ctx, 'mask', None) is None
+                    else None,
+                )
+                hydrate_layout(ctx, layout_doc, inputs['fingerprint'])
+                ctx._bubble_detection_done = True
+                ctx._bubble_layout_ready = True
+
+        if (bubble_detection_enabled
+                and not getattr(ctx, '_bubble_detection_done', False)):
+            await self._detect_speech_bubbles(config, ctx, report_progress=False)
 
         if (getattr(ctx, 'img_rgb', None) is not None
                 and not getattr(ctx, '_bubble_layout_ready', False)):
@@ -2229,7 +2255,10 @@ class MangaTranslator:
                 await self._report_progress('layout')
                 await run_cpu_stage(layout_page, ctx, config, active_font, priority=cpu_priority)
                 if self._pipeline_run is not None:
-                    self._pipeline_run.write_json('layout.json', serialize_regions(ctx.text_regions))
+                    bubble_doc = serialize_bubble_detections(getattr(ctx, 'bubble_detections', None) or [])
+                    self._pipeline_run.write_json('layout.json', serialize_frozen_layout(
+                        ctx, config, active_font, bubble_doc,
+                    ))
             except Exception as error:
                 logger.warning('Bubble layout failed; preserving the existing render path: %s', error)
 
@@ -3758,9 +3787,13 @@ class MangaTranslator:
                     for region in (ctx.text_regions or []):
                         if getattr(region, "translation", None) and isinstance(region.translation, str):
                             region.translation = transform_text_case(region.translation)
-                await run_cpu_stage(layout_page, ctx, config, self.font_path, priority=CPU_PRIORITY_BACKGROUND)
+                layout_font = self.font_path or getattr(config.render, 'font_path', None) or get_default_eng_font()
+                await run_cpu_stage(layout_page, ctx, config, layout_font, priority=CPU_PRIORITY_BACKGROUND)
                 if self._pipeline_run is not None:
-                    self._pipeline_run.write_json('layout.json', serialize_regions(ctx.text_regions))
+                    self._pipeline_run.write_json('layout.json', serialize_frozen_layout(
+                        ctx, config, layout_font,
+                        serialize_bubble_detections(getattr(ctx, 'bubble_detections', None) or []),
+                    ))
             except Exception as error:
                 logger.warning('Production layout failed; preserving the existing render path: %s', error)
 
