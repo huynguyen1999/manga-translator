@@ -24,7 +24,6 @@ import { ResultGallery } from "@/components/ResultGallery";
 import { Header } from "@/components/Header";
 import { GroupSelectionModal, type ExistingGroupEntry, type ExistingGroupItem } from "@/components/GroupSelectionModal";
 import { TranslationSubmitModal } from "@/components/TranslationSubmitModal";
-import { PipelineLab } from "@/components/PipelineLab";
 const SearchLab = React.lazy(() => import("@/components/SearchLab"));
 import { PageDetailModal } from "@/components/PageDetailModal";
 import PreviewImage from "@/components/PreviewImage";
@@ -100,10 +99,10 @@ import { PipelineRerunDialog } from "@/components/PipelineRerunDialog";
 
 import {
   dismissSummaryJob,
-  fetchSummaryJobs,
   pauseSummaryJob,
   resumeSummaryJob,
   retrySummaryJob,
+  subscribeSummaryJobs,
   stopSummaryJob,
 } from "@/utils/summaryJobs";
 import {
@@ -329,7 +328,6 @@ export const App: React.FC = () => {
   // New state for improved UI features
   const [translationBatches, setTranslationBatches] = useState<TranslationBatch[]>([]);
   const batchDetailRequestsRef = useRef(new Map<string, Promise<void>>());
-  const batchDetailQueuedRef = useRef(new Set<string>());
   const studioUploadRequestsRef = useRef(new Map<string, Promise<void>>());
   const batchMutationVersionRef = useRef(0);
   const optimisticBatchTranslatorsRef = useRef(new Map<string, TranslatorKey>());
@@ -339,7 +337,6 @@ export const App: React.FC = () => {
 
   const loadTranslationBatchDetails = React.useCallback((batchId: string) => {
     if (batchDetailRequestsRef.current.has(batchId)) {
-      batchDetailQueuedRef.current.add(batchId);
       return batchDetailRequestsRef.current.get(batchId)!;
     }
 
@@ -359,10 +356,6 @@ export const App: React.FC = () => {
       })
       .finally(() => {
         batchDetailRequestsRef.current.delete(batchId);
-        if (batchDetailQueuedRef.current.has(batchId)) {
-          batchDetailQueuedRef.current.delete(batchId);
-          void loadTranslationBatchDetails(batchId);
-        }
       });
     batchDetailRequestsRef.current.set(batchId, request);
     return request;
@@ -400,36 +393,23 @@ export const App: React.FC = () => {
   const studioDropOrderRef = useRef(0);
 
   useEffect(() => {
-    let disposed = false;
-    const refresh = async () => {
-      try {
-        const jobs = await fetchSummaryJobs();
-        if (disposed) return;
-        const previous = previousSummaryJobsRef.current;
-        const completed = jobs.find((job) => {
-          const old = previous?.find((candidate) => candidate.id === job.id);
-          return old?.status === "generating" && (job.status === "ready" || job.status === "error");
+    return subscribeSummaryJobs((jobs) => {
+      const previous = previousSummaryJobsRef.current;
+      const completed = jobs.find((job) => {
+        const old = previous?.find((candidate) => candidate.id === job.id);
+        return old?.status === "generating" && (job.status === "ready" || job.status === "error");
+      });
+      if (completed) {
+        setJobToast({
+          status: completed.status === "ready" ? "ready" : "error",
+          title: completed.title,
+          message: completed.status === "ready" ? "Summary ready" : completed.jobError || "Summary generation failed",
         });
-        if (completed) {
-          setJobToast({
-            status: completed.status === "ready" ? "ready" : "error",
-            title: completed.title,
-            message: completed.status === "ready" ? "Summary ready" : completed.jobError || "Summary generation failed",
-          });
-          window.setTimeout(() => setJobToast(null), 6000);
-        }
-        previousSummaryJobsRef.current = jobs;
-        setSummaryJobs(jobs);
-      } catch {
-        // Keep the last durable job list visible while the server is unavailable.
+        window.setTimeout(() => setJobToast(null), 6000);
       }
-    };
-    void refresh();
-    const interval = window.setInterval(refresh, 2000);
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-    };
+      previousSummaryJobsRef.current = jobs;
+      setSummaryJobs(jobs);
+    });
   }, []);
 
   const effectiveMangaFilter = parsedRoute.overlay === "none"
@@ -559,7 +539,6 @@ export const App: React.FC = () => {
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [pendingTranslationTargets, setPendingTranslationTargets] = useState<StudioFile[]>([]);
   const [pendingFiles, setPendingFiles] = useState<PendingStudioFile[]>([]);
-  const [pipelineLabInitialFile, setPipelineLabInitialFile] = useState<File | null>(null);
   const [recentGroups, setRecentGroups] = useState<string[]>([]);
   const [translationBatchError, setTranslationBatchError] = useState<string | null>(null);
   const [isStudioMangaUploadModalOpen, setIsStudioMangaUploadModalOpen] = useState(false);
@@ -1001,24 +980,8 @@ export const App: React.FC = () => {
                 ) {
                   hasRerenderTerminal = true;
                 }
-                if (existing) {
-                  const updatedAtMs = remoteSummary.updatedAt
-                    ? (typeof remoteSummary.updatedAt === "number" ? remoteSummary.updatedAt : new Date(remoteSummary.updatedAt).getTime())
-                    : 0;
-                  const isUpdated =
-                    existing.updatedAt?.getTime() !== updatedAtMs ||
-                    existing.completedCount !== remoteSummary.completedCount ||
-                    existing.status !== remoteSummary.status ||
-                    existing.failedCount !== remoteSummary.failedCount ||
-                    existing.processingCount !== remoteSummary.processingCount;
-
-                  if (existing.status !== "completed" && remoteSummary.status === "completed") {
-                    hasNewCompletions = true;
-                  }
-
-                  if (isUpdated && (existing.detailsLoaded || existing.items.length > 0 || remoteSummary.status === "completed")) {
-                    void loadTranslationBatchDetails(remoteSummary.id);
-                  }
+                if (existing && existing.status !== "completed" && remoteSummary.status === "completed") {
+                  hasNewCompletions = true;
                 }
               }
               return mergeServerBatches(current, activeRemote, locallyDismissed, optimisticTranslators);
@@ -1032,7 +995,18 @@ export const App: React.FC = () => {
               void loadMangaSummaries();
             }
           }
-        }, () => console.warn("Batch event stream disconnected; retrying..."));
+        }, () => console.warn("Batch event stream disconnected; retrying..."), (serverBatch) => {
+          const optimisticTranslator = optimisticBatchTranslatorsRef.current.get(serverBatch.id);
+          const detailed = toTranslationBatch(serverBatch);
+          const updated = optimisticTranslator && optimisticTranslator !== serverBatch.settings.translator
+            ? { ...detailed, settings: { ...detailed.settings, translator: optimisticTranslator } }
+            : detailed;
+          setTranslationBatches((current) => current.map((batch) =>
+            batch.id === serverBatch.id && (
+              batch.detailsLoaded || batch.items.length > 0 || serverBatch.status === "completed"
+            ) ? updated : batch
+          ));
+        });
       }
     };
     void startSubscription();
@@ -1040,7 +1014,7 @@ export const App: React.FC = () => {
       disposed = true;
       source?.close();
     };
-  }, [loadTranslationBatchDetails, loadMangaSummaries]);
+  }, [loadMangaSummaries]);
 
   // Save navigation and options to localStorage
   useEffect(() => {
@@ -2393,13 +2367,15 @@ export const App: React.FC = () => {
     batchId: string,
     itemId: string,
     keepFailedPagesForEditing = false,
+    fromStage?: string,
   ) => {
     const targetBatch = translationBatches.find((b) => b.id === batchId);
     if (targetBatch?.kind === "manga-upload") {
+      if (fromStage) throw new Error("Stage retries are only available for translated pages.");
       return resumeStudioMangaUpload(targetBatch);
     }
     batchMutationVersionRef.current += 1;
-    return retryBatchItem(batchId, itemId, keepFailedPagesForEditing).catch((error) => {
+    return retryBatchItem(batchId, itemId, keepFailedPagesForEditing, fromStage).catch((error) => {
       console.warn("Failed to retry batch item:", error);
       throw error;
     }).then((serverBatch) => {
@@ -2410,7 +2386,7 @@ export const App: React.FC = () => {
     });
   };
 
-  const retryFinishedImage = (image: FinishedImage) => {
+  const retryFinishedImage = (image: FinishedImage, fromStage?: string) => {
     const match = image.folder
       ? translationBatches
           .flatMap((batch) => batch.items.map((item) => ({ batch, item })))
@@ -2419,7 +2395,7 @@ export const App: React.FC = () => {
     if (!match) {
       throw new Error("This image is not linked to a retryable translation batch.");
     }
-    return retryTranslationItem(match.batch.id, match.item.id);
+    return retryTranslationItem(match.batch.id, match.item.id, false, fromStage);
   };
 
   const [pipelineRerunState, setPipelineRerunState] = useState<{
@@ -2651,10 +2627,6 @@ export const App: React.FC = () => {
                 onSelectAll={selectAllFiles}
                 onDeselectAll={deselectAllFiles}
                 onOpenLightbox={handleOpenLightbox}
-                onOpenInPipelineLab={(targetFile) => {
-                  setPipelineLabInitialFile(targetFile);
-                  navigate("/pipeline");
-                }}
                 excludedColorFiles={excludedColorFiles}
                 autoDetectedColorFiles={autoDetectedColorFiles}
                 onToggleExcludeColor={toggleExcludeColorFile}
@@ -2727,6 +2699,7 @@ export const App: React.FC = () => {
               onOpenPageView={handleOpenPageView}
               onOpenPageEdit={handleOpenPageEdit}
               onRetryImage={retryFinishedImage}
+              onRetryFromStage={retryFinishedImage}
               onRerenderImage={(image) => rerenderImages([image])}
               onRerenderImages={rerenderImages}
               galleryRevision={galleryRevision}
@@ -2763,11 +2736,6 @@ export const App: React.FC = () => {
 
         {/* Diagnostic workspace */}
         {activeView === "search" && <React.Suspense fallback={<p role="status">Loading Search Lab…</p>}><SearchLab /></React.Suspense>}
-        {activeView === "pipeline" && (
-          <div className="space-y-6">
-            <PipelineLab showHeader={false} initialFile={pipelineLabInitialFile} />
-          </div>
-        )}
       </main>
 
       {/* Fast submissions keep the original one-step group dialog. */}
@@ -2820,6 +2788,7 @@ export const App: React.FC = () => {
           image={selectedImageForModal}
           onClose={closeStudioViewer}
           onRetry={selectedImageRetry ?? (selectedImageForModal.folder ? retryFinishedImage : undefined)}
+          onRetryFromStage={selectedImageForModal.folder ? retryFinishedImage : undefined}
           onRerender={selectedImageForModal.folder ? (image) => handleOpenPipelineRerun([image], selectedImageForModal.groupId ?? undefined, selectedImageForModal.mangaTitle) : undefined}
           titlePrefix="Studio preview"
         />

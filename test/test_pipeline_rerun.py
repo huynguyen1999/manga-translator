@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
@@ -10,6 +11,7 @@ from server.batch_scheduler import BatchScheduler
 from server.batch_store import BatchStore
 from server.pipeline_rerun import (
     PipelineRerunMode,
+    _copy_file_atomic,
     commit_rerun_artifacts,
     execute_rerun_plan,
     load_rerun_context,
@@ -65,6 +67,58 @@ class _MockTranslator:
 
 
 class PipelineRerunTest(unittest.IsolatedAsyncioTestCase):
+    def test_atomic_copy_keeps_last_good_target_on_replace_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "new.bin"
+            target = Path(root) / "result.bin"
+            source.write_bytes(b"replacement")
+            target.write_bytes(b"last good")
+
+            with patch("server.pipeline_rerun.os.replace", side_effect=OSError("disk error")):
+                with self.assertRaises(OSError):
+                    _copy_file_atomic(source, target)
+
+            self.assertEqual(target.read_bytes(), b"last good")
+            self.assertEqual([path.name for path in Path(root).glob(".*.tmp")], [])
+
+    async def test_rerun_activates_versioned_image_and_document_together(self):
+        with tempfile.TemporaryDirectory() as root:
+            result_dir = Path(root) / "page-1"
+            staging_dir = Path(root) / "staging"
+            result_dir.mkdir()
+            staging_dir.mkdir()
+            Image.new("RGB", (4, 3), "red").save(result_dir / "final.jpg")
+            Image.new("RGB", (4, 3), "blue").save(staging_dir / "final.jpg", format="JPEG")
+            (staging_dir / "text_regions.json").write_text("[]", encoding="utf-8")
+
+            class Database:
+                committed = None
+
+                async def get_page_id(self, _folder):
+                    return "page-id"
+
+                async def commit_pipeline_outputs(self, _folder, documents, artifacts):
+                    self.committed = (documents, artifacts)
+                    return True
+
+            database = Database()
+            await commit_rerun_artifacts(
+                result_dir,
+                staging_dir,
+                resolve_rerun_plan(PipelineRerunMode.TYPESETTING),
+                database=database,
+            )
+
+            documents, artifacts = database.committed
+            self.assertIn("text_regions.json", documents)
+            self.assertEqual(artifacts[0]["artifact_type"], "final_image")
+            versioned = Path(root) / artifacts[0]["relative_path"]
+            self.assertTrue(versioned.is_file())
+            with Image.open(versioned) as image:
+                self.assertEqual(image.getpixel((0, 0)), (0, 0, 254))
+            with Image.open(result_dir / "final.jpg") as image:
+                self.assertEqual(image.getpixel((0, 0)), (0, 0, 254))
+
     def setUp(self):
         self.translator = _MockTranslator()
         self.config = Config()
@@ -152,6 +206,54 @@ class PipelineRerunTest(unittest.IsolatedAsyncioTestCase):
             with Image.open(folder / "final.jpg") as final:
                 self.assertEqual(final.getpixel((0, 0)), (0, 0, 254))
 
+    async def test_full_rerun_stages_output_before_replacing_live_artifacts(self):
+        with tempfile.TemporaryDirectory() as root:
+            results_dir = Path(root)
+            folder = results_dir / "page-1"
+            self._create_sample_folder(folder, with_all=True)
+            staging_dir = folder / ".rerun-full"
+            staging_dir.mkdir()
+            plan = resolve_rerun_plan(PipelineRerunMode.FULL)
+            ctx, state = await load_rerun_context(folder, plan, self.config)
+
+            class FullTranslator:
+                def __init__(self):
+                    self._pipeline_run = object()
+                    self._current_image_context = {"subfolder": "page-1"}
+                    self._result_path_override = None
+                    self.verbose = False
+
+                def _result_path(self, name):
+                    return str(Path(self._result_path_override) / name)
+
+                async def _translate(self, _config, context):
+                    Image.new("RGB", (8, 8), "blue").save(self._result_path("final.jpg"))
+                    context.result = Image.new("RGB", (8, 8), "blue")
+                    context.text_regions = [TextBlock(
+                        [[[1, 1], [7, 1], [7, 7], [1, 7]]], texts=["fresh text"]
+                    )]
+                    context.result_documents = {"ocr.json": [{"text": "fresh text"}]}
+                    return context
+
+            translator = FullTranslator()
+            previous_run = translator._pipeline_run
+            executed_ctx, _ = await execute_rerun_plan(
+                translator, ctx, self.config, plan, state, staging_dir
+            )
+
+            self.assertEqual(translator._pipeline_run, previous_run)
+            self.assertFalse(translator.verbose)
+            with Image.open(folder / "final.jpg") as live:
+                self.assertGreater(live.getpixel((0, 0))[0], live.getpixel((0, 0))[2])
+            with Image.open(staging_dir / "final.jpg") as staged:
+                self.assertGreater(staged.getpixel((0, 0))[2], staged.getpixel((0, 0))[0])
+            self.assertTrue((staging_dir / "translations.json").is_file())
+            self.assertEqual(executed_ctx.debug_folder, "page-1")
+
+            await commit_rerun_artifacts(folder, staging_dir, plan)
+            with Image.open(folder / "final.jpg") as final:
+                self.assertGreater(final.getpixel((0, 0))[2], final.getpixel((0, 0))[0])
+
     async def test_translation_typesetting_rerun(self):
         with tempfile.TemporaryDirectory() as root:
             results_dir = Path(root)
@@ -238,7 +340,14 @@ class PipelineRerunTest(unittest.IsolatedAsyncioTestCase):
 
             class _ExecutorsWrapper:
                 def __init__(self, translator):
-                    self.worker = translator
+                    class Worker:
+                        def __init__(self, wrapped_translator):
+                            self.translator = wrapped_translator
+
+                        async def _run_translation(self, operation):
+                            return await operation()
+
+                    self.worker = Worker(translator)
 
                 def free_executors(self):
                     return 1

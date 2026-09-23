@@ -7,6 +7,8 @@ from typing import List, Tuple, Optional, Dict, Any
 import cv2
 import numpy as np
 
+from ..geometry.bubbles import compose_bubble_cleanup, prepare_page_geometry
+
 
 def encode_safe_shape(interior, scale_x=1.0, scale_y=1.0):
     """Store one group's safe interior, not the page-wide union mask."""
@@ -1299,66 +1301,21 @@ def _source_region_snapshot(region, reading_order: int):
     }
 
 
-def prepare_bubble_masks(image, regions, padding: int = 9):
-    """Attach translation-independent bubble geometry and return safe interiors.
-
-    Text erasure is owned by the text detector. This function only derives
-    bubble geometry and protects dark source structure near the semantic edge.
-    """
-    combined = np.zeros(image.shape[:2], np.uint8)
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    protected_edges = np.zeros(image.shape[:2], np.uint8)
-    for region in regions:
-        mask = getattr(region, "_bubble_mask", None)
-        if mask is None or not np.any(mask):
-            continue
-        component = (np.asarray(mask) > 0).astype(np.uint8)
-        contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        restore = np.zeros_like(component)
-        cv2.drawContours(restore, contours, -1, 1, cv2.FILLED)
-        pad_size = max(3, padding)
-        interior = cv2.erode(restore, np.ones((pad_size, pad_size), np.uint8))
-        if not np.any(interior):
-            continue
-
-        # Search only near the segmentation boundary. Dark pixels in the
-        # bubble body belong to text/artwork and are not structural evidence.
-        search_size = max(3, min(15, int(padding) | 1))
-        search_band = restore - cv2.erode(restore, np.ones((search_size, search_size), np.uint8))
-        outline = ((gray < 220) & (search_band > 0)).astype(np.uint8)
-        region._bubble_semantic_boundary = (
-            (restore - cv2.erode(restore, np.ones((3, 3), np.uint8))) * 255
-        ).astype(np.uint8)
-        region._bubble_actual_outline = (outline * 255).astype(np.uint8)
-        region_edge = cv2.dilate(
-            region._bubble_actual_outline,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
-        )
-        region._bubble_protected_edge = region_edge
-        protected_edges = cv2.bitwise_or(protected_edges, region_edge)
-
-        region._bubble_restore = restore
-        region._bubble_interior = interior
-        # Kept as a compatibility/debug field; it is deliberately not an
-        # inpainting source mask.
-        region._bubble_cleanup = (interior * 255).astype(np.uint8)
-        x, y, w, h = cv2.boundingRect(interior)
-        region.bubble_bounds = [x, y, x + w, y + h]
-        region.layout_bounds = list(region.bubble_bounds)
-        dist = cv2.distanceTransform(interior.astype(np.uint8), cv2.DIST_L2, 5)
-        if np.any(dist):
-            flat = int(np.argmax(dist))
-            cy, cx = np.unravel_index(flat, dist.shape)
-            region._bubble_center = (int(cx), int(cy))
-        else:
-            region._bubble_center = ((x + x + w) // 2, (y + y + h) // 2)
-        combined = cv2.bitwise_or(combined, (interior * 255).astype(np.uint8))
-
-    # Strictly zero out any protected speech bubble boundary edge outlines
-    if np.any(protected_edges):
-        combined[protected_edges > 0] = 0
-    return combined
-
+def prepare_bubble_masks(image, regions, padding: int = 9, profile=None, return_cleanup: bool = True, page_geometry=None):
+    """Compatibility wrapper for callers that still request a page cleanup mask."""
+    if page_geometry is not None and page_geometry.matches(image, regions, padding):
+        if profile is not None:
+            workload = profile.setdefault("workload", {})
+            workload["unique_bubble_contours"] = 0
+            workload["distance_transform_calls"] = 0
+            workload["unique_bubble_count"] = len(page_geometry.bubbles)
+        if not return_cleanup:
+            return None
+        return compose_bubble_cleanup(page_geometry, image.shape[:2])
+    _, cleanup = prepare_page_geometry(
+        image, regions, padding, return_cleanup=return_cleanup, profile=profile,
+    )
+    return cleanup
 
 def prepare_bubbles(image, regions, font_path, render_config, group: bool = True):
     from . import _RENDER_LOCK, text_render, _horizontal_layout, _find_horizontal_placement, _points_for_rect, fg_bg_compare

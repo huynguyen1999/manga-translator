@@ -1,293 +1,171 @@
-"""Test that professional-mode rendering loads and releases images one at a time.
-
-This test is fully mocked — no model weights are needed.  It verifies the two
-key memory-safety invariants introduced by the deferred-image-loading change:
-
-1. During ``translate_professionally`` no PIL image is ever attached to any ctx
-   (``ctx.input`` remains ``None`` throughout the translation phase).
-2. During rendering, at most ``_RENDER_SEMAPHORE_SIZE`` images are open at once.
-3. After every render completes, ``ctx.input`` is ``None`` again (image released).
-4. The rolling ``previous`` string in ``localize_story`` / ``edit_story`` never
-   exceeds 8 000 characters.
-"""
+"""Memory checks for stage-major translation batches."""
 
 from __future__ import annotations
 
 import asyncio
-import io
-import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
-
-from PIL import Image
+from unittest.mock import AsyncMock, patch
 
 from manga_translator import Context
 from manga_translator.config import TranslatorConfig
-from server.batch_scheduler import BatchScheduler, _RENDER_SEMAPHORE_SIZE
+from server.batch_scheduler import BatchScheduler
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _make_png_bytes(size: tuple[int, int] = (4, 4)) -> bytes:
-    buf = io.BytesIO()
-    Image.new("RGB", size, color=(128, 64, 32)).save(buf, "PNG")
-    return buf.getvalue()
-
-
-def _make_ctx(input_path: Path) -> Context:
-    ctx = Context()
-    ctx.text_regions = []
-    ctx._deferred_image_path = input_path
-    ctx.debug_folder = f"result-{input_path.stem}"
-    ctx.image_context = {
-        "subfolder": ctx.debug_folder,
-        "file_md5": input_path.stem,
-        "request_id": None,
-    }
-    return ctx
-
-
-def _make_config() -> SimpleNamespace:
-    return SimpleNamespace(
-        page_order=1,
-        translator=TranslatorConfig(
-            translator="deepseek",
-            target_lang="ENG",
-            translation_quality="professional",
-        ),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 class DeferredImageLoadingTest(unittest.IsolatedAsyncioTestCase):
-    """Verify that professional-mode render loads and releases images per-page."""
-
-    async def _run_render_group(
-        self,
-        n_pages: int,
-        result_root: Path,
-        image_paths: list[Path],
-        result_dirs: list[Path],
-    ) -> dict:
-        """Run _process_translation_group with mock workers and return stats."""
-        stats = {
-            "concurrent_peak": 0,
-            "concurrent_now": 0,
-            "inputs_at_translate_time": [],   # ctx.input values during translation
-            "inputs_after_render": [],         # ctx.input values after render
-            "open_calls": 0,
-        }
-
-        # Build contexts with deferred paths
-        configs = [_make_config() for _ in range(n_pages)]
-        ctxs = [_make_ctx(p) for p in image_paths]
-        contexts_with_configs = list(zip(ctxs, configs))
-
-        # Spy: record ctx.input during translation
-        for ctx in ctxs:
-            stats["inputs_at_translate_time"].append(ctx.input)
-
-        # Track Image.open calls
-        real_open = Image.open
-
-        def spying_open(path, *a, **kw):
-            stats["open_calls"] += 1
-            return real_open(path, *a, **kw)
-
-        # Worker that tracks concurrency
-        class MockWorker:
-            def __init__(self):
-                self.translator = SimpleNamespace(_progress_hooks=[])
-
-            async def render(self, ctx, config):
-                stats["concurrent_now"] += 1
-                stats["concurrent_peak"] = max(
-                    stats["concurrent_peak"], stats["concurrent_now"]
-                )
-                await asyncio.sleep(0.02)  # simulate real async work
-                # render writes the result file
-                folder = ctx.debug_folder
-                result_dir = result_root / folder
-                result_dir.mkdir(parents=True, exist_ok=True)
-                (result_dir / "final.jpg").write_bytes(_make_png_bytes())
-                stats["concurrent_now"] -= 1
-                # Record ctx.input at this point (should be cleared after render)
-                return ctx
-
-        worker = MockWorker()
-        worker_queue: asyncio.Queue = asyncio.Queue()
-        # Put enough workers for all pages (semaphore limits concurrency, not workers)
-        for _ in range(n_pages):
-            worker_queue.put_nowait(MockWorker())
-
-        class MockExecutors:
-            def free_executors(self):
-                return worker_queue.qsize()
-
-            async def find_executor(self):
-                return await worker_queue.get()
-
-            async def free_executor(self, w):
-                worker_queue.put_nowait(w)
-
-        # Minimal batch store
-        items = [
-            {
-                "id": f"page-{i}",
-                "name": f"{i}.png",
-                "stage": "awaiting_translation",
+    async def _translate_without_page_pixels(self, quality: str) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result_root = Path(tmp)
+            count = 8
+            items = [
+                {
+                    "id": f"page-{index}",
+                    "name": f"{index}.png",
+                    "status": "processing",
+                    "stage": "awaiting_translation",
+                    "resultFolder": f"result-{index}",
+                }
+                for index in range(count)
+            ]
+            batch = {
+                "id": "manga",
                 "status": "processing",
-                "resultFolder": f"result-{i}",
-                # No per-item "settings" key — _config_for falls back to batch settings
+                "settings": {"translationQuality": quality},
+                "items": items,
             }
-            for i in range(n_pages)
-        ]
-        batch_data = {
-            "id": "test-batch",
-            "items": items,
-            "status": "processing",
-            "settings": {"translationQuality": "professional", "translationBatchSize": n_pages},
-        }
 
-        class MockStore:
-            _data = batch_data
+            class Store:
+                async def get_batch(self, _batch_id):
+                    return batch
 
-            async def get_batch(self, _bid):
-                return dict(self._data)
+                async def mutate(self, _batch_id, mutator):
+                    mutator(batch)
 
-            async def mutate(self, _bid, fn):
-                fn(self._data)
+                async def input_path(self, *_args):
+                    raise AssertionError("translation must not read page pixels")
 
-            async def input_path(self, _bid, item_id):
-                idx = int(item_id.split("-")[1])
-                return image_paths[idx]
+            class Run:
+                def __init__(self):
+                    self.manifest = {"stages": [{"id": "translation", "status": "pending"}]}
+                    self.documents = {}
 
-        store = MockStore()
-        executors = MockExecutors()
-        scheduler = BatchScheduler(store, executors, result_root)
+                def write_json(self, name, payload):
+                    self.documents[name] = payload
 
-        # Patch Image.open to count calls
-        with patch("server.batch_scheduler.Image.open", side_effect=spying_open):
-            # Simulate translate_batch_contexts returning translated pairs
-            # (ctx.input is None for all — deferred loading)
-            instance_mock = MagicMock()
-            instance_mock.translator = SimpleNamespace(
-                _progress_hooks=[],
-                add_progress_hook=lambda h: None,
+                def _stage(self, stage_id):
+                    return next(stage for stage in self.manifest["stages"] if stage["id"] == stage_id)
+
+                def _finish(self, stage_id):
+                    self._stage(stage_id)["status"] = "completed"
+
+                async def checkpoint(self):
+                    pass
+
+                def release_runtime(self):
+                    pass
+
+            runs = {item["resultFolder"]: Run() for item in items}
+            observed_inputs = []
+
+            class Translator:
+                def __init__(self):
+                    self._progress_hooks = []
+
+                def add_progress_hook(self, hook):
+                    self._progress_hooks.append(hook)
+
+            class Instance:
+                def __init__(self):
+                    self.translator = Translator()
+
+                async def translate_batch_contexts(self, contexts, batch_size=None):
+                    observed_inputs.extend(ctx.input for ctx, _ in contexts)
+                    return contexts
+
+            class Executors:
+                async def free_executor(self, _instance):
+                    pass
+
+            scheduler = BatchScheduler(Store(), Executors(), result_root)
+            config = SimpleNamespace(
+                translator=TranslatorConfig(translator="deepseek", target_lang="ENG", translation_quality=quality)
             )
-            instance_mock.translate_batch_contexts = AsyncMock(
-                return_value=contexts_with_configs
-            )
-            instance_mock.render = AsyncMock(side_effect=worker.render)
 
-            # Wire render to each worker via executors
-            async def patched_render(ctx, config):
-                folder = ctx.debug_folder
-                result_dir = result_root / folder
-                result_dir.mkdir(parents=True, exist_ok=True)
-                (result_dir / "final.jpg").write_bytes(_make_png_bytes())
-                return ctx
+            async def checkpoint(folder):
+                return runs[folder]
 
-            # We exercise _process_translation_group directly
-            claimed = [dict(item) for item in items]
-            for item in claimed:
-                item["settings"] = {"translationQuality": "professional"}
+            claimed = [{**item, "settings": {}} for item in items]
+            with (
+                patch.object(scheduler, "_checkpoint_run", side_effect=checkpoint),
+                patch.object(BatchScheduler, "_config_for", return_value=config),
+            ):
+                await scheduler._process_translation_group("manga", claimed, Instance())
 
-            # Replace executors.find_executor so _render_item gets workers from queue
-            await scheduler._process_translation_group("test-batch", claimed, instance_mock)
+            self.assertEqual(observed_inputs, [None] * count)
+            self.assertTrue(all(item["status"] == "queued" for item in batch["items"]))
+            self.assertTrue(all(item["pipelineStage"] == "mask_generation" for item in batch["items"]))
+            self.assertTrue(all(run._stage("translation")["status"] == "completed" for run in runs.values()))
 
-        # Collect post-render ctx.input states
-        for ctx in ctxs:
-            stats["inputs_after_render"].append(ctx.input)
+    async def test_professional_translation_keeps_all_source_pages_on_disk(self):
+        await self._translate_without_page_pixels("professional")
 
-        return stats
+    async def test_fast_translation_keeps_all_source_pages_on_disk(self):
+        await self._translate_without_page_pixels("fast")
 
-    async def test_no_image_loaded_before_render_phase(self):
-        """ctx.input must be None for all pages during the translation phase."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            n = 10
-            image_paths = []
-            for i in range(n):
-                p = root / f"{i}.png"
-                p.write_bytes(_make_png_bytes())
-                image_paths.append(p)
-                (root / f"result-{i}").mkdir(exist_ok=True)
 
-            stats = await self._run_render_group(n, root, image_paths, [])
-
-        # All ctx.input values during translate time were None (deferred)
-        self.assertTrue(
-            all(v is None for v in stats["inputs_at_translate_time"]),
-            f"Some images were pre-loaded: {stats['inputs_at_translate_time']}",
+class BatchRenderCpuLaneTest(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_render_uses_background_cpu_lane(self):
+        from manga_translator.config import Config
+        from manga_translator.manga_translator import (
+            CPU_PRIORITY_BACKGROUND,
+            MangaTranslator,
+            render_page,
         )
 
-    async def test_images_released_after_render(self):
-        """ctx.input must be None for every page after its render completes."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            n = 10
-            image_paths = []
-            for i in range(n):
-                p = root / f"{i}.png"
-                p.write_bytes(_make_png_bytes())
-                image_paths.append(p)
-                (root / f"result-{i}").mkdir(exist_ok=True)
+        translator = object.__new__(MangaTranslator)
+        translator._model_usage_timestamps = {}
+        translator.font_path = None
+        ctx = Context()
+        ctx.text_regions = []
+        ctx.img_rgb = None
+        ctx.img_inpainted = object()
+        ctx._bubble_detection_done = True
+        ctx._background_batch_render = True
+        expected = object()
+        cpu_stage = AsyncMock(return_value=expected)
 
-            stats = await self._run_render_group(n, root, image_paths, [])
+        with patch("manga_translator.manga_translator.run_cpu_stage", cpu_stage):
+            result = await translator._run_text_rendering(Config(), ctx)
 
-        self.assertTrue(
-            all(v is None for v in stats["inputs_after_render"]),
-            f"Some images were not released: {stats['inputs_after_render']}",
+        self.assertIs(result, expected)
+        self.assertIs(cpu_stage.await_args.args[0], render_page)
+        self.assertEqual(cpu_stage.await_args.kwargs["priority"], CPU_PRIORITY_BACKGROUND)
+
+    async def test_batch_render_reuses_completed_checkpoint_layout(self):
+        from manga_translator.config import Config
+        from manga_translator.manga_translator import MangaTranslator, render_page
+
+        translator = object.__new__(MangaTranslator)
+        translator._model_usage_timestamps = {}
+        translator.font_path = None
+        translator._pipeline_run = SimpleNamespace(
+            manifest={"stages": [{"id": "layout", "status": "completed"}]}
         )
+        ctx = Context()
+        ctx.img_rgb = object()
+        ctx.img_inpainted = object()
+        ctx.text_regions = []
+        ctx._bubble_detection_done = True
+        cpu_stage = AsyncMock()
 
-    async def test_render_concurrency_bounded_by_semaphore(self):
-        """Peak concurrent renders must not exceed _RENDER_SEMAPHORE_SIZE."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            n = 20  # more pages than the semaphore limit
-            image_paths = []
-            for i in range(n):
-                p = root / f"{i}.png"
-                p.write_bytes(_make_png_bytes())
-                image_paths.append(p)
-                (root / f"result-{i}").mkdir(exist_ok=True)
+        with patch("manga_translator.manga_translator.run_cpu_stage", cpu_stage):
+            await translator._run_text_rendering(Config(), ctx)
 
-            stats = await self._run_render_group(n, root, image_paths, [])
-
-        self.assertLessEqual(
-            stats["concurrent_peak"],
-            _RENDER_SEMAPHORE_SIZE,
-            f"Peak concurrency {stats['concurrent_peak']} exceeded semaphore size {_RENDER_SEMAPHORE_SIZE}",
-        )
-
-    async def test_image_open_called_once_per_page(self):
-        """Image.open should be called exactly once per page (at render time, not before)."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            n = 10
-            image_paths = []
-            for i in range(n):
-                p = root / f"{i}.png"
-                p.write_bytes(_make_png_bytes())
-                image_paths.append(p)
-                (root / f"result-{i}").mkdir(exist_ok=True)
-
-            stats = await self._run_render_group(n, root, image_paths, [])
-
-        self.assertEqual(
-            stats["open_calls"],
-            n,
-            f"Expected {n} Image.open calls (one per page), got {stats['open_calls']}",
-        )
+        cpu_stage.assert_awaited_once()
+        self.assertIs(cpu_stage.await_args.args[0], render_page)
+        self.assertTrue(ctx._bubble_layout_ready)
 
 
 class BoundedRollingContextTest(unittest.IsolatedAsyncioTestCase):

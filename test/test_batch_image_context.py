@@ -22,7 +22,7 @@ class BatchImageContextTest(unittest.TestCase):
     def test_context_uses_real_image_id_without_verbose_mode(self):
         translator = MangaTranslator.__new__(MangaTranslator)
         translator.verbose = False
-        translator._pipeline_lab_run = None
+        translator._pipeline_run = None
         config = Config()
         config.request_id = "batch:item-1"
 

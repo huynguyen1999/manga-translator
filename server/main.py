@@ -46,7 +46,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import gc
 from PIL import Image, ImageFile, ImageOps
@@ -54,7 +54,13 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 Image.MAX_IMAGE_PIXELS = None
 
 from manga_translator.config import Config, MAX_MANGA_TITLE_LENGTH
-from manga_translator.pipeline_lab import PipelineLabRun, set_document_saver
+from manga_translator.pipeline.cpu import (
+    CPU_PRIORITY_INTERACTIVE,
+    run_cpu_stage,
+    shutdown_cpu_stage_executor,
+)
+from manga_translator.pipeline.stages import STAGE_DEPENDENCIES, STAGE_ORDER, PipelineStage
+from manga_translator.pipeline.run import set_document_saver
 from manga_translator.utils.device_memory import empty_device_cache
 from server.instance import ExecutorInstance, executor_instances
 from server.myqueue import SummaryQueueElement, task_queue, wait_in_queue
@@ -214,6 +220,7 @@ async def lifespan(_app: FastAPI):
             await summary_scheduler.stop()
             summary_scheduler = None
         await batch_scheduler.stop()
+        await shutdown_cpu_stage_executor()
         set_result_indexer(None)
         set_request_lookup(None)
         set_document_saver(None)
@@ -231,17 +238,6 @@ def _postgres_required() -> PostgresStore:
     if store is None:
         raise HTTPException(503, detail="PostgreSQL is not available")
     return store
-
-
-async def _pipeline_run(folder: str) -> PipelineLabRun | None:
-    active = PipelineLabRun.get_or_load(RESULT_ROOT, folder)
-    if active is not None:
-        return active
-    return PipelineLabRun.from_documents(
-        RESULT_ROOT,
-        folder,
-        await _postgres_required().get_documents(folder),
-    )
 
 
 async def _index_context_result(ctx: Any) -> None:
@@ -450,14 +446,6 @@ class AddSeriesMembersRequest(BaseModel):
 
 class MoveMangaSeriesRequest(BaseModel):
     targetSeriesId: str
-
-def _pipeline_lab_path(folder_name: str) -> Path:
-    result_dir = RESULT_ROOT.resolve()
-    folder_path = (result_dir / folder_name).resolve()
-    if folder_path.parent != result_dir or not folder_path.is_dir():
-        raise HTTPException(404, detail="Pipeline Lab run not found")
-    return folder_path
-
 
 def natural_keys(text: str):
     """Natural sort key for strings with numbers (e.g. page_1 before page_10)"""
@@ -812,12 +800,31 @@ async def list_batches():
 
 async def _batch_events():
     last_snapshot = None
+    previous_batches = {}
+    has_previous_snapshot = False
     while True:
         batches = await batch_store.list_batch_summaries()
         snapshot = json.dumps(batches, sort_keys=True, separators=(",", ":"))
         if snapshot != last_snapshot:
+            current_batches = {
+                batch["id"]: json.dumps(batch, sort_keys=True, separators=(",", ":"))
+                for batch in batches
+            }
             last_snapshot = snapshot
             yield f"data: {snapshot}\n\n"
+            if has_previous_snapshot:
+                # ponytail: broadcast changed full batches; scoped subscriptions if payload fanout grows.
+                for batch in batches:
+                    encoded = current_batches[batch["id"]]
+                    if previous_batches.get(batch["id"]) == encoded:
+                        continue
+                    try:
+                        details = await batch_store.get_batch(batch["id"])
+                    except BatchNotFound:
+                        continue
+                    yield f"event: batch_details\ndata: {json.dumps(details)}\n\n"
+            previous_batches = current_batches
+            has_previous_snapshot = True
         else:
             yield ": keep-alive\n\n"
         await asyncio.sleep(1)
@@ -1031,6 +1038,7 @@ async def update_batch(batch_id: str, data: UpdateBatchRequest):
 
 class RetryBatchItemRequest(BaseModel):
     keep_failed_pages_for_editing: bool | None = None
+    from_stage: str | None = Field(None, alias="fromStage")
 
 
 @app.post("/batches/{batch_id}/items/{item_id}/retry", tags=["api", "batches"])
@@ -1045,6 +1053,7 @@ async def retry_batch_item(
             batch_id,
             item_id,
             data.keep_failed_pages_for_editing if data else None,
+            data.from_stage if data else None,
         )
     except Exception as error:
         raise _batch_http_error(error) from error
@@ -1071,14 +1080,9 @@ async def delete_batch_item(batch_id: str, item_id: str):
     except Exception as error:
         raise _batch_http_error(error) from error
 
-@app.get("/pipeline-lab/runs", tags=["api", "pipeline-lab"])
-@app.get("/api/pipeline-lab/runs", tags=["api", "pipeline-lab"])
-async def list_pipeline_lab_runs():
-    return await _postgres_required().list_pipeline_runs()
-
-@app.get("/pipeline-lab/runs/{folder_name}/manifest", tags=["api", "pipeline-lab"])
-@app.get("/api/pipeline-lab/runs/{folder_name}/manifest", tags=["api", "pipeline-lab"])
-async def get_pipeline_lab_manifest(folder_name: str):
+@app.get("/pipeline-runs/{folder_name}/manifest", tags=["api", "pipeline"])
+@app.get("/api/pipeline-runs/{folder_name}/manifest", tags=["api", "pipeline"])
+async def get_pipeline_manifest(folder_name: str):
     store = _postgres()
     manifest = None
     if store is not None:
@@ -1113,10 +1117,9 @@ async def get_pipeline_lab_manifest(folder_name: str):
             duration_ms = meta.get("durationMs")
             manifest = {
                 "version": 1,
-                "kind": "pipeline-lab",
+                "kind": "pipeline-run",
                 "folder": folder_name,
                 "status": "completed",
-                "manual": False,
                 "createdAt": created_at,
                 "updatedAt": finished_at or created_at,
                 "source": {
@@ -1135,110 +1138,50 @@ async def get_pipeline_lab_manifest(folder_name: str):
                 ],
             }
     if manifest is None:
-        raise HTTPException(404, detail="Pipeline Lab run not found")
+        raise HTTPException(404, detail="Pipeline run not found")
+    manifest_stages = {}
+    stage_aliases = {"upscaling": "upscale", "textline_merge": "text_grouping"}
+
+    def canonical_stage_id(stage_id: str) -> str:
+        return stage_aliases.get(stage_id, stage_id)
+
+    for stage in manifest.get("stages", []):
+        if not isinstance(stage, dict) or not stage.get("id"):
+            continue
+        stage_id = canonical_stage_id(str(stage["id"]))
+        manifest_stages[stage_id] = {**stage, "id": stage_id}
+    if store is not None:
+        try:
+            persisted_stages = await store.get_pipeline_stage_state(folder_name)
+        except Exception:
+            persisted_stages = []
+        if persisted_stages:
+            for stage in persisted_stages:
+                stage_id = canonical_stage_id(stage["stage"])
+                manifest_stages[stage_id] = {
+                    **manifest_stages.get(stage_id, {}),
+                    "id": stage_id,
+                    "label": manifest_stages.get(stage_id, {}).get(
+                        "label", stage_id.replace("_", " ").title()
+                    ),
+                    "status": stage["status"],
+                    "startedAt": stage["started_at"],
+                    "finishedAt": stage["completed_at"],
+                    "durationMs": stage["duration_ms"],
+                    "reason": stage["error_message"],
+                }
+    stage_order = {stage.value: index for index, stage in enumerate(STAGE_ORDER)}
+    manifest["stages"] = sorted(
+        manifest_stages.values(),
+        key=lambda stage: stage_order.get(stage.get("id"), len(stage_order)),
+    )
+    for stage in manifest["stages"]:
+        try:
+            dependencies = STAGE_DEPENDENCIES[PipelineStage(stage["id"])]
+        except (KeyError, ValueError):
+            dependencies = frozenset()
+        stage["dependsOn"] = [dependency.value for dependency in STAGE_ORDER if dependency in dependencies]
     return manifest
-
-@app.delete("/pipeline-lab/runs/{folder_name}", tags=["api", "pipeline-lab"])
-@app.delete("/api/pipeline-lab/runs/{folder_name}", tags=["api", "pipeline-lab"])
-async def delete_pipeline_lab_run(folder_name: str):
-    folder_path = _pipeline_lab_path(folder_name)
-    if await _postgres_required().get_document(folder_name, "pipeline_manifest.json") is None:
-        raise HTTPException(404, detail="Pipeline Lab run not found")
-    await _postgres_required().delete_documents(folder_name)
-    await asyncio.to_thread(shutil.rmtree, folder_path, True)
-    return {"status": "deleted", "folder": folder_name}
-
-@app.post("/pipeline-lab/runs/{folder_name}/continue", tags=["api", "pipeline-lab"])
-@app.post("/api/pipeline-lab/runs/{folder_name}/continue", tags=["api", "pipeline-lab"])
-async def continue_pipeline_lab_run(folder_name: str):
-    _pipeline_lab_path(folder_name)
-    run = await _pipeline_run(folder_name)
-    if run is None:
-        raise HTTPException(404, detail="Pipeline Lab run not found")
-    run.request_continue()
-    return {"status": "continue_requested", "folder": folder_name}
-
-@app.post("/pipeline-lab/runs/{folder_name}/stop", tags=["api", "pipeline-lab"])
-@app.post("/api/pipeline-lab/runs/{folder_name}/stop", tags=["api", "pipeline-lab"])
-async def stop_pipeline_lab_run(folder_name: str):
-    _pipeline_lab_path(folder_name)
-    run = await _pipeline_run(folder_name)
-    if run:
-        run.request_stop()
-        run.cancel("Pipeline stopped by user")
-        await run.checkpoint()
-    return {"status": "stop_requested", "folder": folder_name}
-
-@app.post("/pipeline-lab/runs/{folder_name}/retry-step", tags=["api", "pipeline-lab"])
-@app.post("/api/pipeline-lab/runs/{folder_name}/retry-step", tags=["api", "pipeline-lab"])
-async def retry_pipeline_lab_step(folder_name: str, req: Request):
-    folder_path = _pipeline_lab_path(folder_name)
-    if not folder_path.is_dir():
-        raise HTTPException(404, detail=f"Pipeline Lab run folder {folder_name} not found")
-
-    body = {}
-    try:
-        body = await req.json()
-    except Exception:
-        pass
-
-    target_stage = body.get("stage")
-    config_data = body.get("config") or {}
-
-    run = await _pipeline_run(folder_name)
-    if run is None:
-        raise HTTPException(404, detail=f"Pipeline Lab run {folder_name} not found")
-
-    if not target_stage:
-        failed = [
-            s["id"] for s in run.manifest.get("stages", []) if s.get("status") == "failed"
-        ]
-        if failed:
-            target_stage = failed[0]
-        if not target_stage:
-            # Determine last completed stage
-            if run.manifest.get("status") == "paused" and run.manifest.get("waitingFor"):
-                waiting_for = run.manifest["waitingFor"]
-                stage_ids = [s["id"] for s in run.manifest.get("stages", [])]
-                if waiting_for in stage_ids:
-                    idx = stage_ids.index(waiting_for)
-                    if idx > 0:
-                        target_stage = stage_ids[idx - 1]
-        if not target_stage:
-            completed = [
-                s["id"] for s in run.manifest.get("stages", [])
-                if s.get("status") in ("completed", "failed") and s.get("id") != "input"
-            ]
-            target_stage = completed[-1] if completed else "detection"
-
-    # If the run already has an active translator assigned (e.g. paused in manual mode)
-    if getattr(run, "translator", None) is not None:
-        executor = next((ex for ex in executor_instances.list if getattr(ex, "translator", None) is run.translator), None)
-        if executor and hasattr(executor, "_run_translation"):
-            try:
-                return await executor._run_translation(lambda: run.retry_stage(target_stage, config_data, run.translator))
-            except Exception as exc:
-                raise HTTPException(500, detail=f"Failed to retry {target_stage}: {exc}")
-        else:
-            try:
-                return await run.retry_stage(target_stage, config_data, run.translator)
-            except Exception as exc:
-                raise HTTPException(500, detail=f"Failed to retry {target_stage}: {exc}")
-
-    # Otherwise acquire a free executor instance from the pool
-    executor = await executor_instances.find_executor()
-    try:
-        translator = getattr(executor, "translator", None)
-        if translator is None:
-            raise HTTPException(500, detail="No in-process translator available on worker")
-        if hasattr(executor, "_run_translation"):
-            return await executor._run_translation(lambda: run.retry_stage(target_stage, config_data, translator))
-        else:
-            return await run.retry_stage(target_stage, config_data, translator)
-    except Exception as exc:
-        raise HTTPException(500, detail=f"Failed to retry {target_stage}: {exc}")
-    finally:
-        await executor_instances.free_executor(executor)
 
 
 def _ensure_bbox_artifact(
@@ -1385,6 +1328,29 @@ async def get_result_file_by_folder(folder_name: str, file_name: str, request: R
     elif file_name in {"inpainted.png", "inpainted.jpg", "inpainted.jpeg"} and not target_path.is_file():
         target_path = find_asset(folder_path, "inpainted") or target_path
 
+    if store is not None and hasattr(store, "get_pipeline_artifact"):
+        artifact_spec = {
+            "final.png": ("rendering", "final_image"),
+            "final.jpg": ("rendering", "final_image"),
+            "final.jpeg": ("rendering", "final_image"),
+            "inpainted.png": ("inpainting", "image"),
+            "inpainted.jpg": ("inpainting", "image"),
+            "inpainted.jpeg": ("inpainting", "image"),
+            "mask_raw.png": ("detection", "mask"),
+            "text_mask.png": ("mask_generation", "text_mask"),
+            "bubble_mask.png": ("mask_generation", "bubble_mask"),
+            "mask_final.png": ("mask_generation", "inpaint_mask"),
+            "inpaint_mask.png": ("mask_generation", "inpaint_mask"),
+        }
+        spec = artifact_spec.get(file_name)
+        if spec is not None:
+            artifact = await store.get_pipeline_artifact(folder_name, *spec)
+            if artifact is not None:
+                artifact_path = (result_dir / PurePosixPath(artifact["relative_path"])).resolve()
+                if not artifact_path.is_relative_to(result_dir) or not artifact_path.is_file():
+                    raise HTTPException(404, detail=f"{file_name} not found in active pipeline artifacts")
+                target_path = artifact_path
+
     if not target_path.is_file():
         if file_name in {"batch.webp", "cover.webp", "preview.webp", "reader.webp"}:
             await asyncio.to_thread(generate_image_variants, folder_path, only=file_name.removesuffix(".webp"))
@@ -1493,8 +1459,8 @@ async def rerun_pipeline(data: PipelineRerunRequest):
                 "hasTextRegions": bool(page.get("hasRegions")),
                 "pageOrder": page.get("pageOrder"),
                 "settings": (page.get("meta") or {}).get("settings", {}),
-                "mangaTitle": (page.get("meta") or {}).get("mangaTitle", "Ungrouped"),
-                "groupId": (page.get("meta") or {}).get("mangaGroupId") or page.get("groupId"),
+                "mangaTitle": page.get("mangaTitle") or (page.get("meta") or {}).get("mangaTitle", "Ungrouped"),
+                "groupId": page.get("groupId") or (page.get("meta") or {}).get("mangaGroupId"),
             }
             for page in pages
         ]
@@ -1662,6 +1628,7 @@ async def layout_preview(folder_name: str, data: LayoutPreviewRequest):
         from manga_translator.utils import TextBlock, Context
         from manga_translator.config import Config, RenderConfig
         import cv2
+        import numpy as np
 
         lines = [[[s.x, s.y], [s.x + s.width, s.y], [s.x + s.width, s.y + s.height], [s.x, s.y + s.height]] for s in data.segments]
         region = TextBlock(lines, texts=[""], translation=data.translation,
@@ -1730,7 +1697,7 @@ async def layout_preview(folder_name: str, data: LayoutPreviewRequest):
             ],
         }
 
-    return await asyncio.to_thread(_layout)
+    return await run_cpu_stage(_layout, priority=CPU_PRIORITY_INTERACTIVE)
 
 @app.post("/result/{folder_name}/save_edits", tags=["api", "editor"])
 @app.post("/api/result/{folder_name}/save_edits", tags=["api", "editor"])
@@ -3498,6 +3465,35 @@ async def get_manga_summary_jobs():
     if store is not None:
         return await store.list_summary_jobs(20)
     return await asyncio.to_thread(list_summary_jobs, RESULT_ROOT, 20)
+
+
+async def _summary_job_events():
+    last_snapshot = None
+    while True:
+        # ponytail: two-second snapshot reads keep this simple; switch to store notifications if stream load grows.
+        store = _postgres()
+        jobs = (
+            await store.list_summary_jobs(20)
+            if store is not None
+            else await asyncio.to_thread(list_summary_jobs, RESULT_ROOT, 20)
+        )
+        snapshot = json.dumps(jobs, sort_keys=True, separators=(",", ":"))
+        if snapshot != last_snapshot:
+            last_snapshot = snapshot
+            yield f"data: {snapshot}\n\n"
+        else:
+            yield ": keep-alive\n\n"
+        await asyncio.sleep(2)
+
+
+@app.get("/results/group/summary/jobs/events", tags=["api"])
+@app.get("/api/results/group/summary/jobs/events", tags=["api"])
+async def manga_summary_job_events():
+    return StreamingResponse(
+        _summary_job_events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/results/group/summary/dismiss", tags=["api"])

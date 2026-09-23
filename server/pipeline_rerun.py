@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import os
 import shutil
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -20,14 +22,15 @@ from PIL import Image
 
 from manga_translator.config import Config
 from manga_translator.mask_builder import build_inpaint_masks
+from manga_translator.pipeline.cpu import CPU_PRIORITY_NORMAL, run_cpu_stage
 from manga_translator.pipeline.translation_remap import remap_translations, TranslationRemapResult
-from manga_translator.pipeline_lab import (
+from manga_translator.pipeline.stages import PipelineStage, downstream_stages
+from manga_translator.pipeline.run import (
     deserialize_textblocks,
     deserialize_textlines,
     serialize_editor_regions,
     serialize_regions,
 )
-from manga_translator.rendering.bubble_layout import prepare_bubble_masks
 from manga_translator.utils import Context, dump_image, load_image
 from manga_translator.utils.image_storage import find_asset, save_jpeg
 from server.image_variants import final_file
@@ -54,6 +57,16 @@ class PipelineRerunPlan:
     run_translation: bool
     remap_translation: bool
     run_rendering: bool
+
+    @property
+    def stages_to_invalidate(self) -> tuple[PipelineStage, ...]:
+        start = {
+            PipelineRerunMode.FULL: PipelineStage.INPUT,
+            PipelineRerunMode.TYPESETTING: PipelineStage.LAYOUT,
+            PipelineRerunMode.TRANSLATION_TYPESETTING: PipelineStage.TRANSLATION,
+            PipelineRerunMode.REPROCESS_TEXT: PipelineStage.DETECTION,
+        }[self.mode]
+        return downstream_stages(start)
 
 
 def resolve_rerun_plan(mode: str | PipelineRerunMode) -> PipelineRerunPlan:
@@ -202,6 +215,69 @@ def validate_rerun_prerequisites(
         return True, None
 
     return False, f"Unsupported rerun mode: {mode}"
+
+
+def _copy_file_atomic(source: Path, target: Path) -> None:
+    """Replace one result file only after its complete staged copy is ready."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        if source.stat().st_size == 0:
+            raise ValueError(f"Staged artifact is empty: {source.name}")
+        shutil.copy2(source, temporary)
+        if temporary.stat().st_size != source.stat().st_size:
+            raise OSError(f"Staged artifact copy was incomplete: {source.name}")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+_RERUN_ARTIFACTS = {
+    "final.jpg": ("rendering", "final_image"),
+    "final.png": ("rendering", "final_image"),
+    "inpainted.jpg": ("inpainting", "image"),
+    "inpainted.png": ("inpainting", "image"),
+    "mask_raw.png": ("detection", "mask"),
+    "text_mask.png": ("mask_generation", "text_mask"),
+    "bubble_mask.png": ("mask_generation", "bubble_mask"),
+    "mask_final.png": ("mask_generation", "inpaint_mask"),
+    "inpaint_mask.png": ("mask_generation", "inpaint_mask"),
+}
+
+
+def _prepare_versioned_artifact(
+    source: Path, result_root: Path, result_dir: Path, stage: str, artifact_type: str
+) -> tuple[dict[str, Any], Path]:
+    destination = result_dir / "pipeline_artifacts" / stage / f"{artifact_type}-{uuid.uuid4().hex}{source.suffix.lower()}"
+    _copy_file_atomic(source, destination)
+    try:
+        with Image.open(destination) as image:
+            width, height = image.size
+            image.verify()
+        digest = hashlib.sha256()
+        with destination.open("rb") as artifact_file:
+            for chunk in iter(lambda: artifact_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        checksum = digest.hexdigest()
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    relative_path = destination.resolve().relative_to(result_root.resolve())
+    mime_type = "image/jpeg" if destination.suffix.lower() in {".jpg", ".jpeg"} else "image/png"
+    return ({
+        "stage": stage,
+        "artifact_type": artifact_type,
+        "relative_path": relative_path.as_posix(),
+        "mime_type": mime_type,
+        "width": width,
+        "height": height,
+        "size_bytes": destination.stat().st_size,
+        "checksum": checksum,
+    }, destination)
 
 
 async def load_rerun_context(
@@ -371,8 +447,45 @@ async def execute_rerun_plan(
 
     # 1. Full Pipeline Execution
     if plan.mode == PipelineRerunMode.FULL:
-        # Normal production pipeline from clean input
-        ctx = await translator.translate(ctx.input, config)
+        # Reuse the production pipeline while routing every artifact into the
+        # rerun staging directory; live page outputs change only at commit.
+        if not hasattr(translator, "_translate"):
+            raise RuntimeError("Full rerun requires the in-process translator")
+        old_state = {
+            "pipeline_run": getattr(translator, "_pipeline_run", None),
+            "image_context": getattr(translator, "_current_image_context", None),
+            "verbose": getattr(translator, "verbose", False),
+            "result_path_override": getattr(translator, "_result_path_override", None),
+        }
+        try:
+            translator._pipeline_run = None
+            translator._current_image_context = None
+            translator.verbose = True
+            translator._result_path_override = staging_dir
+            ctx = await translator._translate(config, ctx)
+        finally:
+            translator._pipeline_run = old_state["pipeline_run"]
+            translator._current_image_context = old_state["image_context"]
+            translator.verbose = old_state["verbose"]
+            if old_state["result_path_override"] is None:
+                delattr(translator, "_result_path_override")
+            else:
+                translator._result_path_override = old_state["result_path_override"]
+        if ctx.result is None:
+            raise RuntimeError("Full pipeline rerun produced no final image")
+        ctx.debug_folder = state.get("folder") or ctx.debug_folder
+        documents = dict(getattr(ctx, "result_documents", None) or {})
+        documents["translations.json"] = serialize_regions(ctx.text_regions or [])
+        documents["layout.json"] = serialize_regions(ctx.text_regions or [])
+        documents["text_regions.json"] = serialize_editor_regions(ctx.text_regions or [])
+        if getattr(ctx, "bubble_detections", None) is not None:
+            from manga_translator.detection.bubble import serialize_bubble_detections
+            documents["bubble_detections.json"] = serialize_bubble_detections(ctx.bubble_detections)
+        for name, payload in documents.items():
+            if Path(name).name == name and name.endswith(".json"):
+                (staging_dir / name).write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
         return ctx, None
 
     # 2. Reprocess Text Mode (Detection -> OCR -> Textline Merge -> Bubble -> Mask -> Inpaint -> Remap -> Typeset)
@@ -429,13 +542,16 @@ async def execute_rerun_plan(
 
         # Mask Generation
         await report("mask-generation")
-        bundle = await build_inpaint_masks(
+        bundle = await run_cpu_stage(
+            build_inpaint_masks,
             image=ctx.img_rgb,
             detector_textlines=getattr(ctx, "textlines", None),
             detector_mask=getattr(ctx, "mask_raw", None),
             text_regions=ctx.text_regions or [],
             bubble_detections=getattr(ctx, "bubble_detections", None),
             config=config,
+            page_geometry=getattr(ctx, "page_geometry", None),
+            priority=CPU_PRIORITY_NORMAL,
         )
         ctx.text_mask = bundle.text_mask
         ctx.bubble_mask = bundle.bubble_cleanup_mask
@@ -443,8 +559,13 @@ async def execute_rerun_plan(
         ctx.bubble_residual_mask = bundle.bubble_residual_mask
         ctx.protected_edge_mask = bundle.protected_edge_mask
         ctx.mask_bundle = bundle
+        ctx.mask_profile = bundle.profile
+        ctx.page_geometry = bundle.page_geometry
         ctx.mask = bundle.final_inpaint_mask
         ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
+
+        with open(staging_dir / "profiling.json", "w", encoding="utf-8") as profile_file:
+            json.dump(bundle.profile, profile_file, indent=2)
 
         cv2.imwrite(str(staging_dir / "text_mask.png"), ctx.text_mask)
         cv2.imwrite(str(staging_dir / "bubble_mask.png"), ctx.bubble_mask)
@@ -493,6 +614,7 @@ async def execute_rerun_plan(
         )
 
         # Rendering & Layout
+        await report("layout")
         await report("rendering")
         ctx.img_rendered = await translator._run_text_rendering(config, ctx)
         ctx.result = dump_image(ctx.input, ctx.img_rendered, ctx.img_alpha)
@@ -512,6 +634,7 @@ async def execute_rerun_plan(
             encoding="utf-8",
         )
 
+        await report("layout")
         await report("rendering")
         ctx.img_rendered = await translator._run_text_rendering(config, ctx)
         ctx.result = dump_image(ctx.input, ctx.img_rendered, ctx.img_alpha)
@@ -524,6 +647,7 @@ async def execute_rerun_plan(
 
     # 4. Typesetting Only Mode
     if plan.mode == PipelineRerunMode.TYPESETTING:
+        await report("layout")
         await report("rendering")
         if hasattr(translator, "render_saved"):
             ctx = await translator.render_saved(ctx, config)
@@ -608,7 +732,51 @@ async def commit_rerun_artifacts(
         except Exception:
             pass
 
-    if database is not None and db_documents:
+    versioned_artifacts: list[dict[str, Any]] = []
+    versioned_files: list[Path] = []
+    page_id = (
+        await database.get_page_id(result_dir.name)
+        if database is not None and hasattr(database, "get_page_id")
+        else None
+    )
+    if page_id:
+        selected: dict[str, Path] = {}
+        for staged_file in sorted(staging_dir.iterdir()):
+            spec = _RERUN_ARTIFACTS.get(staged_file.name)
+            if spec is None or staged_file.is_dir():
+                continue
+            artifact_type = spec[1]
+            current = selected.get(artifact_type)
+            if current is None or (current.suffix.lower() == ".png" and staged_file.suffix.lower() in {".jpg", ".jpeg"}):
+                selected[artifact_type] = staged_file
+        for staged_file in selected.values():
+            stage_id, artifact_type = _RERUN_ARTIFACTS[staged_file.name]
+            artifact, artifact_path = await asyncio.to_thread(
+                _prepare_versioned_artifact,
+                staged_file,
+                result_dir.parent,
+                result_dir,
+                stage_id,
+                artifact_type,
+            )
+            versioned_artifacts.append(artifact)
+            versioned_files.append(artifact_path)
+
+        try:
+            committed = await database.commit_pipeline_outputs(
+                result_dir.name, db_documents, versioned_artifacts
+            )
+        except Exception:
+            for path in versioned_files:
+                path.unlink(missing_ok=True)
+            raise
+        if not committed:
+            for path in versioned_files:
+                path.unlink(missing_ok=True)
+            versioned_artifacts.clear()
+            versioned_files.clear()
+            await database.save_documents(result_dir.name, db_documents)
+    elif database is not None and db_documents:
         await database.save_documents(result_dir.name, db_documents)
 
     # Atomically replace files from staging dir to live folder
@@ -619,7 +787,7 @@ async def commit_rerun_artifacts(
         if dest_name == "final.jpg" and final_target.suffix.lower() in {".png"}:
             dest_name = "final.png"
         target_path = result_dir / dest_name
-        shutil.copy2(staged_file, target_path)
+        await asyncio.to_thread(_copy_file_atomic, staged_file, target_path)
 
     # Invalidate web view cached variants
     for variant in ("batch.webp", "cover.webp", "preview.webp", "reader.webp"):

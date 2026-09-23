@@ -5,7 +5,7 @@ import { Link } from "react-router";
 interface HeaderProps {
   theme: "light" | "dark";
   onToggleTheme: () => void;
-  activeView?: "studio" | "gallery" | "pipeline" | "search";
+  activeView?: "studio" | "gallery" | "search";
   gallerySection?: "manga" | "series";
   onSelectView?: (view: "studio" | "gallery") => void;
   galleryCount?: number;
@@ -102,17 +102,6 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <Icon icon="carbon:catalog" className="h-4 w-4" />
                 <span className="truncate">Series</span>
-              </Link>
-              <Link
-                to="/pipeline-lab"
-                className={`flex min-w-0 flex-none items-center justify-center rounded-md px-2 py-1.5 transition-colors sm:ml-1 sm:px-3 ${
-                  activeView === "pipeline"
-                    ? "bg-amber-50 text-amber-800 dark:bg-amber-950/50 dark:text-amber-200"
-                    : "text-amber-700 hover:bg-amber-50 hover:text-amber-800 dark:text-amber-300 dark:hover:bg-amber-950/50"
-                }`}
-              >
-                <Icon icon="carbon:flow" className="mr-1.5 h-4 w-4" />
-                <span className="truncate">Pipeline Lab</span>
               </Link>
               <Link to="/search-lab" aria-current={activeView === 'search' ? 'page' : undefined}
                 className={`flex flex-none items-center rounded-md px-2 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 sm:px-3 ${activeView === 'search' ? 'bg-white text-zinc-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-50' : 'text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200'}`}>

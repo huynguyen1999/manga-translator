@@ -1,6 +1,6 @@
 export const resultFolderFromUrl = (value: string | null | undefined): string | null => {
   if (!value || typeof value !== "string") return null;
-  const match = value.match(/(?:\/api)?\/(?:result|pipeline-lab\/runs)\/([^/?#]+)(?:\/[^?#]*)?(?:[?#]|$)/i);
+  const match = value.match(/(?:\/api)?\/result\/([^/?#]+)(?:\/[^?#]*)?(?:[?#]|$)/i);
   if (!match) return null;
   try {
     return decodeURIComponent(match[1]);

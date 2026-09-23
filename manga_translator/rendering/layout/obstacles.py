@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Tuple
 import cv2
 import numpy as np
 
-from .models import FreeTextDamageTarget, FreeTextZone, PageObstacleMap, PlacementMode
+from .models import FreeTextZone, PageObstacleMap, PlacementMode
 
 
 def _region_source_mask(region: Any, shape: Tuple[int, int]) -> np.ndarray:
@@ -78,58 +78,7 @@ def build_page_obstacle_map(
 def build_free_text_ownership_zones(
     regions: List[Any], obstacles: PageObstacleMap, inpaint_mask: np.ndarray | None = None
 ) -> Dict[int, FreeTextZone]:
-    """Create disjoint source-anchored free-text zones without solving typography."""
-    free_regions = [
-        region for region in regions or []
-        if getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
-    ]
-    if not free_regions:
-        return {}
-    shape = obstacles.panel_mask.shape[:2]
-    seeds = [_region_source_mask(region, shape) > 0 for region in free_regions]
-    distances = [
-        cv2.distanceTransform((~seed).astype(np.uint8), cv2.DIST_L2, 5) for seed in seeds
-    ]
-    owner = np.argmin(np.stack(distances, axis=0), axis=0)
-    forbidden = (obstacles.protected_bubble_mask > 0) | (obstacles.panel_mask == 0)
-    raw_damage = (np.asarray(inpaint_mask) > 0) if inpaint_mask is not None else np.zeros(shape, bool)
-    zones: Dict[int, FreeTextZone] = {}
-    for index, region in enumerate(free_regions):
-        source = seeds[index]
-        ownership = (owner == index) & ~forbidden
-        damage = raw_damage & ownership
-        if not np.any(damage):
-            damage = source & ownership
-        other_text = (obstacles.text_mask > 0) & ~source
-        obstacle_mask = forbidden | other_text | ~ownership
-        coverable = damage & ~forbidden & ~other_text
-        distance = cv2.distanceTransform(damage.astype(np.uint8), cv2.DIST_L2, 5)
-        max_distance = float(distance.max())
-        weights = np.where(damage, 1.0 + 1.5 * distance / max_distance, 0.0) if max_distance else damage.astype(np.float32)
-        core = damage & ((distance / max_distance) >= 0.5 if max_distance else True)
-        ys, xs = np.nonzero(source)
-        source_bbox = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1) if len(xs) else (0, 0, shape[1], shape[0])
-        ys, xs = np.nonzero(damage)
-        damage_bbox = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1) if len(xs) else source_bbox
-        target = source | damage
-        tys, txs = np.nonzero(target)
-        target_bbox = (int(txs.min()), int(tys.min()), int(txs.max()) + 1, int(tys.max()) + 1) if len(txs) else source_bbox
-        source_centroid = tuple(float(value) for value in (np.mean(np.nonzero(source)[1]), np.mean(np.nonzero(source)[0]))) if np.any(source) else (0.0, 0.0)
-        damage_centroid = tuple(float(value) for value in (np.mean(np.nonzero(damage)[1]), np.mean(np.nonzero(damage)[0]))) if np.any(damage) else source_centroid
-        target_centroid = tuple(float(value) for value in (np.mean(txs), np.mean(tys))) if len(txs) else source_centroid
-        damage_target = FreeTextDamageTarget(
-            mask=target.astype(np.uint8), centroid_x=target_centroid[0], centroid_y=target_centroid[1],
-            bbox=target_bbox, area=int(np.count_nonzero(target)), width=target_bbox[2] - target_bbox[0],
-            height=target_bbox[3] - target_bbox[1], source_centroid=source_centroid,
-            source_bbox=source_bbox, inpaint_bbox=damage_bbox, inpaint_centroid=damage_centroid,
-        )
-        zone = FreeTextZone(
-            source_bbox=source_bbox, ownership_mask=ownership.astype(np.uint8),
-            obstacle_mask=obstacle_mask.astype(np.uint8), coverage_target_mask=damage.astype(np.uint8),
-            coverable_damage_mask=coverable.astype(np.uint8), coverage_weight_map=weights.astype(np.float32),
-            core_damage_mask=core.astype(np.uint8), total_coverable_weight=max(1.0, float(weights[coverable].sum())),
-            total_core_coverable=int(np.count_nonzero(core & coverable)), damage_target=damage_target,
-        )
-        region._free_text_zone = zone
-        zones[id(region)] = zone
-    return zones
+    """Create source-anchored free-text zones using the shared ownership solver."""
+    from .ownership import build_free_text_ownership_zones as build_zones
+
+    return build_zones(regions, obstacles, inpaint_mask=inpaint_mask)

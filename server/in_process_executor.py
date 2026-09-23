@@ -5,6 +5,7 @@ from typing import List, Optional
 from PIL import Image
 
 from manga_translator import Config, Context
+from manga_translator.pipeline.cpu import shutdown_cpu_stage_executor
 from manga_translator.utils.model_cache import (
     SharedModelExecutor, finish_before_cancelling,
     reset_model_cache, set_model_cache, reset_model_executor, set_model_executor,
@@ -73,6 +74,7 @@ class InProcessExecutorInstance:
 
     def close(self):
         async def cleanup():
+            await shutdown_cpu_stage_executor()
             tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
             for task in tasks:
                 task.cancel()

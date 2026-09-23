@@ -41,7 +41,7 @@ class TestFrontendBackendApiSync(unittest.TestCase):
         sm.batch_scheduler = BatchScheduler(sm.batch_store, sm.executor_instances, self.results_dir)
         sm._invalidate_meta_cache()
 
-        from manga_translator.pipeline_lab import set_document_saver
+        from manga_translator.pipeline.run import set_document_saver
         async def _save_docs(folder, docs):
             folder_dir = self.results_dir / folder
             if folder_dir.is_dir():
@@ -783,116 +783,6 @@ class TestFrontendBackendApiSync(unittest.TestCase):
         # 10. DELETE /batches/{batch_id}
         del_batch_res = self.client.delete("/api/batches/batch-sync-1")
         self.assertEqual(del_batch_res.status_code, 200)
-
-    # ==========================================
-    # 11. Pipeline Lab endpoints
-    # ==========================================
-    def test_pipeline_lab_endpoints(self):
-        mock_store = AsyncMock()
-        mock_store.list_pipeline_runs.return_value = []
-        mock_store.get_document.return_value = {"folder": "run_test_lab"}
-        with patch.object(sm, "_postgres", return_value=mock_store):
-            # 1. GET /pipeline-lab/runs
-            res = self.client.get("/api/pipeline-lab/runs")
-            self.assertEqual(res.status_code, 200)
-            self.assertIsInstance(res.json(), list)
-
-            # Create a mock run folder
-            run_folder = self.results_dir / "run_test_lab"
-            run_folder.mkdir()
-            (run_folder / "input.png").write_bytes(self.sample_png)
-            manifest_data = {
-                "version": 1,
-                "kind": "pipeline-lab",
-                "folder": "run_test_lab",
-                "status": "paused",
-                "createdAt": "2026-01-01T00:00:00Z",
-                "updatedAt": "2026-01-01T00:00:00Z",
-                "source": {"filename": "test.png", "width": 64, "height": 64, "mode": "RGB"},
-                "config": {},
-                "stagePlan": {"input": True, "rendering": True},
-                "stages": [{"id": "input", "label": "Input", "status": "completed", "artifacts": ["input.png"]}],
-            }
-            (run_folder / "pipeline_manifest.json").write_text(json.dumps(manifest_data), encoding="utf-8")
-            mock_store.get_documents.return_value = {"pipeline_manifest.json": manifest_data}
-
-            # 2. GET /pipeline-lab/runs/{folder}/manifest
-            man_res = self.client.get("/api/pipeline-lab/runs/run_test_lab/manifest")
-            self.assertEqual(man_res.status_code, 200)
-            self.assertEqual(man_res.json()["folder"], "run_test_lab")
-
-            # 3. POST /pipeline-lab/runs/{folder}/continue
-            cont_res = self.client.post("/api/pipeline-lab/runs/run_test_lab/continue")
-            self.assertEqual(cont_res.status_code, 200)
-            self.assertEqual(cont_res.json()["status"], "continue_requested")
-
-            # 3b. POST /pipeline-lab/runs/{folder}/stop
-            stop_res = self.client.post("/api/pipeline-lab/runs/run_test_lab/stop")
-            self.assertEqual(stop_res.status_code, 200)
-            self.assertEqual(stop_res.json()["status"], "stop_requested")
-
-            # 4. POST /pipeline-lab/runs/{folder}/retry-step
-            class MockTranslator:
-                device = "cpu"
-                verbose = False
-                async def _run_detection(self, config, ctx):
-                    from manga_translator.utils import Quadrilateral
-                    import numpy as np
-                    pts = np.array([[0, 0], [10, 0], [10, 10], [0, 10]], dtype=np.int32)
-                    return [Quadrilateral(pts, "Hello", 0.95)], None, None
-
-            class MockExecutor:
-                translator = MockTranslator()
-                busy = False
-                def free_executor(self):
-                    self.busy = False
-                async def _run_translation(self, operation):
-                    return await operation()
-
-            manifest_data["waitingFor"] = "ocr"
-            manifest_data["stages"].append({"id": "detection", "label": "Detection", "status": "completed"})
-            manifest_data["stages"].append({"id": "ocr", "label": "OCR", "status": "pending"})
-            (run_folder / "pipeline_manifest.json").write_text(json.dumps(manifest_data), encoding="utf-8")
-
-            orig_executors = sm.executor_instances.list
-            mock_ex = MockExecutor()
-            sm.executor_instances.list = [mock_ex]
-            sm.executor_instances.queue.put_nowait(mock_ex)
-            try:
-                # 4a. Explicit stage
-                retry_res = self.client.post(
-                    "/api/pipeline-lab/runs/run_test_lab/retry-step",
-                    json={"stage": "detection", "config": {"detector": {"box_threshold": 0.42}}}
-                )
-                self.assertEqual(retry_res.status_code, 200)
-                data = retry_res.json()
-                self.assertEqual(data["status"], "ok")
-                self.assertEqual(data["stage"], "detection")
-                self.assertTrue((run_folder / "detection.json").is_file())
-                self.assertFalse((run_folder / "bboxes_unfiltered.png").exists())
-                saved_manifest = json.loads((run_folder / "pipeline_manifest.json").read_text())
-                self.assertEqual(saved_manifest["config"]["detector"]["box_threshold"], 0.42)
-
-                # 4b. Implicit stage (inferred from waitingFor="ocr" -> "detection")
-                retry_auto_res = self.client.post(
-                    "/api/pipeline-lab/runs/run_test_lab/retry-step",
-                    json={"config": {"detector": {"box_threshold": 0.55}}}
-                )
-                self.assertEqual(retry_auto_res.status_code, 200)
-                self.assertEqual(retry_auto_res.json()["stage"], "detection")
-
-                # 4c. Nonexistent run 404
-                retry_404 = self.client.post("/api/pipeline-lab/runs/nonexistent/retry-step", json={})
-                self.assertEqual(retry_404.status_code, 404)
-            finally:
-                sm.executor_instances.list = orig_executors
-                while not sm.executor_instances.queue.empty():
-                    sm.executor_instances.queue.get_nowait()
-
-            # 5. DELETE /pipeline-lab/runs/{folder}
-            del_lab_res = self.client.delete("/api/pipeline-lab/runs/run_test_lab")
-            self.assertEqual(del_lab_res.status_code, 200)
-            self.assertFalse(run_folder.exists())
 
     # ==========================================
     # 12. Server status endpoints

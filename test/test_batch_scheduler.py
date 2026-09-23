@@ -13,6 +13,216 @@ from server.batch_store import BatchStore
 
 
 class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
+    def test_repeated_stage_progress_is_a_noop_but_stage_change_restarts_elapsed_time(self):
+        manifest = {"items": [{"id": "p1", "status": "processing", "stage": "detection", "stageStartedAt": 123}]}
+
+        self.assertFalse(BatchScheduler._mutate_stage(manifest, "p1", "detection"))
+        self.assertEqual(manifest["items"][0]["stageStartedAt"], 123)
+
+        with patch("server.batch_scheduler.time.time", return_value=2):
+            self.assertTrue(BatchScheduler._mutate_stage(manifest, "p1", "ocr"))
+        self.assertEqual(manifest["items"][0]["stageStartedAt"], 2000)
+
+    def test_ocr_group_batches_only_compatible_page_settings(self):
+        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
+        batch = {"id": "manga-a", "settings": {"ocr": "48px_ctc"}}
+        items = [
+            {"id": "p1", "status": "queued", "pipelineStage": "ocr"},
+            {"id": "p2", "status": "queued", "pipelineStage": "ocr"},
+            {
+                "id": "p3", "status": "queued", "pipelineStage": "ocr",
+                "settings": {"ocr": "mocr"},
+            },
+        ]
+
+        group = scheduler._find_ocr_group(batch, items)
+
+        self.assertEqual([item["id"] for item in group], ["p1", "p2"])
+        self.assertEqual(
+            scheduler._find_ocr_group(
+                batch,
+                [{**item, "settings": {"ocr": "mocr"}} for item in items[:2]],
+            ),
+            [],
+        )
+
+    def test_page_inference_group_batches_only_matching_model_settings(self):
+        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
+        batch = {"id": "manga-a", "settings": {}}
+        items = [
+            {"id": "p1", "status": "queued", "pipelineStage": "detection"},
+            {"id": "p2", "status": "queued", "pipelineStage": "detection"},
+            {
+                "id": "p3", "status": "queued", "pipelineStage": "detection",
+                "settings": {"textDetector": "ctd"},
+            },
+        ]
+
+        stage, group = scheduler._find_page_inference_group(batch, items)
+
+        self.assertEqual(stage, "detection")
+        self.assertEqual([item["id"] for item in group], ["p1", "p2"])
+        self.assertIsNone(
+            scheduler._find_page_inference_group(
+                batch,
+                [{**items[0], "settings": {"textDetector": "ctd"}}, items[2]],
+            )
+        )
+
+    async def test_ocr_group_claim_is_atomic_and_keeps_stage_checkpoint(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            store = BatchStore(workspace / "batches", workspace / "results")
+            items = [
+                {"id": f"p{index}", "name": f"{index}.png", "status": "queued", "pipelineStage": "ocr"}
+                for index in (1, 2)
+            ]
+            image = io.BytesIO()
+            Image.new("RGB", (2, 2)).save(image, "PNG")
+            files = {item["id"]: (item["name"], image.getvalue()) for item in items}
+            await store.put_batch("manga-a", {"id": "manga-a", "items": items}, files)
+            scheduler = BatchScheduler(store, None, workspace / "results")
+
+            claimed = await scheduler._claim_prepare_items("manga-a", items)
+            saved = await store.get_batch("manga-a")
+
+            self.assertEqual(len(claimed), 2)
+            self.assertTrue(all(item["pipelineStage"] == "ocr" for item in claimed))
+            self.assertTrue(all(item["status"] == "processing" for item in saved["items"]))
+
+    async def test_model_group_claim_reports_the_claimed_stage(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            store = BatchStore(workspace / "batches", workspace / "results")
+            items = [
+                {"id": f"p{index}", "name": f"{index}.png", "status": "queued", "pipelineStage": "detection"}
+                for index in (1, 2)
+            ]
+            image = io.BytesIO()
+            Image.new("RGB", (2, 2)).save(image, "PNG")
+            files = {item["id"]: (item["name"], image.getvalue()) for item in items}
+            await store.put_batch("manga-a", {"id": "manga-a", "items": items}, files)
+            scheduler = BatchScheduler(store, None, workspace / "results")
+
+            claimed = await scheduler._claim_prepare_items("manga-a", items, "detection")
+
+            self.assertEqual(len(claimed), 2)
+            self.assertTrue(all(item["pipelineStage"] == "detection" for item in claimed))
+            self.assertTrue(all(item["stage"] == "detection" for item in claimed))
+
+    async def test_checkpointed_page_stage_runs_on_executor_loop(self):
+        class Store:
+            def __init__(self, input_path):
+                self.input_file = input_path
+                self.manifest = {
+                    "id": "manga-a", "status": "processing", "items": [{
+                        "id": "p1", "name": "1.webp", "status": "processing",
+                        "stage": "detection", "pipelineStage": "initialize",
+                        "resultFolder": "page-1",
+                    }],
+                }
+
+            async def get_batch(self, _batch_id):
+                return {**self.manifest, "items": [dict(self.manifest["items"][0])]}
+
+            async def input_path(self, _batch_id, _item_id):
+                return self.input_file
+
+            async def mutate(self, _batch_id, mutator):
+                mutator(self.manifest)
+
+        class Run:
+            manifest = {
+                "createdAt": "now",
+                "stages": [
+                    {"id": "input", "status": "completed"},
+                    {"id": "colorization", "status": "skipped"},
+                    {"id": "upscaling", "status": "skipped"},
+                    {"id": "detection", "status": "pending"},
+                    {"id": "ocr", "status": "pending"},
+                    {"id": "textline_merge", "status": "pending"},
+                    {"id": "bubble_detection", "status": "pending"},
+                    {"id": "mask_generation", "status": "pending"},
+                    {"id": "inpainting", "status": "pending"},
+                ],
+            }
+            ctx = None
+            translator = None
+            called_on_executor = False
+            called_stage = None
+
+            def _document(self, name):
+                return [{"text": "text"}] if name == "detection.json" else None
+
+            def _ensure_context(self):
+                return SimpleNamespace(input=None)
+
+            async def retry_stage(self, stage_id, *_args, **_kwargs):
+                self.called_on_executor = instance.in_executor_loop
+                self.called_stage = stage_id
+                self._stage(stage_id)["status"] = "completed"
+
+            def _stage(self, stage_id):
+                return next(stage for stage in self.manifest["stages"] if stage["id"] == stage_id)
+
+            def release_runtime(self):
+                self.ctx = None
+                self.translator = None
+
+        class Executors:
+            async def free_executor(self, _instance):
+                pass
+
+        with tempfile.TemporaryDirectory() as root:
+            input_path = Path(root) / "1.webp"
+            Image.new("RGB", (2, 2)).save(input_path, "WEBP")
+            store = Store(input_path)
+            scheduler = BatchScheduler(store, Executors(), root)
+            run = Run()
+
+            class Translator:
+                _current_image_context = None
+
+                def _set_image_context(self, *_args):
+                    self._current_image_context = {"request_id": "p1"}
+
+            class Instance:
+                def __init__(self):
+                    self.translator = Translator()
+                    self.in_executor_loop = False
+
+                async def _run_translation(self, operation):
+                    self.in_executor_loop = True
+                    try:
+                        return await operation()
+                    finally:
+                        self.in_executor_loop = False
+
+            instance = Instance()
+            with (
+                patch.object(scheduler, "_checkpoint_run", AsyncMock(return_value=run)),
+                patch.object(BatchScheduler, "_config_for", return_value=object()),
+            ):
+                await scheduler._process_checkpointed_prepare_item("manga-a", "p1", instance)
+
+            self.assertTrue(run.called_on_executor)
+            self.assertEqual(run.called_stage, "detection")
+            self.assertEqual(store.manifest["items"][0]["stage"], "ocr")
+            self.assertEqual(store.manifest["items"][0]["pipelineStage"], "ocr")
+
+    async def test_stage_resource_slots_serialize_gpu_and_allow_cpu_work(self):
+        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
+        gpu_slot = await scheduler._acquire_stage_resource("ocr")
+        try:
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(scheduler._acquire_stage_resource("detection"), 0.01)
+            cpu_slot = await asyncio.wait_for(
+                scheduler._acquire_stage_resource("mask_generation"), 0.01
+            )
+            cpu_slot.release()
+        finally:
+            gpu_slot.release()
+
     def test_group_progress_only_updates_current_page_outside_translation(self):
         translator = SimpleNamespace(_current_image_context={"request_id": "manga-a:page-2"})
         item_ids = ["page-1", "page-2", "page-3"]
@@ -56,7 +266,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             scheduler = BatchScheduler(store, None, workspace / "results")
             item_ids = [item["id"] for item in items]
 
-            # Page 1 finishes inpainting and reaches awaiting_translation
+            # Page 1 finishes text preparation and reaches the translation barrier.
             await scheduler._set_active_group_item("manga-a", item_ids, "page-1", "awaiting_translation")
             batch = await store.get_batch("manga-a")
             self.assertEqual(batch["items"][0]["stage"], "awaiting_translation")
@@ -75,6 +285,113 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(batch["items"][0]["stage"], "translating")
             self.assertEqual(batch["items"][1]["stage"], "translating")
             self.assertEqual(batch["items"][2]["stage"], "translating")
+
+    def test_professional_translation_waits_for_complete_story_and_job_barrier(self):
+        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
+        settings = {
+            "translationQuality": "professional",
+            "storyPlan": {
+                "enabled": True,
+                "segments": [
+                    {"startPage": 1, "endPage": 2},
+                    {"startPage": 3, "endPage": 4},
+                ],
+            },
+        }
+        items = [
+            {"id": "p1", "status": "processing", "stage": "awaiting_translation"},
+            {"id": "p2", "status": "processing", "stage": "awaiting_translation"},
+            {"id": "p3", "status": "processing", "stage": "detection"},
+            {"id": "p4", "status": "processing", "stage": "awaiting_translation"},
+        ]
+
+        ready = scheduler._find_ready_translation_group("batch", items, 4, settings)
+        self.assertIsNone(ready)
+
+        items[2]["stage"] = "awaiting_translation"
+        ready = scheduler._find_ready_translation_group("batch", items, 4, settings)
+        self.assertEqual([item["id"] for item in ready], ["p1", "p2"])
+        items[1].update(status="error", stage="ocr")
+        ready = scheduler._find_ready_translation_group("batch", items, 4, settings)
+        self.assertIsNone(ready)
+
+    def test_translation_waits_until_every_page_reaches_the_global_barrier(self):
+        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
+        items = [
+            {"id": "p1", "status": "queued", "stage": "detection", "pipelineStage": "detection"},
+            {"id": "p2", "status": "processing", "stage": "awaiting_translation"},
+            {"id": "p3", "status": "processing", "stage": "awaiting_translation"},
+            {"id": "p4", "status": "queued", "stage": "ocr", "pipelineStage": "ocr"},
+        ]
+
+        self.assertEqual(scheduler._current_batch_stage(items), "detection")
+        self.assertIsNone(scheduler._find_ready_translation_group("batch", items, 2, {}))
+
+        for item in items:
+            item.update(status="processing", stage="awaiting_translation")
+            item.pop("pipelineStage", None)
+        ready = scheduler._find_ready_translation_group("batch", items, 2, {})
+
+        self.assertEqual([item["id"] for item in ready], ["p1", "p2"])
+
+    def test_prepare_stops_after_text_grouping_and_bubble_detection(self):
+        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
+        completed = {
+            "colorization", "upscaling", "detection", "ocr", "textline_merge", "bubble_detection"
+        }
+        stages = [
+            {"id": stage, "status": "completed" if stage in completed else "pending"}
+            for stage in (
+                "colorization", "upscaling", "detection", "ocr", "textline_merge",
+                "bubble_detection", "translation", "mask_generation", "layout", "inpainting", "rendering",
+            )
+        ]
+        run = SimpleNamespace(manifest={"stages": stages})
+
+        self.assertIsNone(scheduler._next_prepare_stage(run))
+        self.assertEqual(scheduler._next_batch_stage(run), "translation")
+
+        next_stage = SimpleNamespace(manifest={"stages": [
+            {"id": "colorization", "status": "skipped"},
+            {"id": "upscaling", "status": "skipped"},
+            {"id": "detection", "status": "completed"},
+            {"id": "ocr", "status": "completed"},
+            {"id": "bubble_detection", "status": "completed"},
+            {"id": "textline_merge", "status": "pending"},
+        ]})
+        self.assertEqual(scheduler._next_batch_stage(next_stage), "textline_merge")
+
+    def test_professional_without_story_segments_keeps_whole_batch_barrier(self):
+        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
+        items = [
+            {"id": "p1", "status": "processing", "stage": "awaiting_translation"},
+            {"id": "p2", "status": "error", "stage": "ocr"},
+        ]
+
+        self.assertIsNone(scheduler._find_ready_translation_group(
+            "batch", items, 2, {"translationQuality": "professional"}
+        ))
+
+    def test_professional_story_plan_ranges_are_remapped_for_story_group(self):
+        plan = {
+            "enabled": True,
+            "autoDetect": False,
+            "segments": [
+                {"id": "one", "startPage": 1, "endPage": 2},
+                {"id": "two", "startPage": 3, "endPage": 4},
+            ],
+            "archives": [
+                {"id": "archive", "startPage": 1, "endPage": 4, "pageCount": 4},
+            ],
+        }
+        items = [{"id": f"p{index}"} for index in range(1, 5)]
+
+        remapped = BatchScheduler._story_plan_for_group(plan, items, ["p3", "p4"])
+
+        self.assertEqual(remapped["segments"][0]["startPage"], 1)
+        self.assertEqual(remapped["segments"][0]["endPage"], 2)
+        self.assertEqual(remapped["archives"][0]["pageCount"], 2)
+        self.assertEqual(plan["segments"][1]["startPage"], 3)
 
     async def test_paused_batch_does_not_block_later_waiting_batch(self):
         store = SimpleNamespace(
@@ -105,6 +422,52 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
         scheduler._process_item.assert_awaited_once_with("waiting", "item-1", ANY)
 
         await asyncio.gather(*scheduler._running.values(), return_exceptions=True)
+
+    async def test_checkpoint_backed_retry_reenters_the_stage_scheduler(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            store = BatchStore(workspace / "batches", workspace / "results")
+            image = io.BytesIO()
+            Image.new("RGB", (2, 2)).save(image, "PNG")
+            await store.put_batch(
+                "manga-a",
+                {
+                    "id": "manga-a",
+                    "status": "waiting",
+                    "items": [{
+                        "id": "page-1",
+                        "name": "1.png",
+                        "status": "queued",
+                        "resultFolder": "checkpoint",
+                        "retryFromStage": "ocr",
+                    }],
+                },
+                {"page-1": ("1.png", image.getvalue())},
+            )
+
+            class Executors:
+                def free_executors(self):
+                    return 1
+
+                async def find_executor(self):
+                    async def run_translation(operation):
+                        return await operation()
+                    return SimpleNamespace(translator=SimpleNamespace(), _run_translation=run_translation)
+
+                async def free_executor(self, _instance):
+                    pass
+
+            scheduler = BatchScheduler(store, Executors(), workspace / "results")
+            scheduler._process_item = AsyncMock()
+            scheduler._process_prepare_item = AsyncMock()
+
+            self.assertTrue(await scheduler._launch_available())
+            await asyncio.sleep(0)
+            scheduler._process_prepare_item.assert_awaited_once_with("manga-a", "page-1", ANY)
+            scheduler._process_item.assert_not_awaited()
+            batch = await store.get_batch("manga-a")
+            self.assertEqual(batch["items"][0]["pipelineStage"], "ocr")
+            await asyncio.gather(*scheduler._running.values(), return_exceptions=True)
 
     async def test_scheduler_does_not_launch_second_group_for_same_batch_concurrently(self):
         store = SimpleNamespace(
@@ -318,7 +681,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
                     pass
 
             scheduler = BatchScheduler(store, Executors(), results)
-            with patch("server.batch_scheduler.PipelineLabRun.get_or_load", return_value=Run()):
+            with patch("server.batch_scheduler.PipelineRun.get_or_load", return_value=Run()):
                 await scheduler.retry_item("manga-a", "page-1")
                 await scheduler._process_item("manga-a", "page-1", Instance())
 
@@ -329,7 +692,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(batch["items"][0]["resultFolder"], "checkpoint")
             self.assertFalse((workspace / "batches" / "manga-a" / "inputs" / "page-1.png").exists())
 
-    async def test_non_translation_failure_retries_from_original_input(self):
+    async def test_non_translation_failure_retries_from_saved_stage(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = Path(root)
             results = workspace / "results"
@@ -352,9 +715,11 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             class Run:
                 path = checkpoint
                 manifest = {"stages": [{"id": "inpainting", "status": "failed"}]}
+                ctx = None
 
-                async def retry_from_stage(self, *_args):
-                    raise AssertionError("non-translation failures must restart from the input")
+                async def retry_from_stage(self, stage, _config, _translator):
+                    calls.append(stage)
+                    (self.path / "final.png").write_bytes(b"result")
 
             class Translator:
                 _progress_hooks = []
@@ -366,11 +731,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
                 translator = Translator()
 
                 async def sent(self, _image, _config):
-                    calls.append("sent")
-                    fresh = results / "fresh"
-                    fresh.mkdir(parents=True)
-                    (fresh / "final.png").write_bytes(b"result")
-                    return SimpleNamespace(debug_folder="fresh")
+                    raise AssertionError("a saved stage checkpoint must be resumed")
 
                 async def _run_translation(self, operation):
                     return await operation()
@@ -380,14 +741,15 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
                     pass
 
             scheduler = BatchScheduler(store, Executors(), results)
-            with patch("server.batch_scheduler.PipelineLabRun.get_or_load", return_value=Run()):
-                await scheduler.retry_item("manga-a", "page-1")
+            with patch("server.batch_scheduler.PipelineRun.get_or_load", return_value=Run()):
+                await scheduler.retry_item("manga-a", "page-1", from_stage="inpainting")
+                (workspace / "batches" / "manga-a" / "inputs" / "page-1.png").unlink()
                 await scheduler._process_item("manga-a", "page-1", Instance())
 
+            self.assertEqual(calls, ["inpainting"])
             batch = await store.get_batch("manga-a")
-            self.assertEqual(calls, ["sent"])
             self.assertEqual(batch["items"][0]["status"], "completed")
-            self.assertEqual(batch["items"][0]["resultFolder"], "fresh")
+            self.assertEqual(batch["items"][0]["resultFolder"], "checkpoint")
 
     async def test_completed_checkpoint_retries_from_original_input(self):
         with tempfile.TemporaryDirectory() as root:
@@ -436,7 +798,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
                     pass
 
             scheduler = BatchScheduler(store, Executors(), results)
-            with patch("server.batch_scheduler.PipelineLabRun.get_or_load", return_value=Run()):
+            with patch("server.batch_scheduler.PipelineRun.get_or_load", return_value=Run()):
                 await scheduler.retry_item("manga-a", "page-1")
                 await scheduler._process_item("manga-a", "page-1", Instance())
 
@@ -508,7 +870,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
 
             class Translator:
                 _progress_hooks = []
-                _pipeline_lab_run = Run()
+                _pipeline_run = Run()
 
                 def add_progress_hook(self, hook):
                     self._progress_hooks.append(hook)
@@ -533,19 +895,33 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(batch["items"][0]["resultFolder"], "checkpoint")
             self.assertTrue((workspace / "batches" / "manga-a" / "inputs" / "page-1.png").exists())
 
-    async def test_process_group_handles_textless_page_successfully(self):
+    async def test_failed_retry_indexes_existing_checkpoint_for_stage_state_sync(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = Path(root)
             results = workspace / "results"
             store = BatchStore(workspace / "batches", results)
+            store.register_result = AsyncMock()
             image = io.BytesIO()
             Image.new("RGB", (2, 2)).save(image, "PNG")
-            items = [
-                {"id": "page-1", "name": "1.png"},
-                {"id": "page-2", "name": "2.png"},
-            ]
-            files = {item["id"]: (item["name"], image.getvalue()) for item in items}
-            await store.put_batch("manga-a", {"id": "manga-a", "items": items}, files)
+            await store.put_batch(
+                "manga-a",
+                {"id": "manga-a", "items": [{
+                    "id": "page-1", "name": "1.png", "status": "error",
+                    "pageId": "page-id", "resultFolder": "checkpoint",
+                }]},
+                {"page-1": ("1.png", image.getvalue())},
+            )
+            checkpoint = results / "checkpoint"
+            checkpoint.mkdir(parents=True)
+            Image.new("RGB", (2, 2)).save(checkpoint / "final.png")
+
+            class Run:
+                path = checkpoint
+                manifest = {"stages": [{"id": "inpainting", "status": "failed"}]}
+                ctx = None
+
+                async def retry_from_stage(self, *_args):
+                    raise RuntimeError("retry failed")
 
             class Translator:
                 _progress_hooks = []
@@ -556,34 +932,105 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             class Instance:
                 translator = Translator()
 
-                async def sent_batch(self, images, configs, batch_size):
-                    contexts = []
-                    for idx, (img, cfg) in enumerate(zip(images, configs)):
-                        folder = f"res-page-{idx + 1}"
-                        folder_dir = results / folder
-                        folder_dir.mkdir(parents=True, exist_ok=True)
-                        (folder_dir / "final.jpg").write_bytes(b"final")
-                        ctx = SimpleNamespace(
-                            debug_folder=folder,
-                            translation_error=None,
-                            text_regions=[] if idx == 1 else ["dummy_region"],
-                        )
-                        contexts.append(ctx)
-                    return contexts
+                async def sent(self, *_args):
+                    raise AssertionError("saved stage should be retried")
+
+                async def _run_translation(self, operation):
+                    return await operation()
 
             class Executors:
                 async def free_executor(self, _instance):
                     pass
 
             scheduler = BatchScheduler(store, Executors(), results)
-            claimed = await scheduler._claim_items("manga-a", 2)
-            await scheduler._process_group("manga-a", claimed, Instance())
+            with patch("server.batch_scheduler.PipelineRun.get_or_load", return_value=Run()):
+                await scheduler.retry_item("manga-a", "page-1", from_stage="inpainting")
+                await scheduler._process_item("manga-a", "page-1", Instance())
+
+            store.register_result.assert_awaited_once()
+            self.assertEqual(store.register_result.await_args.args[0], "checkpoint")
+            self.assertEqual(store.register_result.await_args.kwargs["page_id"], "page-id")
+
+    async def test_translation_checkpoints_all_pages_before_mask_stage(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            results = workspace / "results"
+            store = BatchStore(workspace / "batches", results)
+            image = io.BytesIO()
+            Image.new("RGB", (2, 2)).save(image, "PNG")
+            items = [
+                {"id": f"page-{index}", "name": f"{index}.png", "status": "processing",
+                 "stage": "awaiting_translation", "resultFolder": f"res-{index}"}
+                for index in (1, 2)
+            ]
+            files = {item["id"]: (item["name"], image.getvalue()) for item in items}
+            await store.put_batch(
+                "manga-a", {"id": "manga-a", "items": items, "settings": {}}, files
+            )
+            for index in (1, 2):
+                folder = results / f"res-{index}"
+                folder.mkdir(parents=True)
+                (folder / "text_regions_merged.json").write_text("[]", encoding="utf-8")
+
+            class Run:
+                def __init__(self):
+                    self.manifest = {"stages": [{"id": "translation", "status": "pending"}]}
+                    self.documents = {}
+
+                def write_json(self, name, payload):
+                    self.documents[name] = payload
+
+                def _stage(self, stage_id):
+                    return next(stage for stage in self.manifest["stages"] if stage["id"] == stage_id)
+
+                def _finish(self, stage_id):
+                    self._stage(stage_id)["status"] = "completed"
+
+                async def checkpoint(self):
+                    pass
+
+                def release_runtime(self):
+                    pass
+
+            runs = {f"res-{index}": Run() for index in (1, 2)}
+
+            class Translator:
+                def __init__(self):
+                    self._progress_hooks = []
+
+                def add_progress_hook(self, hook):
+                    self._progress_hooks.append(hook)
+
+            class Instance:
+                def __init__(self):
+                    self.translator = Translator()
+                    self.render = AsyncMock(side_effect=AssertionError("render must wait for the mask barrier"))
+
+                async def translate_batch_contexts(self, contexts_with_configs, batch_size=None):
+                    return contexts_with_configs
+
+            class Executors:
+                async def free_executor(self, _instance):
+                    pass
+
+            scheduler = BatchScheduler(store, Executors(), results)
+            config = SimpleNamespace(translator=SimpleNamespace(story_plan=None))
+            claimed = [{**item, "settings": {}} for item in items]
+
+            async def checkpoint(folder):
+                return runs[folder]
+
+            with (
+                patch.object(scheduler, "_checkpoint_run", side_effect=checkpoint),
+                patch.object(BatchScheduler, "_config_for", return_value=config),
+            ):
+                await scheduler._process_translation_group("manga-a", claimed, Instance())
 
             batch = await store.get_batch("manga-a")
-            self.assertEqual(batch["status"], "completed")
-            self.assertEqual(batch["items"][0]["status"], "completed")
-            self.assertEqual(batch["items"][1]["status"], "completed")
-            self.assertEqual(batch["items"][1]["resultFolder"], "res-page-2")
+            self.assertTrue(all(item["status"] == "queued" for item in batch["items"]))
+            self.assertTrue(all(item["pipelineStage"] == "mask_generation" for item in batch["items"]))
+            self.assertTrue(all(run._stage("translation")["status"] == "completed" for run in runs.values()))
+            self.assertTrue(all("translations.json" in run.documents for run in runs.values()))
 
     async def test_scheduler_launches_parallel_preparation_across_multiple_workers(self):
         with tempfile.TemporaryDirectory() as root:
@@ -609,7 +1056,13 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
 
                 async def find_executor(self):
                     self._free -= 1
-                    return SimpleNamespace(prepare=AsyncMock(), free_executor=AsyncMock())
+                    async def run_translation(operation):
+                        return await operation()
+                    return SimpleNamespace(
+                        prepare=AsyncMock(),
+                        translator=SimpleNamespace(),
+                        _run_translation=run_translation,
+                    )
 
                 async def free_executor(self, _instance):
                     self._free += 1
@@ -617,26 +1070,21 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             executors = MockExecutors()
             scheduler = BatchScheduler(store, executors, results)
 
-            # First launch should claim page-1 on worker 1
-            launched1 = await scheduler._launch_available()
-            self.assertTrue(launched1)
-            self.assertIn(("manga-a", "prep:page-1"), scheduler._running)
-            self.assertIn(("manga-a", "page-1"), scheduler._running_items)
+            async def hold_stage(*_args):
+                await asyncio.Future()
 
-            # Second launch should claim page-2 on worker 2 concurrently
-            launched2 = await scheduler._launch_available()
-            self.assertTrue(launched2)
-            self.assertIn(("manga-a", "prep:page-2"), scheduler._running)
-            self.assertIn(("manga-a", "page-2"), scheduler._running_items)
+            with patch.object(scheduler, "_process_prepare_item", side_effect=hold_stage):
+                # Pages in the active stage can occupy both workers together.
+                self.assertTrue(await scheduler._launch_available())
+                self.assertIn(("manga-a", "stage:page-1"), scheduler._running)
+                self.assertTrue(await scheduler._launch_available())
+                self.assertIn(("manga-a", "stage:page-2"), scheduler._running)
+                self.assertEqual(executors.free_executors(), 0)
+                self.assertFalse(await scheduler._launch_available())
 
-            # No more free executors
-            self.assertEqual(executors.free_executors(), 0)
-            self.assertFalse(await scheduler._launch_available())
-
-            # Cleanup
-            for task in scheduler._running.values():
-                task.cancel()
-            await asyncio.gather(*scheduler._running.values(), return_exceptions=True)
+                for task in scheduler._running.values():
+                    task.cancel()
+                await asyncio.gather(*scheduler._running.values(), return_exceptions=True)
 
     async def test_scheduler_aggregates_ready_translation_group_once_batch_size_reached(self):
         with tempfile.TemporaryDirectory() as root:
@@ -648,9 +1096,9 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             items = [
                 {"id": "page-1", "name": "1.png", "stage": "awaiting_translation", "status": "processing", "resultFolder": "res-1"},
                 {"id": "page-2", "name": "2.png", "stage": "awaiting_translation", "status": "processing", "resultFolder": "res-2"},
-                {"id": "page-3", "name": "3.png", "status": "queued"},
+                {"id": "page-3", "name": "3.png", "status": "completed", "stage": "finished"},
             ]
-            files = {item["id"]: (item["name"], image.getvalue()) for item in items}
+            files = {item["id"]: (item["name"], image.getvalue()) for item in items[:2]}
             await store.put_batch("manga-a", {"id": "manga-a", "items": items, "settings": {"translationBatchSize": 2}}, files)
 
             # Create mock text_regions_merged.json for res-1 and res-2
@@ -668,11 +1116,12 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
 
                 async def find_executor(self):
                     self._free -= 1
+                    async def run_translation(operation):
+                        return await operation()
                     return SimpleNamespace(
-                        translate_and_render_batch=AsyncMock(return_value=[
-                            SimpleNamespace(debug_folder="res-1", translation_error=None, text_regions=["r1"]),
-                            SimpleNamespace(debug_folder="res-2", translation_error=None, text_regions=["r2"]),
-                        ]),
+                        translate_batch_contexts=AsyncMock(),
+                        translator=SimpleNamespace(_progress_hooks=[]),
+                        _run_translation=run_translation,
                     )
 
                 async def free_executor(self, _instance):
@@ -720,10 +1169,12 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
 
                 async def find_executor(self):
                     self._free -= 1
+                    async def run_translation(operation):
+                        return await operation()
                     return SimpleNamespace(
-                        translate_and_render_batch=AsyncMock(return_value=[
-                            SimpleNamespace(debug_folder="res-2", translation_error=None, text_regions=["r2"]),
-                        ]),
+                        translate_batch_contexts=AsyncMock(),
+                        translator=SimpleNamespace(_progress_hooks=[]),
+                        _run_translation=run_translation,
                     )
 
                 async def free_executor(self, _instance):
@@ -742,81 +1193,18 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
                 task.cancel()
             await asyncio.gather(*scheduler._running.values(), return_exceptions=True)
 
-    async def test_scheduler_renders_translated_items_in_parallel_across_workers(self):
-        with tempfile.TemporaryDirectory() as root:
-            workspace = Path(root)
-            results = workspace / "results"
-            store = BatchStore(workspace / "batches", results)
-            image = io.BytesIO()
-            Image.new("RGB", (2, 2)).save(image, "PNG")
-            items = [
-                {"id": "page-1", "name": "1.png", "stage": "awaiting_translation", "status": "processing", "resultFolder": "res-1"},
-                {"id": "page-2", "name": "2.png", "stage": "awaiting_translation", "status": "processing", "resultFolder": "res-2"},
-            ]
-            files = {item["id"]: (item["name"], image.getvalue()) for item in items}
-            await store.put_batch("manga-a", {"id": "manga-a", "items": items, "settings": {"translationBatchSize": 2}}, files)
+    def test_batch_stage_advances_only_after_every_page_clears_the_barrier(self):
+        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
+        items = [
+            {"id": "p1", "status": "queued", "pipelineStage": "translation"},
+            {"id": "p2", "status": "queued", "pipelineStage": "layout"},
+        ]
 
-            (results / "res-1").mkdir(parents=True, exist_ok=True)
-            (results / "res-2").mkdir(parents=True, exist_ok=True)
-            (results / "res-1" / "text_regions_merged.json").write_text('[{"text": "Hello"}]', encoding="utf-8")
-            (results / "res-2" / "text_regions_merged.json").write_text('[{"text": "World"}]', encoding="utf-8")
-            (results / "res-1" / "final.jpg").write_bytes(image.getvalue())
-            (results / "res-2" / "final.jpg").write_bytes(image.getvalue())
-
-            concurrent_renders = 0
-            max_concurrent_renders = 0
-
-            class MockWorker:
-                def __init__(self, worker_id):
-                    self.worker_id = worker_id
-                    self.translator = SimpleNamespace(_progress_hooks=[])
-
-                async def translate_batch_contexts(self, contexts_with_configs, batch_size=None):
-                    return [(ctx, cfg) for ctx, cfg in contexts_with_configs]
-
-                async def render(self, ctx, config):
-                    nonlocal concurrent_renders, max_concurrent_renders
-                    concurrent_renders += 1
-                    max_concurrent_renders = max(max_concurrent_renders, concurrent_renders)
-                    await asyncio.sleep(0.05)
-                    concurrent_renders -= 1
-                    ctx.debug_folder = ctx.image_context["subfolder"] if getattr(ctx, "image_context", None) else "res-1"
-                    return ctx
-
-                def free_executor(self):
-                    pass
-
-            workers = [MockWorker(1), MockWorker(2)]
-            queue = asyncio.Queue()
-            for w in workers:
-                queue.put_nowait(w)
-
-            class MockExecutors:
-                def free_executors(self):
-                    return queue.qsize()
-
-                async def find_executor(self):
-                    return await queue.get()
-
-                async def free_executor(self, worker):
-                    queue.put_nowait(worker)
-
-            executors = MockExecutors()
-            scheduler = BatchScheduler(store, executors, results)
-
-            launched = await scheduler._launch_available()
-            self.assertTrue(launched)
-
-            # Wait for all tasks to complete
-            await asyncio.gather(*scheduler._running.values())
-
-            # Verify that both workers rendered in parallel!
-            self.assertEqual(max_concurrent_renders, 2)
-
-            batch = await store.get_batch("manga-a")
-            self.assertEqual(batch["status"], "completed")
-            self.assertEqual(batch["items"][0]["status"], "completed")
-            self.assertEqual(batch["items"][1]["status"], "completed")
+        self.assertEqual(scheduler._current_batch_stage(items), "translation")
+        items[0].update(status="queued", pipelineStage="mask_generation")
+        self.assertEqual(scheduler._current_batch_stage(items), "mask_generation")
+        items[1]["status"] = "error"
+        self.assertIsNone(scheduler._current_batch_stage(items))
 
     def test_config_for_maps_custom_ocr_prob(self):
         config1 = BatchScheduler._config_for(

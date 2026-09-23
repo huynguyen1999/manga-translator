@@ -27,7 +27,7 @@ import { apiUrl } from '@/utils/api';
 import { MANGA_TITLE_MAX_LENGTH } from '@/config';
 import { buildMangaDetailIdUrl, DEFAULT_GALLERY_PAGE_SIZE, GALLERY_PAGE_SIZE_OPTIONS, mangaIdForTitle, type GallerySection, type GallerySort } from '@/utils/routeState';
 import { addMangaToSeries, createSeries, fetchAllSeries, fetchGroupSeries } from '@/utils/series';
-import { pauseSummaryJob, resumeSummaryJob, stopSummaryJob } from '@/utils/summaryJobs';
+import { pauseSummaryJob, resumeSummaryJob, stopSummaryJob, subscribeSummaryJobs } from '@/utils/summaryJobs';
 
 const useClientLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
@@ -54,7 +54,8 @@ interface ResultGalleryProps {
   onUpdateMangaTitle?: (pageIds: string[], newMangaTitle: string, oldMangaTitle?: string, groupId?: string, folders?: string[]) => void;
   onOpenPageView?: (folder: string) => void;
   onOpenPageEdit?: (folder: string) => void;
-  onRetryImage?: (image: FinishedImage) => void | Promise<void>;
+  onRetryImage?: (image: FinishedImage, fromStage?: string) => void | Promise<void>;
+  onRetryFromStage?: (image: FinishedImage, stageId: string) => void | Promise<void>;
   onRerenderImage?: (image: FinishedImage) => void | Promise<void>;
   onRerenderImages?: (images: FinishedImage[]) => void | Promise<void>;
   galleryRevision?: number;
@@ -1258,6 +1259,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
   onOpenPageView,
   onOpenPageEdit,
   onRetryImage,
+  onRetryFromStage,
   onRerenderImage,
   onRerenderImages,
   galleryRevision = 0,
@@ -2302,51 +2304,71 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
   useEffect(() => {
     const summaryIsPending = summaryAvailability?.state === 'queued' || summaryAvailability?.state === 'generating' || summaryAvailability?.state === 'paused';
     if (!summaryIsPending) return;
-    let cancelled = false;
     const title = summaryAvailability.title;
     const groupId = summaryState?.title === title
       ? summaryState.data?.groupId || mangaGroups.find((group) => group.title === title)?.id
       : mangaGroups.find((group) => group.title === title)?.id;
+    let fetchedTerminalSummary = false;
+    return subscribeSummaryJobs((jobs) => {
+      const job = jobs.find((candidate) =>
+        groupId ? candidate.groupId === groupId : candidate.title === title,
+      ) || jobs.find((candidate) => candidate.title === title);
+      if (!job) return;
 
-    const poll = async () => {
-      try {
+      if (job.status === 'queued' || job.status === 'generating' || job.status === 'paused') {
+        setSummaryAvailability({ title, state: job.status });
+        setSummaryState((previous) => previous?.title === title
+          ? {
+              ...previous,
+              data: previous.data ? {
+                ...previous.data,
+                jobStatus: job.status,
+                jobError: job.jobError,
+                jobUpdatedAt: job.updatedAt,
+                jobStage: job.jobStage,
+                jobProgress: job.jobProgress,
+                jobMessage: job.jobMessage,
+                jobCurrentPage: job.jobCurrentPage,
+                jobPageCount: job.jobPageCount,
+                jobPagesWithText: job.jobPagesWithText,
+                jobExtractionRequired: job.jobExtractionRequired,
+              } : null,
+              loading: true,
+            }
+          : previous);
+        return;
+      }
+
+      if (job.status === 'error') {
+        setSummaryAvailability({ title, state: 'error' });
+        setSummaryState((previous) => previous?.title === title
+          ? { ...previous, loading: false, error: job.jobError || 'Could not generate a summary.' }
+          : previous);
+        return;
+      }
+
+      if (!fetchedTerminalSummary) {
+        fetchedTerminalSummary = true;
         const query = new URLSearchParams({ title });
         if (groupId) query.set('groupId', groupId);
-        const response = await fetch(apiUrl(`/api/results/group/summary?${query.toString()}`), { cache: 'no-store' });
-        if (!response.ok) return;
-        const data = await response.json() as MangaSummary;
-        if (cancelled) return;
-        setSummaryAvailability({ title, state: getMangaSummaryAvailability(data) });
-        if (isSummaryPending(data)) {
-          setSummaryState((previous) => {
-            if (previous?.title !== title) return previous;
-            return {
-              ...previous,
-              data: { ...previous.data, ...data },
-              loading: true,
-            };
+        fetch(apiUrl(`/api/results/group/summary?${query.toString()}`), { cache: 'no-store' })
+          .then(async (response) => {
+            if (!response.ok) throw new Error(`Summary status failed (${response.status})`);
+            return await response.json() as MangaSummary;
+          })
+          .then((data) => {
+            setSummaryAvailability({ title, state: getMangaSummaryAvailability(data) });
+            setSummaryState((previous) => previous?.title === title
+              ? { title, data, loading: false, error: null }
+              : previous);
+          })
+          .catch(() => {
+            setSummaryState((previous) => previous?.title === title
+              ? { ...previous, loading: false, error: 'Could not load the completed summary.' }
+              : previous);
           });
-          return;
-        }
-        setSummaryState((previous) => {
-          if (previous?.title !== title || !previous.loading) return previous;
-          return {
-            title,
-            data: data.summary ? data : previous.data,
-            loading: false,
-            error: data.jobStatus === 'error' ? data.jobError || 'Could not generate a summary.' : null,
-          };
-        });
-      } catch {
-        // Keep polling; transient network failures should not hide the modal.
       }
-    };
-
-    const interval = window.setInterval(() => void poll(), 2000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
+    });
   }, [mangaGroups, summaryAvailability?.state, summaryAvailability?.title, summaryState?.data?.groupId, summaryState?.title]);
 
   const copySummary = async () => {
@@ -5194,6 +5216,11 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
           onRetry={
             onRetryImage && selectedImage.sourceType !== 'original'
               ? onRetryImage
+              : undefined
+          }
+          onRetryFromStage={
+            onRetryFromStage && selectedImage.sourceType !== 'original'
+              ? onRetryFromStage
               : undefined
           }
           onRerender={

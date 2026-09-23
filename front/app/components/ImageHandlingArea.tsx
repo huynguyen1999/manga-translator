@@ -33,7 +33,6 @@ export interface ImageHandlingAreaProps {
   onDeselectAll: () => void;
   onRetryFile?: (file: File) => void;
   onOpenLightbox?: (file: StudioFile, result: Blob | File | string | null) => void;
-  onOpenInPipelineLab?: (file: File) => void;
   excludedColorFiles?: Set<string>;
   autoDetectedColorFiles?: Set<string>;
   onToggleExcludeColor?: (fileId: string) => void;
@@ -79,7 +78,6 @@ export const ImageHandlingArea: React.FC<ImageHandlingAreaProps> = ({
   onSelectAll,
   onDeselectAll,
   onOpenLightbox,
-  onOpenInPipelineLab,
   excludedColorFiles,
   autoDetectedColorFiles,
   onToggleExcludeColor,
@@ -670,18 +668,6 @@ export const ImageHandlingArea: React.FC<ImageHandlingAreaProps> = ({
                           title="Download translated image"
                         >
                           <Icon icon="carbon:download" className="h-4 w-4" />
-                        </button>
-                      )}
-
-                      {/* Open in Pipeline Lab */}
-                      {onOpenInPipelineLab && (
-                        <button
-                          type="button"
-                          onClick={() => onOpenInPipelineLab(file)}
-                          className="p-1 rounded text-zinc-400 hover:text-amber-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
-                          title="Open and run in Pipeline Lab"
-                        >
-                          <Icon icon="carbon:chemistry" className="h-4 w-4" />
                         </button>
                       )}
 

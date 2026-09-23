@@ -1,12 +1,9 @@
-import { PipelineLab } from "../components/PipelineLab";
+import { redirect } from "react-router";
 
-export function meta() {
-  return [
-    { title: "Pipeline Lab · MangaStudio" },
-    { name: "description", content: "Inspect every stage of one manga translation pipeline run." },
-  ];
+export function loader() {
+  return redirect("/studio");
 }
 
-export default function PipelineLabRoute() {
-  return <PipelineLab />;
+export default function LegacyPipelineLabRoute() {
+  return null;
 }

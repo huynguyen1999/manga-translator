@@ -1,11 +1,33 @@
 import type { SummaryJob } from "@/types";
 import { apiUrl } from "./api";
 
-export async function fetchSummaryJobs(signal?: AbortSignal): Promise<SummaryJob[]> {
-  const response = await fetch(apiUrl("/api/results/group/summary/jobs"), { signal, cache: "no-store" });
-  if (!response.ok) throw new Error("Could not load summary jobs.");
-  const payload = await response.json();
-  return Array.isArray(payload) ? payload as SummaryJob[] : [];
+let summaryJobsSource: EventSource | null = null;
+let latestSummaryJobs: SummaryJob[] | null = null;
+const summaryJobsListeners = new Set<(jobs: SummaryJob[]) => void>();
+
+export function subscribeSummaryJobs(listener: (jobs: SummaryJob[]) => void): () => void {
+  summaryJobsListeners.add(listener);
+  if (latestSummaryJobs) listener(latestSummaryJobs);
+  if (!summaryJobsSource) {
+    summaryJobsSource = new EventSource(apiUrl("/api/results/group/summary/jobs/events"));
+    summaryJobsSource.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        latestSummaryJobs = Array.isArray(payload) ? payload as SummaryJob[] : [];
+        summaryJobsListeners.forEach((notify) => notify(latestSummaryJobs!));
+      } catch {
+        // Ignore malformed snapshots and wait for the next update.
+      }
+    };
+  }
+  return () => {
+    summaryJobsListeners.delete(listener);
+    if (summaryJobsListeners.size === 0) {
+      summaryJobsSource?.close();
+      summaryJobsSource = null;
+      latestSummaryJobs = null;
+    }
+  };
 }
 
 export async function dismissSummaryJob(job: Pick<SummaryJob, "groupId" | "title">): Promise<void> {
@@ -77,4 +99,3 @@ export async function stopSummaryJob(job: Pick<SummaryJob, "groupId" | "title">)
 
 export const summaryJobProgress = (job: Pick<SummaryJob, "status" | "jobProgress">): number =>
   Math.max(0, Math.min(100, job.jobProgress ?? (job.status === "ready" ? 100 : 0)));
-

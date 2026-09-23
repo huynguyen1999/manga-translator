@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import type { FinishedImage } from "@/types";
-import type { PipelineLabManifest } from "@/utils/pipelineLab";
+import type { PipelineRunManifest } from "@/types";
 import {
   formatElapsedTime,
   formatTimestamp,
   resolveImageUrls,
   resolveLanguageName,
   resolvePipelineStepSettings,
+  resolveStagesToRetry,
   resolveTranslationTiming,
   resolveTranslatorEngine,
   resolveTranslatorModel,
@@ -83,16 +84,15 @@ assert.equal(resolveTranslatorModel(
 assert.equal(resolveTranslatorModel("openrouter", { translator: "openrouter" }, null, null), "deepseek/deepseek-v4-flash-0731");
 
 // 5. Timestamp and total duration resolution
-const manifest: PipelineLabManifest = {
+const manifest: PipelineRunManifest = {
   version: 1,
-  kind: "pipeline-lab" as const,
+  kind: "pipeline-run" as const,
   folder: "page-1",
   status: "completed" as const,
   createdAt: "2026-09-16T01:02:03.000Z",
   updatedAt: "2026-09-16T01:02:08.500Z",
   source: { filename: "001.png", width: 1, height: 1, mode: "RGB" },
   config: {},
-  stagePlan: {} as PipelineLabManifest["stagePlan"],
   stages: [
     { id: "detection", label: "Detection", status: "completed", durationMs: 1200 },
     { id: "ocr", label: "OCR", status: "completed", durationMs: 800 },
@@ -106,6 +106,33 @@ assert.deepEqual(resolveTranslationTiming(manifest), {
   endAt: manifest.updatedAt,
   durationMs: 5500,
 });
+const fullRetryStages = [
+  { id: "input", label: "Input", status: "completed", dependsOn: [] },
+  { id: "colorization", label: "Colorization", status: "completed", dependsOn: ["input"] },
+  { id: "upscaling", label: "Upscaling", status: "completed", dependsOn: ["input", "colorization"] },
+  { id: "detection", label: "Detection", status: "completed", dependsOn: ["upscale"] },
+  { id: "ocr", label: "OCR", status: "completed", dependsOn: ["detection"] },
+  { id: "bubble_detection", label: "Bubbles", status: "completed", dependsOn: ["upscale"] },
+  { id: "textline_merge", label: "Grouping", status: "completed", dependsOn: ["ocr", "bubble_detection"] },
+  { id: "translation", label: "Translation", status: "completed", dependsOn: ["text_grouping"] },
+  { id: "mask_generation", label: "Mask", status: "completed", dependsOn: ["detection", "ocr", "bubble_detection", "text_grouping"] },
+  { id: "layout", label: "Layout", status: "completed", dependsOn: ["translation", "bubble_detection", "text_grouping"] },
+  { id: "inpainting", label: "Inpainting", status: "completed", dependsOn: ["mask_generation"] },
+  { id: "rendering", label: "Rendering", status: "completed", dependsOn: ["layout", "inpainting"] },
+];
+assert.deepEqual(resolveStagesToRetry(fullRetryStages, "translation"), [
+  "Translation", "Layout", "Rendering",
+]);
+assert.deepEqual(resolveStagesToRetry(fullRetryStages, "ocr"), [
+  "OCR", "Grouping", "Translation", "Mask", "Layout", "Inpainting", "Rendering",
+]);
+assert.deepEqual(resolveStagesToRetry([
+  { id: "input", label: "Input", status: "completed", dependsOn: [] },
+  { id: "ocr", label: "OCR", status: "completed", dependsOn: ["detection"] },
+  { id: "bubble_detection", label: "Bubbles", status: "skipped", dependsOn: ["upscale"] },
+  { id: "text_grouping", label: "Grouping", status: "completed", dependsOn: ["ocr", "bubble_detection"] },
+  { id: "translation", label: "Translation", status: "failed", dependsOn: ["text_grouping"] },
+], "ocr"), ["OCR", "Grouping", "Translation"]);
 
 // 5b. Timing resolution with image startedAt and explicit durationMs
 assert.deepEqual(
@@ -123,14 +150,13 @@ assert.deepEqual(
 );
 
 // 5c. Timing resolution from stage durations when manifest has no top-level timestamps
-const stageOnlyManifest: PipelineLabManifest = {
+const stageOnlyManifest: PipelineRunManifest = {
   version: 1,
-  kind: "pipeline-lab" as const,
+  kind: "pipeline-run" as const,
   folder: "page-2",
   status: "completed" as const,
   source: { filename: "002.png", width: 1, height: 1, mode: "RGB" },
   config: {},
-  stagePlan: {} as PipelineLabManifest["stagePlan"],
   stages: [
     { id: "detection", label: "Detection", status: "completed", durationMs: 1500 },
     { id: "ocr", label: "OCR", status: "completed", durationMs: 500 },
@@ -239,9 +265,9 @@ assert.equal(resolvedFlat.upscaling?.upscalerLabel, "4x UltraSharp");
 assert.equal(resolvedFlat.upscaling?.ratio, "4x");
 
 // 9. Pipeline step settings resolution from nested manifest config
-const nestedManifest: PipelineLabManifest = {
+const nestedManifest: PipelineRunManifest = {
   version: 1,
-  kind: "pipeline-lab" as const,
+  kind: "pipeline-run" as const,
   folder: "page-nested",
   status: "completed" as const,
   source: { filename: "page.png", width: 800, height: 1200, mode: "RGB" },
@@ -282,7 +308,6 @@ const nestedManifest: PipelineLabManifest = {
       upscale_ratio: null,
     },
   },
-  stagePlan: {} as PipelineLabManifest["stagePlan"],
   stages: [],
 };
 

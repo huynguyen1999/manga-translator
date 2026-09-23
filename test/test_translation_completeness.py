@@ -30,6 +30,66 @@ def setup_page():
 
 
 class TranslationCompletenessTests(unittest.TestCase):
+    def test_cached_inpainted_image_without_mask_rebuilds_mask_and_inpaints(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        import numpy as np
+        from PIL import Image
+        from unittest.mock import patch
+
+        from manga_translator.mask_builder import build_inpaint_masks
+
+        translator, config, ctx = setup_page()
+        image = np.full((120, 120, 3), 255, dtype=np.uint8)
+        mask = np.zeros((120, 120), dtype=np.uint8)
+        mask[8:95, 8:35] = 255
+        ctx.img_rgb = image
+        ctx.input = Image.fromarray(image)
+        ctx.img_inpainted = np.zeros_like(image)  # stale artifact with no active mask
+        ctx.mask = None
+        ctx.result_documents = {}
+        ctx.bubble_detections = []
+        ctx._bubble_detection_done = True
+        ctx._bubble_layout_ready = True
+        config.bubble_detection.enabled = False
+
+        bundle = SimpleNamespace(
+            text_mask=mask,
+            bubble_cleanup_mask=mask,
+            detector_rescue_mask=mask,
+            bubble_residual_mask=np.zeros_like(mask),
+            protected_edge_mask=np.zeros_like(mask),
+            profile={},
+            page_geometry=None,
+            final_inpaint_mask=mask,
+        )
+        inpaint_inputs = []
+
+        async def fake_inpaint(_config, current):
+            inpaint_inputs.append(current.img_inpainted)
+            return current.img_rgb.copy()
+
+        translator.verbose = False
+        translator._pipeline_run = None
+        translator._current_image_context = None
+        translator._report_progress = AsyncMock()
+        translator._result_path = lambda name: str(Path(tempfile.gettempdir()) / name)
+        translator._run_inpainting = AsyncMock(side_effect=fake_inpaint)
+        translator._run_text_rendering = AsyncMock(return_value=image.copy())
+        translator._revert_upscale = AsyncMock(side_effect=lambda _config, current: current)
+        translator._empty_device_cache = lambda: None
+
+        with patch(
+            "manga_translator.manga_translator.run_cpu_stage",
+            new=AsyncMock(return_value=bundle),
+        ) as cpu_stage:
+            asyncio.run(translator._complete_translation_pipeline(ctx, config))
+
+        self.assertIs(cpu_stage.await_args.args[0], build_inpaint_masks)
+        self.assertEqual(len(inpaint_inputs), 1)
+        self.assertIsNone(inpaint_inputs[0])
+
     def test_incomplete_translation_retries(self):
         for bad in ([], [''], ['  '], [None], ['うるさい'], ['one', 'extra']):
             translator, config, ctx = setup_page()

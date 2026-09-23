@@ -4,44 +4,12 @@ from __future__ import annotations
 
 from time import perf_counter
 from typing import Any, Dict, Optional
-import uuid
-
-import numpy as np
-
 from .. import get_default_eng_font
 from .models import PageLayoutResult, PlacedLine, RegionLayout
 from .obstacles import build_page_obstacle_map, classify_placement_modes
+from .regions import prepare_regions
 from .validation import validate_layout
 
-
-def _ensure_region_identities(regions):
-    for region in regions or []:
-        region_id = str(getattr(region, "region_id", "") or "")
-        if not region_id:
-            region.region_id = uuid.uuid4().hex
-            region_id = region.region_id
-        source_ids = getattr(region, "source_region_ids", None)
-        if isinstance(source_ids, str):
-            source_ids = [source_ids]
-        if not source_ids:
-            members = getattr(region, "group_members", None)
-            if isinstance(members, str):
-                members = [members]
-            source_ids = [str(member) for member in members] if members else [region_id]
-        region.source_region_ids = [str(member) for member in source_ids]
-        if not getattr(region, "source_regions", None):
-            lines = np.asarray(getattr(region, "lines", []))
-            bbox = np.asarray(getattr(region, "xyxy", [0, 0, 0, 0])).tolist()
-            center = np.asarray(getattr(region, "center", [0, 0])).astype(float).tolist()
-            region.source_regions = [{
-                "id": region_id,
-                "polygons": lines.tolist(),
-                "bbox": bbox,
-                "centroid": center,
-                "source_text": str(getattr(region, "text", "") or ""),
-                "reading_order": 0,
-            }]
-    return regions or []
 
 
 def _region_layout(region: Any, font_path: Optional[str]) -> RegionLayout:
@@ -77,13 +45,15 @@ def _region_layout(region: Any, font_path: Optional[str]) -> RegionLayout:
 def layout_page(ctx: Any, config: Any, font_path: Optional[str] = None, options: Any = None) -> PageLayoutResult:
     """Run the production shape-aware solver and freeze its result for rendering."""
     started = perf_counter()
-    regions = _ensure_region_identities(getattr(ctx, "text_regions", []) or [])
+    regions = prepare_regions(getattr(ctx, "text_regions", []) or [])
     result = PageLayoutResult()
     if getattr(ctx, "img_rgb", None) is None:
         result.diagnostics.errors.append("layout requires ctx.img_rgb")
         return result
 
     active_font = font_path or getattr(getattr(config, "render", None), "font_path", None) or get_default_eng_font()
+    option_debug = options.get("layout_debug", False) if isinstance(options, dict) else getattr(options, "layout_debug", False)
+    layout_debug = bool(option_debug or getattr(ctx, "_layout_debug_enabled", False))
     timing: Dict[str, float] = {}
     from .solver import apply_shape_aware_bubble_layout
 
@@ -93,10 +63,12 @@ def layout_page(ctx: Any, config: Any, font_path: Optional[str] = None, options:
         font_path=active_font,
         infer_bubbles=True,
         timing=timing,
+        layout_debug=layout_debug,
+        page_geometry=getattr(ctx, "page_geometry", None),
     )
 
     regions = ctx.text_regions
-    _ensure_region_identities(regions)
+    prepare_regions(regions)
     classify_placement_modes(regions)
     ctx._layout_obstacles = build_page_obstacle_map(regions, ctx.img_rgb.shape[:2])
 

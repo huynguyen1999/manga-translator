@@ -32,10 +32,6 @@ console.log('Running routeState unit tests...');
   assert.equal(DEFAULT_GALLERY_PAGE_SIZE, 25);
   assert.deepEqual(GALLERY_PAGE_SIZE_OPTIONS, [25, 50, 75, 100]);
 
-  const pipeline = parseAppPath('/pipeline-lab');
-  assert.equal(pipeline.view, 'pipeline');
-  assert.equal(pipeline.overlay, 'none');
-
   const reader = parseAppPath('/read', '?manga=My%20Cool%20Manga');
   assert.equal(reader.view, 'gallery');
   assert.equal(reader.overlay, 'reader');
@@ -117,7 +113,6 @@ console.log('Running routeState unit tests...');
   assert.equal(getLegacyRedirect('/gallery'), null);
   assert.equal(getLegacyRedirect('/gallery', '?manga=Solo%20Leveling'), buildMangaDetailUrl('Solo Leveling'));
   assert.equal(getLegacyRedirect('/studio'), null);
-  assert.equal(getLegacyRedirect('/pipeline-lab'), null);
 }
 
 // 3. validatePriorRoute tests

@@ -1,9 +1,11 @@
 import asyncio
+import io
 import json
 import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 from PIL import Image
@@ -12,9 +14,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from manga_translator.config import Config, PipelineLabConfig
+from manga_translator.config import Config
 from manga_translator.manga_translator import MangaTranslator
-from manga_translator.pipeline_lab import PipelineLabRun, set_document_saver
+from manga_translator.pipeline.run import PipelineRun, set_document_saver
 from manga_translator.utils import Context, TextBlock, Quadrilateral
 import server.main as sm
 from starlette.testclient import TestClient
@@ -34,7 +36,7 @@ class TestPipelineTiming(unittest.TestCase):
         sm.RESULT_ROOT = self.orig_result_root
         set_document_saver(None)
 
-    def test_pipeline_lab_run_stage_durations_and_detail(self):
+    def test_pipeline_run_stage_durations_and_detail(self):
         saved_docs = {}
         async def mock_save(folder, docs):
             saved_docs[folder] = docs
@@ -43,7 +45,7 @@ class TestPipelineTiming(unittest.TestCase):
 
         img = Image.new("RGB", (100, 100))
         config = Config(original_name="test_page.png")
-        run = PipelineLabRun(self.results_dir, "run_timing_1", img, config)
+        run = PipelineRun(self.results_dir, "run_timing_1", img, config)
         
         # Simulate stages
         run.progress("detection")
@@ -112,7 +114,7 @@ class TestPipelineTiming(unittest.TestCase):
         (folder_dir / "final.png").write_bytes(b"final")
 
         client = TestClient(sm.app)
-        res = client.get("/api/pipeline-lab/runs/folder_legacy_1/manifest")
+        res = client.get("/api/pipeline-runs/folder_legacy_1/manifest")
         self.assertEqual(res.status_code, 200)
         
         data = res.json()
@@ -122,6 +124,98 @@ class TestPipelineTiming(unittest.TestCase):
         self.assertEqual(data["updatedAt"], "2026-09-20T12:00:05.500Z")
         self.assertEqual(data["source"]["filename"], "legacy_page.png")
         self.assertEqual(data["stages"][0]["durationMs"], 5500)
+        self.assertEqual(data["stages"][0]["dependsOn"], ["layout", "inpainting"])
+
+    def test_persisted_stage_state_overlays_timing_manifest(self):
+        folder_dir = self.results_dir / "folder_stages_1"
+        folder_dir.mkdir(parents=True, exist_ok=True)
+        (folder_dir / "pipeline_manifest.json").write_text(
+            json.dumps({"folder": folder_dir.name, "status": "completed", "stages": []}),
+            encoding="utf-8",
+        )
+
+        class StageStore:
+            async def get_document(self, _folder, _name):
+                return None
+
+            async def get_pipeline_stage_state(self, _folder):
+                return [{
+                    "stage": "ocr",
+                    "status": "failed",
+                    "attempt": 2,
+                    "started_at": datetime(2026, 9, 23, tzinfo=timezone.utc),
+                    "completed_at": datetime(2026, 9, 23, tzinfo=timezone.utc),
+                    "duration_ms": 125,
+                    "error_message": "OCR timed out",
+                }]
+
+        with patch.object(sm, "_postgres", return_value=StageStore()):
+            response = TestClient(sm.app).get(
+                f"/api/pipeline-runs/{folder_dir.name}/manifest"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        stage = response.json()["stages"][0]
+        self.assertEqual(stage["id"], "ocr")
+        self.assertEqual(stage["status"], "failed")
+        self.assertEqual(stage["durationMs"], 125)
+        self.assertEqual(stage["reason"], "OCR timed out")
+        self.assertEqual(stage["dependsOn"], ["detection"])
+
+    def test_manifest_normalizes_checkpoint_ids_and_exposes_dependencies(self):
+        folder_dir = self.results_dir / "legacy_stage_ids"
+        folder_dir.mkdir(parents=True, exist_ok=True)
+        (folder_dir / "pipeline_manifest.json").write_text(
+            json.dumps({
+                "folder": folder_dir.name,
+                "status": "completed",
+                "stages": [
+                    {"id": "upscaling", "label": "Upscaling", "status": "completed"},
+                    {"id": "ocr", "label": "OCR", "status": "completed"},
+                    {"id": "bubble_detection", "label": "Bubbles", "status": "completed"},
+                    {"id": "textline_merge", "label": "Grouping", "status": "completed"},
+                ],
+            }),
+            encoding="utf-8",
+        )
+        with patch.object(sm, "_postgres", return_value=None):
+            response = TestClient(sm.app).get(
+                f"/api/pipeline-runs/{folder_dir.name}/manifest"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        stages = {stage["id"]: stage for stage in response.json()["stages"]}
+        self.assertNotIn("upscaling", stages)
+        self.assertEqual(stages["upscale"]["dependsOn"], ["input", "colorization"])
+        self.assertEqual(
+            stages["text_grouping"]["dependsOn"], ["ocr", "bubble_detection"]
+        )
+
+    def test_result_url_serves_registered_artifact_revision(self):
+        folder_dir = self.results_dir / "folder_active_artifact"
+        versioned_dir = folder_dir / "pipeline_artifacts" / "rendering"
+        versioned_dir.mkdir(parents=True)
+        (folder_dir / "final.png").write_bytes(b"stale alias")
+        Image.new("RGB", (3, 3), "blue").save(versioned_dir / "final-image.jpg", format="JPEG")
+
+        class ArtifactStore:
+            async def resolve_folder(self, _folder):
+                return folder_dir.name
+
+            async def get_pipeline_artifact(self, _folder, _stage, _type):
+                return {
+                    "relative_path": "folder_active_artifact/pipeline_artifacts/rendering/final-image.jpg"
+                }
+
+        with patch.object(sm, "_postgres", return_value=ArtifactStore()):
+            response = TestClient(sm.app).get(
+                f"/result/{folder_dir.name}/final.png"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "image/jpeg")
+        with Image.open(io.BytesIO(response.content)) as image:
+            self.assertEqual(image.getpixel((0, 0)), (0, 0, 254))
 
     def test_manga_translator_prepare_timestamps(self):
         translator = object.__new__(MangaTranslator)
@@ -166,10 +260,10 @@ class TestPipelineTiming(unittest.TestCase):
         translator._save_current_image_context = lambda md5: None
 
         async def fake_step_1_textless(image, config, prepare_canvas=True):
-            # Simulate pipeline finishing and releasing _pipeline_lab_run in _revert_upscale
-            if translator._pipeline_lab_run is not None:
-                translator._pipeline_lab_run.release_runtime()
-                translator._pipeline_lab_run = None
+            # Simulate pipeline finishing and releasing _pipeline_run in _revert_upscale
+            if translator._pipeline_run is not None:
+                translator._pipeline_run.release_runtime()
+                translator._pipeline_run = None
             ctx = Context()
             ctx.text_regions = []
             return ctx
@@ -186,7 +280,7 @@ class TestPipelineTiming(unittest.TestCase):
         ctx = asyncio.run(translator.prepare(img, config))
         self.assertIsNotNone(ctx)
         self.assertEqual(ctx.debug_folder, "test_subfolder")
-        self.assertIsNone(translator._pipeline_lab_run)
+        self.assertIsNone(translator._pipeline_run)
 
 
     def test_manga_translator_revert_upscale_without_monotonic(self):
@@ -195,7 +289,7 @@ class TestPipelineTiming(unittest.TestCase):
         translator.verbose = True
         translator.result_sub_folder = "test_subfolder"
         translator.result_root = str(self.results_dir)
-        translator._pipeline_lab_run = None
+        translator._pipeline_run = None
         translator._current_image_context = {'file_md5': 'mockmd5', 'subfolder': 'test_subfolder'}
         translator._get_image_subfolder = lambda: "test_subfolder"
         translator._result_path = lambda filename: str(self.results_dir / filename)

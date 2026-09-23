@@ -1,8 +1,11 @@
 """Thin HTTP boundary for the optional Search Lab service."""
+import asyncio
+import json
 import logging
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger("manga-translator.search")
@@ -66,6 +69,28 @@ def search_router(get_service):
     @router.get("/status")
     async def status():
         return await call(service().status())
+
+    @router.get("/status/events")
+    async def status_events():
+        instance = service()
+
+        async def stream():
+            last_snapshot = None
+            while True:
+                # ponytail: three-second status snapshots; use notifications if subscriber/query load grows.
+                snapshot = json.dumps(await call(instance.status()), sort_keys=True, separators=(",", ":"))
+                if snapshot != last_snapshot:
+                    last_snapshot = snapshot
+                    yield f"data: {snapshot}\n\n"
+                else:
+                    yield ": keep-alive\n\n"
+                await asyncio.sleep(3)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @router.get("/manga")
     async def manga(

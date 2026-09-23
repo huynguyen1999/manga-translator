@@ -136,6 +136,7 @@ from manga_translator.rendering.layout.solver import (
     solve_layout,
 )
 from manga_translator.rendering.layout import layout_page
+from manga_translator.rendering.layout.regions import prepare_regions as _ensure_region_identities
 from manga_translator.rendering.layout.obstacles import _region_source_mask
 from manga_translator.rendering import (
     _RENDER_LOCK,
@@ -160,25 +161,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 DEFAULT_DATA_DIR = PROJECT_ROOT / "devscripts" / "data"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
-
-def _ensure_region_identities(regions: Optional[List[Any]]) -> List[Any]:
-    """Give every live region one stable id and preserve grouped source ownership."""
-    for region in regions or []:
-        region_id = str(getattr(region, "region_id", "") or "")
-        if not region_id:
-            region.region_id = uuid.uuid4().hex
-            region_id = region.region_id
-
-        source_ids = getattr(region, "source_region_ids", None)
-        if isinstance(source_ids, str):
-            source_ids = [source_ids]
-        if not source_ids:
-            members = getattr(region, "group_members", None)
-            if isinstance(members, str):
-                members = [members]
-            source_ids = [str(member) for member in members] if members else [region_id]
-        region.source_region_ids = [str(member) for member in source_ids]
-    return regions or []
 
 
 def _render_text(region: Any) -> str:
@@ -892,6 +874,10 @@ def save_step_data(
     # 4. Save masks
     if ctx.mask is not None:
         cv2.imwrite(str(sample_dir / "mask_final.png"), ctx.mask)
+    mask_profile = getattr(ctx, "mask_profile", None)
+    if mask_profile:
+        with open(sample_dir / "profiling.json", "w", encoding="utf-8") as f:
+            json.dump(mask_profile, f, indent=2)
     if getattr(ctx, "text_mask", None) is not None:
         cv2.imwrite(str(sample_dir / "text_mask.png"), ctx.text_mask)
     if getattr(ctx, "bubble_mask", None) is not None:
@@ -1313,6 +1299,7 @@ def run_fast_placement_and_render(
     })
     translator.font_path = active_font
     ctx._strict_layout_validation = bool(solver_report)
+    ctx._layout_debug_enabled = bool(solver_report)
     _ensure_region_identities(ctx.text_regions)
 
     # Ensure all regions have translation populated
@@ -1401,7 +1388,7 @@ def run_solver_direct(
             return None, []
 
         # Ensure bubble masks/interiors are prepared
-        prepare_bubble_masks(img, regions)
+        prepare_bubble_masks(img, regions, page_geometry=getattr(ctx, "page_geometry", None))
         classify_placement_modes(regions)
         obstacles = build_page_obstacle_map(regions, img.shape[:2])
         inpaint_mask = getattr(ctx, "inpaint_mask", None)
@@ -1832,6 +1819,7 @@ async def _capture_single_image(
                 text_regions=ctx.text_regions or [],
                 bubble_detections=getattr(ctx, "bubble_detections", None),
                 config=config,
+                page_geometry=getattr(ctx, "page_geometry", None),
             )
             ctx.text_mask = bundle.text_mask
             ctx.bubble_mask = bundle.bubble_cleanup_mask
@@ -1839,6 +1827,8 @@ async def _capture_single_image(
             ctx.bubble_residual_mask = bundle.bubble_residual_mask
             ctx.protected_edge_mask = bundle.protected_edge_mask
             ctx.mask_bundle = bundle
+            ctx.mask_profile = bundle.profile
+            ctx.page_geometry = bundle.page_geometry
             ctx.mask = bundle.final_inpaint_mask
             ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
 

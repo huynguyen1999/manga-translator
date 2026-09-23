@@ -9,6 +9,72 @@ from ..utils import InfererModule, ModelWrapper, Quadrilateral
 
 class CommonDetector(InfererModule):
 
+    async def _detect_batch(self, images, detect_size, text_threshold, box_threshold, unclip_ratio, verbose=False):
+        return [
+            await self._detect(image, detect_size, text_threshold, box_threshold, unclip_ratio, verbose)
+            for image in images
+        ]
+
+    async def detect_batch(
+        self,
+        images: list[np.ndarray],
+        detect_size: int,
+        text_threshold: float,
+        box_threshold: float,
+        unclip_ratio: float,
+        invert: bool,
+        gamma_correct: bool,
+        rotate: bool,
+        auto_rotate: bool = False,
+        verbose: bool = False,
+    ):
+        if not images:
+            return []
+        processed = []
+        metadata = []
+        for image in images:
+            img_h, img_w = image.shape[:2]
+            orig_image = image.copy()
+            if rotate:
+                image = self._add_rotation(image)
+            add_border = min(img_w, img_h) < 400
+            if add_border:
+                image = self._add_border(image, 400)
+            if invert:
+                image = self._add_inversion(image)
+            if gamma_correct:
+                image = self._add_gamma_correction(image)
+            processed.append(image)
+            metadata.append((orig_image, img_w, img_h, add_border))
+
+        results = await self._detect_batch(
+            processed, detect_size, text_threshold, box_threshold, unclip_ratio, verbose
+        )
+        if len(results) != len(images):
+            raise RuntimeError(f"Detector returned {len(results)} pages for {len(images)} inputs")
+        output = []
+        for image, (textlines, raw_mask, mask), (orig_image, img_w, img_h, add_border) in zip(
+            processed, results, metadata
+        ):
+            textlines = [line for line in textlines if line.area > 1]
+            if add_border:
+                textlines, raw_mask, mask = self._remove_border(image, img_w, img_h, textlines, raw_mask, mask)
+            if auto_rotate:
+                orientation = (
+                    Counter("h" if line.aspect_ratio > 1 else "v" for line in textlines).most_common(1)[0][0]
+                    if textlines else "h"
+                )
+                if orientation == "h":
+                    output.append(await self.detect(
+                        orig_image, detect_size, text_threshold, box_threshold, unclip_ratio,
+                        invert, gamma_correct, not rotate, auto_rotate=False, verbose=verbose,
+                    ))
+                    continue
+            if rotate:
+                textlines, raw_mask, mask = self._remove_rotation(textlines, raw_mask, mask, img_w, img_h)
+            output.append((textlines, raw_mask, mask))
+        return output
+
     async def detect(self, image: np.ndarray, detect_size: int, text_threshold: float, box_threshold: float, unclip_ratio: float,
                      invert: bool, gamma_correct: bool, rotate: bool, auto_rotate: bool = False, verbose: bool = False):
         '''
@@ -62,6 +128,7 @@ class CommonDetector(InfererModule):
             textlines, raw_mask, mask = self._remove_rotation(textlines, raw_mask, mask, img_w, img_h)
 
         return textlines, raw_mask, mask
+
 
     @abstractmethod
     async def _detect(self, image: np.ndarray, detect_size: int, text_threshold: float, box_threshold: float,
@@ -144,3 +211,74 @@ class OfflineDetector(CommonDetector, ModelWrapper):
     async def _infer(self, image: np.ndarray, detect_size: int, text_threshold: float, box_threshold: float,
                        unclip_ratio: float, verbose: bool = False):
         pass
+
+
+def dbnet_detect_batch(
+    images: list[np.ndarray],
+    forward,
+    device: str,
+    detect_size: int,
+    text_threshold: float,
+    box_threshold: float,
+    unclip_ratio: float,
+    *,
+    interpolation: int,
+    blur_before_resize: bool,
+) -> list[tuple[list[Quadrilateral], np.ndarray, None]]:
+    """Run compatible DBNet pages in one model call and map each result back."""
+    if not images:
+        return []
+    from .default_utils import craft_utils, dbnet_utils, imgproc
+
+    prepared = []
+    for image in images:
+        if blur_before_resize:
+            image = cv2.bilateralFilter(image, 17, 80, 80)
+        resized, ratio, _, pad_w, pad_h = imgproc.resize_aspect_ratio(
+            image, detect_size, interpolation, mag_ratio=1
+        )
+        if not blur_before_resize:
+            resized = cv2.bilateralFilter(resized, 9, 80, 80)
+        prepared.append((resized, ratio, pad_w, pad_h))
+
+    max_height = max(image.shape[0] for image, _, _, _ in prepared)
+    max_width = max(image.shape[1] for image, _, _, _ in prepared)
+    batch = np.zeros((len(prepared), max_height, max_width, 3), dtype=np.uint8)
+    for index, (image, _, _, _) in enumerate(prepared):
+        batch[index, :image.shape[0], :image.shape[1]] = image
+    db, masks = forward(batch, device)
+
+    output = []
+    representer = dbnet_utils.SegDetectorRepresenter(
+        text_threshold, box_threshold, unclip_ratio=unclip_ratio
+    )
+    for index, (image, ratio, pad_w, pad_h) in enumerate(prepared):
+        height, width = image.shape[:2]
+        out_height = round(height * db.shape[-2] / max_height)
+        out_width = round(width * db.shape[-1] / max_width)
+        db_page = db[index:index + 1, :, :out_height, :out_width]
+        boxes, scores = representer({"shape": [(height, width)]}, db_page)
+        boxes, scores = boxes[0], scores[0]
+        if boxes.size:
+            valid = boxes.reshape(boxes.shape[0], -1).sum(axis=1) > 0
+            boxes, scores = boxes[valid], scores[valid]
+            boxes = craft_utils.adjustResultCoordinates(
+                boxes.astype(np.float64), 1 / ratio, 1 / ratio, ratio_net=1
+            ).astype(np.int64)
+        textlines = [
+            Quadrilateral(points.astype(int), "", score)
+            for points, score in zip(boxes, scores)
+        ]
+        mask_height = round(height * masks.shape[-2] / max_height)
+        mask_width = round(width * masks.shape[-1] / max_width)
+        mask = masks[index, 0, :mask_height, :mask_width]
+        raw_mask = cv2.resize(
+            mask, (mask_width * 2, mask_height * 2), interpolation=cv2.INTER_LINEAR
+        )
+        if pad_h:
+            raw_mask = raw_mask[:-pad_h, :]
+        elif pad_w:
+            raw_mask = raw_mask[:, :-pad_w]
+        raw_mask = np.clip(raw_mask * 255, 0, 255).astype(np.uint8)
+        output.append((textlines, raw_mask, None))
+    return output

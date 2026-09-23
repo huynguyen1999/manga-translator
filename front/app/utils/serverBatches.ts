@@ -18,6 +18,7 @@ export interface ServerBatchItem {
   mangaTitle?: string;
   status: "queued" | "processing" | "completed" | "error";
   stage?: string | null;
+  stageStartedAt?: number | string | null;
   error?: string | null;
   addedAt?: number | string;
   inputUrl?: string | null;
@@ -32,6 +33,7 @@ export interface ServerBatchItem {
   model?: { offline_model?: string; gemini_model?: string };
   excludeColor?: boolean;
   needsReview?: boolean;
+  retryFromStage?: string | null;
 }
 
 export interface ServerBatchSummary {
@@ -117,6 +119,11 @@ export const formatStage = (step?: string): string => {
   }
 };
 
+export const formatStageElapsed = (startedAt: Date, now = Date.now()): string => {
+  const seconds = Math.max(0, Math.floor((now - startedAt.getTime()) / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+};
+
 const asDate = (value: number | string | undefined) =>
   new Date(value === undefined ? Date.now() : typeof value === "number" ? value : value);
 
@@ -150,6 +157,7 @@ export const toTranslationBatch = (batch: ServerBatch | ServerBatchSummary): Tra
     status: item.status === "completed" ? "finished" : item.status,
     mangaTitle: item.mangaTitle || batch.mangaTitle || batch.title,
     step: item.stage || undefined,
+    stepStartedAt: item.stageStartedAt == null ? undefined : asDate(item.stageStartedAt),
     error: item.error || undefined,
     folder: item.resultFolder || undefined,
     inputUrl: item.inputUrl,
@@ -234,9 +242,13 @@ export const rerenderPages = async (pageIds: string[]): Promise<ServerBatch> => 
 export const subscribeServerBatches = (
   onBatches: (batches: ServerBatchSummary[]) => void,
   onError?: () => void,
+  onBatchDetails?: (batch: ServerBatch) => void,
 ): EventSource => {
   const source = new EventSource(apiUrl("/api/batches/events"));
   source.onmessage = (event) => onBatches(JSON.parse(event.data) as ServerBatchSummary[]);
+  source.addEventListener("batch_details", (event) => {
+    onBatchDetails?.(JSON.parse((event as MessageEvent<string>).data) as ServerBatch);
+  });
   source.onerror = () => onError?.();
   return source;
 };
@@ -378,13 +390,17 @@ export const retryBatchItem = async (
   batchId: string,
   itemId: string,
   keepFailedPagesForEditing = false,
+  fromStage?: string,
 ) => {
   const response = await fetch(apiUrl(`/api/batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemId)}/retry`), {
     method: "POST",
-    ...(keepFailedPagesForEditing
+    ...(keepFailedPagesForEditing || fromStage
       ? {
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keep_failed_pages_for_editing: true }),
+          body: JSON.stringify({
+            ...(keepFailedPagesForEditing ? { keep_failed_pages_for_editing: true } : {}),
+            ...(fromStage ? { fromStage } : {}),
+          }),
         }
       : {}),
   });

@@ -12,6 +12,8 @@ from server.postgres_store import (
     _manga_id,
     _natural_sort_key,
     _parse_finished_at,
+    _pipeline_manifest_artifact_rows,
+    _pipeline_manifest_stage_rows,
     _safe_folder,
 )
 
@@ -83,7 +85,7 @@ class _ManifestConnection:
         self.executed.append((query, args))
         if "INSERT INTO batch_items" in query:
             self.items = [
-                {"id": row[1], "manga_group_id": row[3], "page_order": row[9]}
+                {"id": row[1], "manga_group_id": row[3], "page_order": row[10]}
                 for row in args
             ]
 
@@ -94,6 +96,22 @@ class _ManifestPool:
 
     def acquire(self):
         return _AsyncContext(self.connection)
+
+
+class _LockingBatchConnection:
+    def __init__(self, manifest):
+        self.manifest = manifest
+        self.queries = []
+
+    def transaction(self):
+        return _AsyncContext(self)
+
+    async def fetchrow(self, query, *_args):
+        self.queries.append(query)
+        return {"manifest": self.manifest}
+
+    async def fetch(self, *_args):
+        return []
 
 
 class _ReconcilePool(_ManifestPool):
@@ -108,6 +126,168 @@ class _ReconcilePool(_ManifestPool):
 
 
 class PostgresStoreGroupsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_group_pages_exposes_relational_group_over_stale_metadata(self):
+        database = PostgresStore("unused", "/tmp/results")
+        database.pool = SimpleNamespace(fetch=AsyncMock(return_value=[{
+            "id": "page-a",
+            "folder": "page-folder",
+            "original_name": "page.png",
+            "metadata": json.dumps({"mangaTitle": "Old title", "mangaGroupId": "old-group"}),
+            "page_order": 1,
+            "source_type": "translated",
+            "has_regions": True,
+            "text_regions": "[]",
+            "group_id": "current-group",
+            "group_title": "Current title",
+        }]))
+        with patch.object(database, "resolve_group_id", new_callable=AsyncMock, return_value="current-group"):
+            page = (await database.group_pages("current-group"))[0]
+
+        self.assertEqual(page["groupId"], "current-group")
+        self.assertEqual(page["mangaTitle"], "Current title")
+        self.assertEqual(page["meta"]["mangaGroupId"], "current-group")
+        self.assertEqual(page["meta"]["mangaTitle"], "Current title")
+
+    async def test_hydrate_batch_reads_item_progress_from_relational_rows(self):
+        database = PostgresStore("unused", "/tmp/results")
+        store = PostgresBatchStore(database, "/tmp/batches", "/tmp/results")
+        manifest = {
+            "id": "batch-a",
+            "status": "waiting",
+            "title": "Stale title",
+            "items": [{"id": "page-a", "name": "stale.webp", "status": "queued", "stage": "ocr"}],
+        }
+        connection = SimpleNamespace(
+            fetchrow=AsyncMock(return_value={
+                "manifest": json.dumps(manifest),
+                "status": "processing",
+                "title": "Series",
+                "dismissed": False,
+                "added_at": 10,
+                "updated_at": 20,
+                "total_items": 1,
+                "completed_count": 0,
+            }),
+            fetch=AsyncMock(return_value=[{
+            "id": "page-a",
+            "manga_group_id": "group-a",
+            "manga_title": "Series",
+            "page_id": None,
+            "page_order": 1,
+            "result_folder": None,
+            "status": "processing",
+            "stage": "detection",
+            "stage_started_at": 123456,
+            "error": None,
+            "request_id": "request-a",
+            "payload": json.dumps({"id": "page-a", "name": "1.webp", "custom": "db"}),
+        }]),
+        )
+
+        result = await store._db_manifest("batch-a", connection)
+
+        self.assertEqual(result["status"], "processing")
+        self.assertEqual(result["title"], "Series")
+        self.assertEqual(result["items"][0]["name"], "1.webp")
+        self.assertEqual(result["items"][0]["status"], "processing")
+        self.assertEqual(result["items"][0]["stage"], "detection")
+        self.assertEqual(result["items"][0]["stageStartedAt"], 123456)
+        self.assertEqual(result["items"][0]["requestId"], "request-a")
+        self.assertEqual(result["items"][0]["custom"], "db")
+
+    async def test_batch_mutation_locks_manifest_row_and_saves_on_same_connection(self):
+        connection = _LockingBatchConnection({
+            "id": "batch-a",
+            "title": "Series",
+            "mangaTitle": "Series",
+            "status": "waiting",
+            "items": [{"id": "item-a", "name": "page.png", "status": "queued"}],
+        })
+        database = PostgresStore("unused", "/tmp/results")
+        database.pool = SimpleNamespace(acquire=lambda: _AsyncContext(connection))
+        store = PostgresBatchStore(database, "/tmp/batches", "/tmp/results")
+
+        def claim(manifest):
+            manifest["items"][0]["status"] = "processing"
+            return True
+
+        with patch.object(store, "_save_db_manifest", new_callable=AsyncMock) as save, \
+             patch.object(store, "_write_snapshot"):
+            await store.mutate("batch-a", claim)
+
+        self.assertIn("FOR UPDATE", connection.queries[0])
+        self.assertIs(save.await_args.args[1], connection)
+        self.assertEqual(save.await_args.args[0]["items"][0]["status"], "processing")
+
+    async def test_save_documents_revisions_structured_page_documents(self):
+        connection = SimpleNamespace(
+            transaction=lambda: _AsyncContext(None),
+            fetchrow=AsyncMock(return_value=None),
+            fetchval=AsyncMock(return_value=4),
+            execute=AsyncMock(),
+            executemany=AsyncMock(),
+        )
+        store = PostgresStore("unused", "/tmp/results")
+        store.pool = SimpleNamespace(acquire=lambda: _AsyncContext(connection))
+        with patch.object(store, "_document_owner", AsyncMock(return_value=("page", "page-id"))):
+            await store.save_documents("page", {
+                "ocr.json": [{"text": "new"}],
+                "translation_detail.json": {"durationMs": 10},
+            })
+
+        inserts = [call.args for call in connection.execute.await_args_list if "INSERT INTO pipeline_documents" in call.args[0]]
+        self.assertEqual(len(inserts), 1)
+        self.assertEqual(inserts[0][2:5], ("ocr", "regions", 4))
+        self.assertEqual(inserts[0][5], '[{"text":"new"}]')
+        saved_legacy = connection.executemany.await_args.args[1]
+        self.assertEqual(saved_legacy[0][1], "translation_detail.json")
+
+    def test_manifest_stage_rows_normalize_and_filter_checkpoints(self):
+        rows = _pipeline_manifest_stage_rows({
+            "createdAt": "2026-09-22T10:00:00Z",
+            "config": {"font_size": 32, "ocr_min_confidence": 0.4},
+            "stages": [
+                {"id": "input", "status": "completed"},
+                {
+                    "id": "upscaling", "status": "completed",
+                    "startedAt": "2026-09-22T10:00:01Z",
+                    "finishedAt": "2026-09-22T10:00:02Z", "durationMs": 1000,
+                },
+                {
+                    "id": "textline_merge", "status": "completed",
+                    "startedAt": "2026-09-22T10:00:03Z",
+                },
+                {"id": "translation", "status": "pending"},
+                {"id": "unknown", "status": "completed", "startedAt": "2026-09-22T10:00:04Z"},
+            ],
+        })
+
+        self.assertEqual([row["stage"] for row in rows], ["input", "upscale", "text_grouping"])
+        self.assertEqual(rows[0]["started_at"].isoformat(), "2026-09-22T10:00:00+00:00")
+        self.assertEqual(rows[1]["duration_ms"], 1000)
+        self.assertEqual(rows[1]["settings"], {})
+        self.assertEqual(rows[1]["status"], "completed")
+
+    def test_manifest_artifact_rows_include_only_completed_disk_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root) / "page"
+            folder.mkdir()
+            (folder / "upscaled.png").write_bytes(b"image")
+            (folder / "detection.json").write_text("[]", encoding="utf-8")
+            rows = _pipeline_manifest_artifact_rows({
+                "stages": [
+                    {"id": "upscaling", "status": "completed", "artifacts": ["upscaled.png"]},
+                    {"id": "detection", "status": "failed", "artifacts": ["detection.json"]},
+                    {"id": "ocr", "status": "completed", "artifacts": ["missing.png", "../outside.png"]},
+                ],
+            }, folder, "page")
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["stage"], "upscale")
+            self.assertEqual(rows[0]["artifact_type"], "upscaled_png")
+            self.assertEqual(rows[0]["relative_path"], "page/upscaled.png")
+            self.assertEqual(rows[0]["size_bytes"], 5)
+
     async def test_list_groups_does_not_generate_images(self):
         with tempfile.TemporaryDirectory() as root:
             store = PostgresStore("unused", Path(root))

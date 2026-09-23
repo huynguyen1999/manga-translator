@@ -134,6 +134,7 @@ export interface QueuedImage {
   status: 'queued' | 'processing' | 'finished' | 'error';
   mangaTitle?: string;
   step?: string;
+  stepStartedAt?: Date;
   offlineModel?: string;
   geminiModel?: string;
   result?: Blob | string;
@@ -167,6 +168,32 @@ export type PipelineRerunMode =
   | "typesetting"
   | "translation_typesetting"
   | "reprocess_text";
+
+export interface PipelineRunStage {
+  id: string;
+  label: string;
+  status: string;
+  dependsOn?: string[];
+  reason?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  durationMs?: number;
+  artifacts?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface PipelineRunManifest {
+  version?: number;
+  kind?: string;
+  folder?: string;
+  status: "running" | "paused" | "completed" | "failed" | "cancelled" | "partial";
+  createdAt?: string;
+  updatedAt?: string;
+  source?: { filename: string; width?: number; height?: number; mode?: string };
+  config?: Record<string, unknown>;
+  stages: PipelineRunStage[];
+  error?: string;
+}
 
 export interface MangaGroupSelection {
   title: string;

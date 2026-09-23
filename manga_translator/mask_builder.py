@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
 
 from .config import Config
-from .rendering.bubble_layout import prepare_bubble_masks
+from .geometry.bubbles import PageGeometry, compose_bubble_cleanup, prepare_page_geometry
 
 
 @dataclass
@@ -45,6 +46,8 @@ class MaskBundle:
     final_inpaint_mask: np.ndarray
     bubble_residual_mask: np.ndarray = field(default=None)
     metrics: Optional[MaskMetrics] = None
+    profile: Dict[str, Any] = field(default_factory=dict)
+    page_geometry: Optional[PageGeometry] = None
 
     def __post_init__(self):
         if self.bubble_residual_mask is None:
@@ -95,24 +98,36 @@ def _constrained_text_growth(
     result = np.zeros_like(seed, dtype=np.uint8)
     binary = np.where(seed > 0, 1, 0).astype(np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    protected = protected_edges > 0
-    interiors = [
-        np.asarray(getattr(region, "_bubble_interior"), dtype=np.uint8) > 0
+    interiors = list({
+        id(interior): np.asarray(interior, dtype=np.uint8)
         for region in (text_regions or [])
-        if getattr(region, "_bubble_interior", None) is not None
-    ]
+        if (interior := getattr(region, "_bubble_interior", None)) is not None
+    }.values())
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1)
     )
+    height, width = seed.shape[:2]
     for label in range(1, count):
-        component = labels == label
-        grown = cv2.dilate(component.astype(np.uint8), kernel) > 0
-        owning_interiors = [interior for interior in interiors if np.any(component & interior)]
-        if owning_interiors:
-            allowed = np.logical_or.reduce(owning_interiors)
+        x, y, w, h = [int(value) for value in stats[label, :4]]
+        x0, y0 = max(0, x - radius), max(0, y - radius)
+        x1, y1 = min(width, x + w + radius), min(height, y + h + radius)
+        source = labels[y:y + h, x:x + w] == label
+        component = (labels[y0:y1, x0:x1] == label).astype(np.uint8)
+        grown = cv2.dilate(component, kernel) > 0
+        owners = [
+            interior
+            for interior in interiors
+            if np.any(source & (interior[y:y + h, x:x + w] > 0))
+        ]
+        if owners:
+            allowed = np.zeros(grown.shape, dtype=bool)
+            for interior in owners:
+                local = interior[y0:y1, x0:x1] > 0
+                np.logical_or(allowed, local, out=allowed)
         else:
-            allowed = np.ones_like(component, dtype=bool)
-        result[grown & allowed & ~protected] = 255
+            allowed = np.ones(grown.shape, dtype=bool)
+        result_crop = result[y0:y1, x0:x1]
+        result_crop[grown & allowed & (protected_edges[y0:y1, x0:x1] == 0)] = 255
     return result
 
 
@@ -170,10 +185,10 @@ def recover_bubble_residual_text(
         if interior is None or not np.any(interior):
             continue
 
-        interior_bytes = interior.tobytes()
-        if interior_bytes in processed_interiors:
+        interior_key = id(interior)
+        if interior_key in processed_interiors:
             continue
-        processed_interiors.add(interior_bytes)
+        processed_interiors.add(interior_key)
 
         safe_interior = (interior > 0).astype(np.uint8)
         # Exclude protected bubble edges from safe search area
@@ -406,8 +421,11 @@ async def build_inpaint_masks(
     bubble_detections: Optional[List[Any]],
     config: Config,
     text_mask: Optional[np.ndarray] = None,
+    page_geometry: Optional[PageGeometry] = None,
 ) -> MaskBundle:
     """Build canonical inpainting masks shared identically between Studio and dev runner."""
+    total_start = perf_counter()
+    profile: Dict[str, Any] = {"timings_ms": {}, "workload": {}}
     image_shape = image.shape[:2] if image is not None else (100, 100)
     if image is None:
         empty = np.zeros(image_shape, dtype=np.uint8)
@@ -419,6 +437,7 @@ async def build_inpaint_masks(
             final_inpaint_mask=empty,
             bubble_residual_mask=empty,
             metrics=MaskMetrics(),
+            profile=profile,
         )
 
     # 1. Text mask from refinement
@@ -428,6 +447,7 @@ async def build_inpaint_masks(
             dilation = getattr(config, "mask_dilation_offset", 20)
             kernel_size = getattr(config, "kernel_size", 3)
             ignore_bubble = getattr(getattr(config, "ocr", None), "ignore_bubble", 0)
+            stage_start = perf_counter()
             text_mask = await dispatch_mask_refinement(
                 text_regions,
                 image,
@@ -435,29 +455,59 @@ async def build_inpaint_masks(
                 dilation_offset=dilation,
                 kernel_size=kernel_size,
                 ignore_bubble=ignore_bubble,
+                profile=profile,
             )
+            profile["timings_ms"]["text_mask_ms"] = (perf_counter() - stage_start) * 1000.0
         else:
             text_mask = np.zeros(image_shape, dtype=np.uint8)
 
     # 2. Bubble cleanup mask and safe interior / protected edge attachment
     pad = int(getattr(getattr(config, "bubble_detection", None), "padding", 9))
-    bubble_cleanup = prepare_bubble_masks(image, text_regions, padding=pad)
+    stage_start = perf_counter()
+    if page_geometry is None or not page_geometry.matches(image, text_regions, pad):
+        page_geometry, bubble_cleanup = prepare_page_geometry(
+            image, text_regions, padding=pad, profile=profile,
+        )
+    else:
+        bubble_cleanup = compose_bubble_cleanup(page_geometry, image_shape)
+        profile["workload"]["unique_bubble_count"] = len(page_geometry.bubbles)
+        profile["workload"]["unique_bubble_contours"] = 0
+        profile["workload"]["distance_transform_calls"] = 0
+    profile["timings_ms"]["bubble_geometry_ms"] = (perf_counter() - stage_start) * 1000.0
+    profile["workload"].update({
+        "image_pixels": int(image_shape[0] * image_shape[1]),
+        "detector_textline_count": len(detector_textlines or []),
+        "ocr_region_count": len(text_regions or []),
+        "ocr_textline_count": sum(
+            len(lines) for r in (text_regions or [])
+            if (lines := getattr(r, "lines", None)) is not None
+        ),
+        "bubble_region_count": sum(1 for r in (text_regions or []) if getattr(r, "_bubble_mask", None) is not None),
+        "unique_bubble_count": len({id(getattr(r, "_bubble_mask", None)) for r in (text_regions or []) if getattr(r, "_bubble_mask", None) is not None}),
+    })
 
     # 3. Protected edge mask
-    protected_edges = np.zeros(image_shape, dtype=np.uint8)
+    protected_edges = (
+        page_geometry.protected_edge_mask.copy()
+        if page_geometry is not None
+        else np.zeros(image_shape, dtype=np.uint8)
+    )
     for r in (text_regions or []):
         edge = getattr(r, "_bubble_protected_edge", None)
         if edge is not None and np.any(edge):
             protected_edges = cv2.bitwise_or(protected_edges, np.asarray(edge, dtype=np.uint8))
 
     # 4. Detector rescue mask (erases detector boxes missed by OCR)
+    stage_start = perf_counter()
     detector_rescue = build_detector_cleanup_mask(
         detector_textlines,
         detector_mask,
         image.shape,
     )
+    profile["timings_ms"]["detector_cleanup_ms"] = (perf_counter() - stage_start) * 1000.0
 
     # 5. Speech bubble residual text recovery (recovers missed punctuation !?, kana, antialiased strokes)
+    stage_start = perf_counter()
     bubble_residual, rejected_candidate_pixels = recover_bubble_residual_text(
         image=image,
         text_regions=text_regions,
@@ -467,9 +517,11 @@ async def build_inpaint_masks(
         protected_edges=protected_edges,
         config=config,
     )
+    profile["timings_ms"]["bubble_residual_ms"] = (perf_counter() - stage_start) * 1000.0
 
     # 6. Text evidence is authoritative for erasure. Bubble geometry is only
     # an allowed area/protection constraint, never a blanket cleanup mask.
+    stage_start = perf_counter()
     erase_candidates = cv2.bitwise_or(text_mask, detector_rescue)
     erase_candidates = cv2.bitwise_or(erase_candidates, bubble_residual)
 
@@ -498,6 +550,7 @@ async def build_inpaint_masks(
     # Hard invariant: protected bubble edge is never erased
     if np.any(protected_edges):
         final_inpaint[protected_edges > 0] = 0
+    profile["timings_ms"]["compose_ms"] = (perf_counter() - stage_start) * 1000.0
 
     # Strict invariant validation assertion
     assert not np.any(np.logical_and(final_inpaint > 0, protected_edges > 0)), (
@@ -532,6 +585,8 @@ async def build_inpaint_masks(
         protected_edge_retention=1.0,
     )
 
+    profile["timings_ms"]["total_ms"] = (perf_counter() - total_start) * 1000.0
+
     return MaskBundle(
         text_mask=text_mask,
         detector_cleanup_mask=detector_rescue,
@@ -540,4 +595,6 @@ async def build_inpaint_masks(
         final_inpaint_mask=final_inpaint,
         bubble_residual_mask=bubble_residual,
         metrics=metrics,
+        profile=profile,
+        page_geometry=page_geometry,
     )

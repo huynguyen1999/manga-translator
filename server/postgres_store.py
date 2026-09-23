@@ -4,25 +4,45 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from contextlib import asynccontextmanager
 import datetime as dt
 import json
 import logging
+import mimetypes
 import os
 import re
 import shutil
 import tempfile
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from server.batch_store import BatchConflict, BatchNotFound, BatchStore, InvalidBatch
 from server.image_variants import asset_version, final_file, generate_image_variants
 from server.manga_summary import synopsis_status
+from manga_translator.pipeline.stages import (
+    PipelineStage,
+    StageStatus,
+    fingerprint,
+    settings_for_stage,
+)
 from manga_translator.utils.image_storage import find_asset
 
 logger = logging.getLogger("manga-translator.postgres")
 _MIGRATIONS_DIR = Path(__file__).with_name("migrations")
 _SAFE_FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
+_PIPELINE_DOCUMENT_TYPES = {
+    "detection.json": ("detection", "regions"),
+    "ocr.json": ("ocr", "regions"),
+    "bubble_detections.json": ("bubble_detection", "detections"),
+    "text_regions_merged.json": ("text_grouping", "regions"),
+    "translations.json": ("translation", "translations"),
+    "professional_translation.json": ("translation", "professional_result"),
+    "translation_remap.json": ("translation", "remap"),
+    "layout.json": ("layout", "layout"),
+    "text_regions.json": ("rendering", "text_regions"),
+    "profiling.json": ("mask_generation", "metrics"),
+}
 
 
 class SeriesStoreError(Exception):
@@ -82,6 +102,102 @@ def _parse_finished_at(value: Any, fallback: dt.datetime) -> dt.datetime:
         except ValueError:
             pass
     return fallback
+
+
+def _pipeline_manifest_stage_rows(manifest: Any) -> list[dict[str, Any]]:
+    """Convert finished legacy checkpoints into canonical durable stage records."""
+    if not isinstance(manifest, dict):
+        return []
+    config = manifest.get("config")
+    config = config if isinstance(config, dict) else {}
+    status_map = {
+        "completed": StageStatus.COMPLETED.value,
+        "failed": StageStatus.FAILED.value,
+        "cancelled": StageStatus.INTERRUPTED.value,
+        "interrupted": StageStatus.INTERRUPTED.value,
+    }
+    rows = []
+    for item in manifest.get("stages", []):
+        if not isinstance(item, dict):
+            continue
+        status = status_map.get(str(item.get("status", "")).lower())
+        if status is None:
+            continue
+        stage = _canonical_pipeline_stage(item.get("id"))
+        if stage is None:
+            continue
+        started_at = _manifest_datetime(item.get("startedAt"))
+        if stage is PipelineStage.INPUT and started_at is None:
+            started_at = _manifest_datetime(manifest.get("createdAt"))
+        if started_at is None:
+            continue
+        settings = settings_for_stage(config, stage)
+        duration = item.get("durationMs")
+        rows.append({
+            "stage": stage.value,
+            "status": status,
+            "started_at": started_at,
+            "completed_at": _manifest_datetime(item.get("finishedAt")) or started_at,
+            "duration_ms": max(0, int(duration)) if isinstance(duration, (int, float)) else None,
+            "settings": settings,
+            "settings_fingerprint": fingerprint(settings),
+            "error_code": "stage_failed" if status == StageStatus.FAILED.value else None,
+            "error_message": item.get("reason") if status != StageStatus.COMPLETED.value else None,
+            "metrics": item.get("metrics") if isinstance(item.get("metrics"), dict) else {},
+        })
+    return rows
+
+
+def _canonical_pipeline_stage(value: Any) -> PipelineStage | None:
+    aliases = {"upscaling": "upscale", "textline_merge": "text_grouping"}
+    try:
+        return PipelineStage(aliases.get(str(value), str(value)))
+    except ValueError:
+        return None
+
+
+def _pipeline_manifest_artifact_rows(
+    manifest: Any, folder_path: Path, folder_name: str
+) -> list[dict[str, Any]]:
+    if not isinstance(manifest, dict):
+        return []
+    rows = []
+    for item in manifest.get("stages", []):
+        if not isinstance(item, dict) or item.get("status") != "completed":
+            continue
+        stage = _canonical_pipeline_stage(item.get("id"))
+        if stage is None:
+            continue
+        for name in item.get("artifacts", []):
+            if not isinstance(name, str) or Path(name).name != name or Path(name).suffix.lower() == ".json":
+                continue
+            path = folder_path / name
+            if not path.is_file():
+                continue
+            suffix = path.suffix.lower().lstrip(".")
+            artifact_type = re.sub(r"[^a-z0-9]+", "_", f"{path.stem}_{suffix}".lower()).strip("_")
+            if not artifact_type or len(artifact_type) > 64:
+                continue
+            rows.append({
+                "stage": stage.value,
+                "artifact_type": artifact_type,
+                "relative_path": f"{folder_name}/{name}",
+                "mime_type": mimetypes.guess_type(name)[0],
+                "size_bytes": path.stat().st_size,
+            })
+    return rows
+
+
+def _manifest_datetime(value: Any) -> dt.datetime | None:
+    if isinstance(value, dt.datetime):
+        return value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
 
 
 def _manga_id(title: str) -> str:
@@ -153,6 +269,14 @@ class PostgresStore:
         if self.pool is not None:
             await self.pool.close()
             self.pool = None
+
+    async def get_page_id(self, page_ref: str) -> str | None:
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL store is not started")
+        return await self.pool.fetchval(
+            "SELECT id FROM pages WHERE active AND (id=$1 OR folder=$1) LIMIT 1",
+            page_ref,
+        )
 
     async def check_schema(self) -> None:
         if self.pool is None:
@@ -399,9 +523,10 @@ class PostgresStore:
             LEFT JOIN pages p ON p.id = rd.page_id
             LEFT JOIN pipeline_runs pr ON pr.id = rd.pipeline_run_id
             WHERE (p.folder=$1 OR pr.folder=$1) AND rd.name=ANY($2::text[])
+            ORDER BY rd.page_id IS NOT NULL DESC
             """,
             folder_name,
-            ["meta.json", "text_regions.json"],
+            ["meta.json", "text_regions.json", "pipeline_manifest.json"],
         )
         stored_documents = {
             row["name"]: _json_load(row["payload"], {} if row["name"] == "meta.json" else [])
@@ -541,7 +666,20 @@ class PostgresStore:
                 pipeline_run_id = await connection.fetchval(
                     "SELECT id FROM pipeline_runs WHERE folder=$1", folder_name
                 )
+                indexed_documents = {
+                    **({"pipeline_manifest.json": stored_documents["pipeline_manifest.json"]}
+                       if "pipeline_manifest.json" in stored_documents else {}),
+                    **snapshot["documents"],
+                }
                 if pipeline_run_id:
+                    run_documents = await connection.fetch(
+                        "SELECT name,payload FROM result_documents WHERE pipeline_run_id=$1",
+                        pipeline_run_id,
+                    )
+                    indexed_documents = {
+                        **{row["name"]: _json_load(row["payload"], None) for row in run_documents},
+                        **indexed_documents,
+                    }
                     await connection.execute(
                         """
                         DELETE FROM result_documents old
@@ -564,12 +702,135 @@ class PostgresStore:
                         page_id,
                     )
                     await connection.execute("DELETE FROM pipeline_runs WHERE id=$1", pipeline_run_id)
-                document_names = list(snapshot["documents"])
-                if document_names:
+                document_names = list(indexed_documents)
+                structured_names = [
+                    name for name in document_names if name in _PIPELINE_DOCUMENT_TYPES
+                ]
+                for name in structured_names:
+                    stage, document_type = _PIPELINE_DOCUMENT_TYPES[name]
+                    payload = _json_dump(indexed_documents[name])
+                    revision = int(await connection.fetchval(
+                        """SELECT COALESCE(MAX(revision),0)+1 FROM pipeline_documents
+                           WHERE page_id=$1 AND stage=$2 AND document_type=$3""",
+                        page_id,
+                        stage,
+                        document_type,
+                    ))
+                    await connection.execute(
+                        """UPDATE pipeline_documents SET active=FALSE
+                           WHERE page_id=$1 AND stage=$2 AND document_type=$3 AND active""",
+                        page_id,
+                        stage,
+                        document_type,
+                    )
+                    await connection.execute(
+                        """INSERT INTO pipeline_documents(
+                               page_id,stage,document_type,revision,schema_version,payload,active
+                           ) VALUES($1,$2,$3,$4,1,$5::jsonb,TRUE)""",
+                        page_id,
+                        stage,
+                        document_type,
+                        revision,
+                        payload,
+                    )
+                if structured_names:
                     await connection.execute(
                         "DELETE FROM result_documents WHERE page_id=$1 AND name=ANY($2::text[])",
                         page_id,
-                        document_names,
+                        structured_names,
+                    )
+                for stage_record in _pipeline_manifest_stage_rows(
+                    indexed_documents.get("pipeline_manifest.json")
+                ):
+                    state = await connection.fetchrow(
+                        """INSERT INTO page_stage_state(
+                               page_id,stage,status,attempt,input_fingerprint,
+                               settings_fingerprint,started_at,completed_at,duration_ms,
+                               error_code,error_message,updated_at
+                           ) VALUES($1,$2,$3,1,NULL,$4,$5,$6,$7,$8,$9,now())
+                           ON CONFLICT(page_id,stage) DO UPDATE SET
+                               status=EXCLUDED.status,
+                               attempt=page_stage_state.attempt+1,
+                               input_fingerprint=NULL,
+                               settings_fingerprint=EXCLUDED.settings_fingerprint,
+                               started_at=EXCLUDED.started_at,
+                               completed_at=EXCLUDED.completed_at,
+                               duration_ms=EXCLUDED.duration_ms,
+                               error_code=EXCLUDED.error_code,
+                               error_message=EXCLUDED.error_message,
+                               updated_at=now()
+                           WHERE page_stage_state.status <> 'running'
+                             AND (page_stage_state.started_at IS NULL
+                                  OR page_stage_state.started_at < EXCLUDED.started_at)
+                           RETURNING attempt""",
+                        page_id,
+                        stage_record["stage"],
+                        stage_record["status"],
+                        stage_record["settings_fingerprint"],
+                        stage_record["started_at"],
+                        stage_record["completed_at"],
+                        stage_record["duration_ms"],
+                        stage_record["error_code"],
+                        stage_record["error_message"],
+                    )
+                    if state is not None:
+                        await connection.execute(
+                            """INSERT INTO page_stage_attempts(
+                                   page_id,stage,attempt,status,started_at,finished_at,
+                                   duration_ms,settings,metrics,error_code,error_message
+                               ) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11)""",
+                            page_id,
+                            stage_record["stage"],
+                            state["attempt"],
+                            stage_record["status"],
+                            stage_record["started_at"],
+                            stage_record["completed_at"],
+                            stage_record["duration_ms"],
+                            _json_dump(stage_record["settings"]),
+                            _json_dump(stage_record["metrics"]),
+                            stage_record["error_code"],
+                            stage_record["error_message"],
+                        )
+                for artifact in _pipeline_manifest_artifact_rows(
+                    indexed_documents.get("pipeline_manifest.json"),
+                    folder_path,
+                    folder_name,
+                ):
+                    revision = int(await connection.fetchval(
+                        """SELECT COALESCE(MAX(revision),0)+1 FROM pipeline_artifacts
+                           WHERE page_id=$1 AND stage=$2 AND artifact_type=$3""",
+                        page_id,
+                        artifact["stage"],
+                        artifact["artifact_type"],
+                    ))
+                    await connection.execute(
+                        """UPDATE pipeline_artifacts SET active=FALSE
+                           WHERE page_id=$1 AND stage=$2 AND artifact_type=$3 AND active""",
+                        page_id,
+                        artifact["stage"],
+                        artifact["artifact_type"],
+                    )
+                    await connection.execute(
+                        """INSERT INTO pipeline_artifacts(
+                               page_id,stage,artifact_type,relative_path,revision,active,
+                               mime_type,width,height,size_bytes,checksum
+                           ) VALUES($1,$2,$3,$4,$5,TRUE,$6,NULL,NULL,$7,NULL)""",
+                        page_id,
+                        artifact["stage"],
+                        artifact["artifact_type"],
+                        artifact["relative_path"],
+                        revision,
+                        artifact["mime_type"],
+                        artifact["size_bytes"],
+                    )
+                legacy_document_names = [
+                    name for name in document_names if name not in _PIPELINE_DOCUMENT_TYPES
+                ]
+                if legacy_document_names:
+                    await connection.execute(
+                        "DELETE FROM result_documents WHERE page_id=$1 AND name=ANY($2::text[])",
+                        page_id,
+                        legacy_document_names,
                     )
                     await connection.executemany(
                         """
@@ -578,7 +839,8 @@ class PostgresStore:
                         """,
                         [
                             (page_id, name, _json_dump(payload))
-                            for name, payload in snapshot["documents"].items()
+                            for name, payload in indexed_documents.items()
+                            if name in legacy_document_names
                         ],
                     )
                 await connection.execute(
@@ -713,15 +975,47 @@ class PostgresStore:
                     owner = ("pipeline", owner_id)
                 kind, owner_id = owner
                 if kind == "page":
+                    await connection.fetchrow(
+                        "SELECT id FROM pages WHERE id=$1 FOR UPDATE", owner_id
+                    )
+                    structured_rows = [row for row in rows if row[0] in _PIPELINE_DOCUMENT_TYPES]
+                    legacy_rows = [row for row in rows if row[0] not in _PIPELINE_DOCUMENT_TYPES]
                     await connection.execute(
                         "DELETE FROM result_documents WHERE page_id=$1 AND name=ANY($2::text[])",
                         owner_id,
                         [row[0] for row in rows],
                     )
-                    await connection.executemany(
-                        "INSERT INTO result_documents(page_id,name,payload,updated_at) VALUES($1,$2,$3::jsonb,now())",
-                        [(owner_id, name, payload) for name, payload in rows],
-                    )
+                    for name, payload in structured_rows:
+                        stage, document_type = _PIPELINE_DOCUMENT_TYPES[name]
+                        revision = int(await connection.fetchval(
+                            """SELECT COALESCE(MAX(revision),0)+1 FROM pipeline_documents
+                               WHERE page_id=$1 AND stage=$2 AND document_type=$3""",
+                            owner_id,
+                            stage,
+                            document_type,
+                        ))
+                        await connection.execute(
+                            """UPDATE pipeline_documents SET active=FALSE
+                               WHERE page_id=$1 AND stage=$2 AND document_type=$3 AND active""",
+                            owner_id,
+                            stage,
+                            document_type,
+                        )
+                        await connection.execute(
+                            """INSERT INTO pipeline_documents(
+                                   page_id,stage,document_type,revision,schema_version,payload,active
+                               ) VALUES($1,$2,$3,$4,1,$5::jsonb,TRUE)""",
+                            owner_id,
+                            stage,
+                            document_type,
+                            revision,
+                            payload,
+                        )
+                    if legacy_rows:
+                        await connection.executemany(
+                            "INSERT INTO result_documents(page_id,name,payload,updated_at) VALUES($1,$2,$3::jsonb,now())",
+                            [(owner_id, name, payload) for name, payload in legacy_rows],
+                        )
                 else:
                     await connection.execute(
                         "DELETE FROM result_documents WHERE pipeline_run_id=$1 AND name=ANY($2::text[])",
@@ -733,6 +1027,481 @@ class PostgresStore:
                         [(owner_id, name, payload) for name, payload in rows],
                     )
 
+    async def start_pipeline_stage(
+        self,
+        page_ref: str,
+        stage: str | PipelineStage,
+        *,
+        input_fingerprint: str | None = None,
+        settings_fingerprint: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> int | None:
+        """Start a durable attempt; return None when the result is not an indexed page."""
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL store is not started")
+        stage_id = PipelineStage(stage).value
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO page_stage_state(
+                        page_id,stage,status,attempt,input_fingerprint,
+                        settings_fingerprint,started_at,completed_at,duration_ms,
+                        error_code,error_message,updated_at
+                    )
+                    SELECT id,$2,'running',1,$3,$4,now(),NULL,NULL,NULL,NULL,now()
+                    FROM pages WHERE active AND (id=$1 OR folder=$1) LIMIT 1
+                    ON CONFLICT(page_id,stage) DO UPDATE SET
+                        status='running',
+                        attempt=page_stage_state.attempt+1,
+                        input_fingerprint=COALESCE(EXCLUDED.input_fingerprint,page_stage_state.input_fingerprint),
+                        settings_fingerprint=COALESCE(EXCLUDED.settings_fingerprint,page_stage_state.settings_fingerprint),
+                        started_at=now(),completed_at=NULL,duration_ms=NULL,
+                        error_code=NULL,error_message=NULL,updated_at=now()
+                    WHERE page_stage_state.status <> 'running'
+                    RETURNING page_id,attempt
+                    """,
+                    page_ref,
+                    stage_id,
+                    input_fingerprint,
+                    settings_fingerprint,
+                )
+                if row is None:
+                    existing = await connection.fetchrow(
+                        """SELECT state.status FROM page_stage_state state
+                           JOIN pages page ON page.id=state.page_id
+                           WHERE page.active AND (page.id=$1 OR page.folder=$1)
+                             AND state.stage=$2""",
+                        page_ref,
+                        stage_id,
+                    )
+                    if existing and existing["status"] == "running":
+                        raise RuntimeError(f"Pipeline stage is already running: {stage_id}")
+                    return None
+                await connection.execute(
+                    """
+                    INSERT INTO page_stage_attempts(page_id,stage,attempt,status,settings)
+                    VALUES($1,$2,$3,'running',$4::jsonb)
+                    """,
+                    row["page_id"],
+                    stage_id,
+                    row["attempt"],
+                    _json_dump(settings or {}),
+                )
+                return int(row["attempt"])
+
+    async def finish_pipeline_stage(
+        self,
+        page_ref: str,
+        stage: str | PipelineStage,
+        status: str | StageStatus = StageStatus.COMPLETED,
+        *,
+        duration_ms: int | None = None,
+        metrics: dict[str, Any] | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> bool:
+        """Finish the current stage attempt and retain its diagnostic history."""
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL store is not started")
+        stage_id = PipelineStage(stage).value
+        status_id = StageStatus(status).value
+        if status_id not in {"completed", "failed", "interrupted"}:
+            raise ValueError(f"Invalid terminal stage status: {status_id}")
+        duration = max(0, int(duration_ms)) if duration_ms is not None else None
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    SELECT state.page_id,state.attempt
+                    FROM page_stage_state state
+                    JOIN pages page ON page.id=state.page_id
+                    WHERE page.active AND (page.id=$1 OR page.folder=$1)
+                      AND state.stage=$2 AND state.status='running'
+                    FOR UPDATE OF state
+                    """,
+                    page_ref,
+                    stage_id,
+                )
+                if row is None:
+                    return False
+                await connection.execute(
+                    """
+                    UPDATE page_stage_state
+                    SET status=$3,completed_at=now(),duration_ms=$4,
+                        error_code=$5,error_message=$6,updated_at=now()
+                    WHERE page_id=$1 AND stage=$2
+                    """,
+                    row["page_id"],
+                    stage_id,
+                    status_id,
+                    duration,
+                    error_code,
+                    error_message,
+                )
+                await connection.execute(
+                    """
+                    UPDATE page_stage_attempts
+                    SET status=$4,finished_at=now(),duration_ms=$5,
+                        metrics=$6::jsonb,error_code=$7,error_message=$8
+                    WHERE page_id=$1 AND stage=$2 AND attempt=$3
+                    """,
+                    row["page_id"],
+                    stage_id,
+                    row["attempt"],
+                    status_id,
+                    duration,
+                    _json_dump(metrics or {}),
+                    error_code,
+                    error_message,
+                )
+        return True
+
+    async def invalidate_pipeline_stages(
+        self, page_ref: str, stages: list[str | PipelineStage]
+    ) -> int:
+        """Mark existing checkpoints stale while keeping their attempt history."""
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL store is not started")
+        stage_ids = list(dict.fromkeys(PipelineStage(stage).value for stage in stages))
+        if not stage_ids:
+            return 0
+        result = await self.pool.execute(
+            """
+            UPDATE page_stage_state state
+            SET status='invalidated',started_at=NULL,completed_at=NULL,
+                duration_ms=NULL,error_code=NULL,error_message=NULL,updated_at=now()
+            FROM pages page
+            WHERE state.page_id=page.id AND page.active
+              AND (page.id=$1 OR page.folder=$1) AND state.stage=ANY($2::text[])
+              AND state.status <> 'running'
+            """,
+            page_ref,
+            stage_ids,
+        )
+        return int(result.rsplit(" ", 1)[-1])
+
+    async def get_pipeline_stage_state(self, page_ref: str) -> list[dict[str, Any]]:
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL store is not started")
+        rows = await self.pool.fetch(
+            """
+            SELECT state.stage,state.status,state.attempt,state.input_fingerprint,
+                   state.settings_fingerprint,state.started_at,state.completed_at,
+                   state.duration_ms,state.error_code,state.error_message
+            FROM page_stage_state state
+            JOIN pages page ON page.id=state.page_id
+            WHERE page.active AND (page.id=$1 OR page.folder=$1)
+            ORDER BY array_position(
+                ARRAY['input','colorization','upscale','detection','ocr','bubble_detection',
+                      'text_grouping','translation','mask_generation','layout',
+                      'inpainting','rendering','finalize'],state.stage
+            )
+            """,
+            page_ref,
+        )
+        return [dict(row) for row in rows]
+
+    async def interrupt_running_pipeline_stages(self) -> int:
+        """Close attempts left running when the server process stopped."""
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL store is not started")
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    """
+                    UPDATE page_stage_attempts attempt
+                    SET status='interrupted',finished_at=now(),
+                        error_code='process_restart',
+                        error_message='Server stopped before the stage completed'
+                    FROM page_stage_state state
+                    WHERE attempt.page_id=state.page_id
+                      AND attempt.stage=state.stage
+                      AND attempt.attempt=state.attempt
+                      AND attempt.status='running'
+                      AND state.status='running'
+                    """
+                )
+                result = await connection.execute(
+                    """
+                    UPDATE page_stage_state
+                    SET status='interrupted',completed_at=now(),
+                        error_code='process_restart',
+                        error_message='Server stopped before the stage completed',
+                        updated_at=now()
+                    WHERE status='running'
+                    """
+                )
+        return int(result.rsplit(" ", 1)[-1])
+
+    async def save_pipeline_document(
+        self,
+        page_ref: str,
+        stage: str | PipelineStage,
+        document_type: str,
+        payload: Any,
+        *,
+        schema_version: int = 1,
+    ) -> int:
+        """Save a new structured-document revision and activate it atomically."""
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL store is not started")
+        stage_id = PipelineStage(stage).value
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", document_type):
+            raise ValueError("Invalid pipeline document type")
+        if schema_version < 1:
+            raise ValueError("schema_version must be positive")
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                page_id = await connection.fetchval(
+                    "SELECT id FROM pages WHERE active AND (id=$1 OR folder=$1) LIMIT 1 FOR UPDATE",
+                    page_ref,
+                )
+                if page_id is None:
+                    raise ValueError("Pipeline documents require an indexed page")
+                revision = int(await connection.fetchval(
+                    """SELECT COALESCE(MAX(revision),0)+1 FROM pipeline_documents
+                       WHERE page_id=$1 AND stage=$2 AND document_type=$3""",
+                    page_id,
+                    stage_id,
+                    document_type,
+                ))
+                await connection.execute(
+                    """UPDATE pipeline_documents SET active=FALSE
+                       WHERE page_id=$1 AND stage=$2 AND document_type=$3 AND active""",
+                    page_id,
+                    stage_id,
+                    document_type,
+                )
+                await connection.execute(
+                    """INSERT INTO pipeline_documents(
+                           page_id,stage,document_type,revision,schema_version,payload,active
+                       ) VALUES($1,$2,$3,$4,$5,$6::jsonb,TRUE)""",
+                    page_id,
+                    stage_id,
+                    document_type,
+                    revision,
+                    schema_version,
+                    _json_dump(payload),
+                )
+        return revision
+
+    async def get_pipeline_document(
+        self, page_ref: str, stage: str | PipelineStage, document_type: str
+    ) -> dict[str, Any] | None:
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL store is not started")
+        stage_id = PipelineStage(stage).value
+        row = await self.pool.fetchrow(
+            """SELECT document.revision,document.schema_version,document.payload
+               FROM pipeline_documents document
+               JOIN pages page ON page.id=document.page_id
+               WHERE page.active AND (page.id=$1 OR page.folder=$1)
+                 AND document.stage=$2 AND document.document_type=$3 AND document.active""",
+            page_ref,
+            stage_id,
+            document_type,
+        )
+        if row is None:
+            return None
+        return {
+            "revision": row["revision"],
+            "schema_version": row["schema_version"],
+            "payload": _json_load(row["payload"], None),
+        }
+
+    async def commit_pipeline_outputs(
+        self,
+        page_ref: str,
+        documents: dict[str, Any],
+        artifacts: list[dict[str, Any]],
+    ) -> bool:
+        """Activate structured-document and artifact revisions in one transaction."""
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL store is not started")
+
+        prepared_artifacts = []
+        for artifact in artifacts:
+            stage_id = PipelineStage(artifact["stage"]).value
+            artifact_type = artifact["artifact_type"]
+            relative_path = str(artifact["relative_path"])
+            path = PurePosixPath(relative_path)
+            windows_path = PureWindowsPath(relative_path)
+            if (
+                path.is_absolute()
+                or windows_path.is_absolute()
+                or windows_path.drive
+                or not path.parts
+                or ".." in path.parts
+                or ".." in windows_path.parts
+            ):
+                raise ValueError("Artifact path must stay inside the result directory")
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", artifact_type):
+                raise ValueError("Invalid pipeline artifact type")
+            width, height, size = (
+                artifact.get("width"), artifact.get("height"), artifact["size_bytes"]
+            )
+            if size < 0 or (width is not None and width <= 0) or (height is not None and height <= 0):
+                raise ValueError("Invalid artifact dimensions or size")
+            prepared_artifacts.append((
+                stage_id,
+                artifact_type,
+                path.as_posix(),
+                artifact.get("mime_type"),
+                width,
+                height,
+                size,
+                artifact.get("checksum"),
+            ))
+
+        structured_documents = [
+            (name, *_PIPELINE_DOCUMENT_TYPES[name], _json_dump(payload))
+            for name, payload in documents.items()
+            if name in _PIPELINE_DOCUMENT_TYPES
+        ]
+        document_rows = [
+            (name, _json_dump(payload))
+            for name, payload in documents.items()
+            if Path(name).name == name and name.endswith(".json")
+        ]
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                page_id = await connection.fetchval(
+                    "SELECT id FROM pages WHERE active AND (id=$1 OR folder=$1) LIMIT 1 FOR UPDATE",
+                    page_ref,
+                )
+                if page_id is None:
+                    return False
+
+                if document_rows:
+                    names = [name for name, _ in document_rows]
+                    await connection.execute(
+                        "DELETE FROM result_documents WHERE page_id=$1 AND name=ANY($2::text[])",
+                        page_id,
+                        names,
+                    )
+                    await connection.executemany(
+                        "INSERT INTO result_documents(page_id,name,payload,updated_at) VALUES($1,$2,$3::jsonb,now())",
+                        [(page_id, name, payload) for name, payload in document_rows],
+                    )
+
+                for name, stage_id, document_type, payload in structured_documents:
+                    revision = int(await connection.fetchval(
+                        """SELECT COALESCE(MAX(revision),0)+1 FROM pipeline_documents
+                           WHERE page_id=$1 AND stage=$2 AND document_type=$3""",
+                        page_id,
+                        stage_id,
+                        document_type,
+                    ))
+                    await connection.execute(
+                        """UPDATE pipeline_documents SET active=FALSE
+                           WHERE page_id=$1 AND stage=$2 AND document_type=$3 AND active""",
+                        page_id,
+                        stage_id,
+                        document_type,
+                    )
+                    await connection.execute(
+                        """INSERT INTO pipeline_documents(
+                               page_id,stage,document_type,revision,schema_version,payload,active
+                           ) VALUES($1,$2,$3,$4,1,$5::jsonb,TRUE)""",
+                        page_id,
+                        stage_id,
+                        document_type,
+                        revision,
+                        payload,
+                    )
+
+                for artifact in prepared_artifacts:
+                    stage_id, artifact_type, path, mime_type, width, height, size, checksum = artifact
+                    revision = int(await connection.fetchval(
+                        """SELECT COALESCE(MAX(revision),0)+1 FROM pipeline_artifacts
+                           WHERE page_id=$1 AND stage=$2 AND artifact_type=$3""",
+                        page_id,
+                        stage_id,
+                        artifact_type,
+                    ))
+                    await connection.execute(
+                        """UPDATE pipeline_artifacts SET active=FALSE
+                           WHERE page_id=$1 AND stage=$2 AND artifact_type=$3 AND active""",
+                        page_id,
+                        stage_id,
+                        artifact_type,
+                    )
+                    await connection.execute(
+                        """INSERT INTO pipeline_artifacts(
+                               page_id,stage,artifact_type,relative_path,revision,active,
+                               mime_type,width,height,size_bytes,checksum
+                           ) VALUES($1,$2,$3,$4,$5,TRUE,$6,$7,$8,$9,$10)""",
+                        page_id,
+                        stage_id,
+                        artifact_type,
+                        path,
+                        revision,
+                        mime_type,
+                        width,
+                        height,
+                        size,
+                        checksum,
+                    )
+        return True
+
+    async def register_pipeline_artifact(
+        self,
+        page_ref: str,
+        stage: str | PipelineStage,
+        artifact_type: str,
+        relative_path: str,
+        *,
+        size_bytes: int,
+        checksum: str | None = None,
+        mime_type: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> int:
+        """Register a completed disk artifact as the active revision."""
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL store is not started")
+        stage_id = PipelineStage(stage).value
+        committed = await self.commit_pipeline_outputs(
+            page_ref,
+            {},
+            [{
+                "stage": stage_id,
+                "artifact_type": artifact_type,
+                "relative_path": relative_path,
+                "size_bytes": size_bytes,
+                "checksum": checksum,
+                "mime_type": mime_type,
+                "width": width,
+                "height": height,
+            }],
+        )
+        if not committed:
+            raise ValueError("Pipeline artifacts require an indexed page")
+        active = await self.get_pipeline_artifact(page_ref, stage_id, artifact_type)
+        if active is None:
+            raise RuntimeError("Pipeline artifact revision was not activated")
+        return int(active["revision"])
+
+    async def get_pipeline_artifact(
+        self, page_ref: str, stage: str | PipelineStage, artifact_type: str
+    ) -> dict[str, Any] | None:
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL store is not started")
+        stage_id = PipelineStage(stage).value
+        row = await self.pool.fetchrow(
+            """SELECT artifact.relative_path,artifact.revision,artifact.mime_type,
+                      artifact.width,artifact.height,artifact.size_bytes,artifact.checksum
+               FROM pipeline_artifacts artifact
+               JOIN pages page ON page.id=artifact.page_id
+               WHERE page.active AND (page.id=$1 OR page.folder=$1)
+                 AND artifact.stage=$2 AND artifact.artifact_type=$3 AND artifact.active""",
+            page_ref,
+            stage_id,
+            artifact_type,
+        )
+        return dict(row) if row is not None else None
+
     async def get_document(self, record_id: str, name: str) -> Any | None:
         if self.pool is None:
             raise RuntimeError("PostgreSQL store is not started")
@@ -742,6 +1511,17 @@ class PostgresStore:
         if owner is None:
             return None
         kind, owner_id = owner
+        if kind == "page" and name in _PIPELINE_DOCUMENT_TYPES:
+            stage_id, document_type = _PIPELINE_DOCUMENT_TYPES[name]
+            value = await self.pool.fetchval(
+                """SELECT payload FROM pipeline_documents
+                   WHERE page_id=$1 AND stage=$2 AND document_type=$3 AND active""",
+                owner_id,
+                stage_id,
+                document_type,
+            )
+            if value is not None:
+                return _json_load(value, None)
         column = "page_id" if kind == "page" else "pipeline_run_id"
         value = await self.pool.fetchval(
             f"SELECT payload FROM result_documents WHERE {column}=$1 AND name=$2",
@@ -762,30 +1542,22 @@ class PostgresStore:
             f"SELECT name,payload FROM result_documents WHERE {column}=$1",
             owner_id,
         )
-        return {row["name"]: _json_load(row["payload"], None) for row in rows}
-
-    async def list_pipeline_runs(self) -> list[dict[str, Any]]:
-        if self.pool is None:
-            raise RuntimeError("PostgreSQL store is not started")
-        rows = await self.pool.fetch(
-            """
-            SELECT pr.folder, rd.payload
-            FROM pipeline_runs pr
-            JOIN result_documents rd ON rd.pipeline_run_id = pr.id
-            WHERE rd.name='pipeline_manifest.json'
-            ORDER BY COALESCE(rd.payload->>'updatedAt', rd.payload->>'createdAt') DESC NULLS LAST
-            """
-        )
-        return [
-            {
-                "folder": row["folder"],
-                "filename": (_json_load(row["payload"], {}).get("source") or {}).get("filename") or row["folder"],
-                "status": _json_load(row["payload"], {}).get("status", "partial"),
-                "createdAt": _json_load(row["payload"], {}).get("createdAt"),
-                "updatedAt": _json_load(row["payload"], {}).get("updatedAt"),
+        documents = {row["name"]: _json_load(row["payload"], None) for row in rows}
+        if kind == "page":
+            structured = await self.pool.fetch(
+                """SELECT stage,document_type,payload FROM pipeline_documents
+                   WHERE page_id=$1 AND active""",
+                owner_id,
+            )
+            names = {
+                (stage, document_type): name
+                for name, (stage, document_type) in _PIPELINE_DOCUMENT_TYPES.items()
             }
-            for row in rows
-        ]
+            for row in structured:
+                name = names.get((row["stage"], row["document_type"]))
+                if name:
+                    documents[name] = _json_load(row["payload"], None)
+        return documents
 
     async def delete_documents(self, folder: str) -> None:
         if self.pool is None:
@@ -1835,27 +2607,37 @@ class PostgresStore:
         if group_id is None:
             return []
         rows = await self.pool.fetch(
-            "SELECT * FROM pages WHERE active AND manga_group_id=$1 ORDER BY page_order, original_sort_key, folder",
+            """SELECT p.*, g.id AS group_id, g.title AS group_title
+               FROM pages p
+               JOIN manga_groups g ON g.id=p.manga_group_id
+               WHERE p.active AND p.manga_group_id=$1
+               ORDER BY p.page_order, p.original_sort_key, p.folder""",
             group_id,
         )
-        return [
-            {
+        pages = []
+        for row in rows:
+            metadata = _json_load(row["metadata"], {})
+            metadata.update({
+                "mangaTitle": row["group_title"],
+                "mangaGroupId": row["group_id"],
+                "groupId": row["group_id"],
+                "pageOrder": row["page_order"],
+                "sourceType": row["source_type"],
+            })
+            pages.append({
                 "id": row["id"],
                 "folder": row["folder"],
                 "path": self.result_root / row["folder"],
                 "name": row["original_name"] if row["original_name"] and row["original_name"] != "Unknown" else f"{row['folder']}.png",
-                "meta": {
-                    **_json_load(row["metadata"], {}),
-                    "pageOrder": row["page_order"],
-                    "sourceType": row["source_type"],
-                },
+                "meta": metadata,
+                "groupId": row["group_id"],
+                "mangaTitle": row["group_title"],
                 "sourceType": row["source_type"],
                 "hasRegions": bool(row["has_regions"]),
                 "textRegions": _json_load(row["text_regions"], []),
                 "pageOrder": row["page_order"],
-            }
-            for row in rows
-        ]
+            })
+        return pages
 
     async def export_pages(
         self, title: str, folders: list[str] | None = None
@@ -2360,8 +3142,16 @@ class PostgresBatchStore(BatchStore):
             raise RuntimeError("PostgreSQL store is not started")
         return self.database.pool
 
-    async def _save_db_manifest(self, manifest: dict[str, Any]) -> None:
-        async with self._pool.acquire() as connection:
+    @asynccontextmanager
+    async def _batch_connection(self, connection: Any = None):
+        if connection is not None:
+            yield connection
+            return
+        async with self._pool.acquire() as acquired:
+            yield acquired
+
+    async def _save_db_manifest(self, manifest: dict[str, Any], connection: Any = None) -> None:
+        async with self._batch_connection(connection) as connection:
             async with connection.transaction():
                 await connection.execute(
                     """
@@ -2512,6 +3302,7 @@ class PostgresBatchStore(BatchStore):
                             page_id,
                             item.get("status", "queued"),
                             item.get("stage"),
+                            item.get("stageStartedAt"),
                             item.get("error"),
                             item.get("requestId"),
                             page_order,
@@ -2528,14 +3319,16 @@ class PostgresBatchStore(BatchStore):
                 await connection.executemany(
                     """
                     INSERT INTO batch_items(
-                        batch_id,id,name,manga_group_id,page_id,status,stage,error,request_id,page_order,payload
-                    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+                        batch_id,id,name,manga_group_id,page_id,status,stage,stage_started_at,
+                        error,request_id,page_order,payload
+                    ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
                     ON CONFLICT (batch_id, id) DO UPDATE SET
                         name = EXCLUDED.name,
                         manga_group_id = EXCLUDED.manga_group_id,
                         page_id = EXCLUDED.page_id,
                         status = EXCLUDED.status,
                         stage = EXCLUDED.stage,
+                        stage_started_at = EXCLUDED.stage_started_at,
                         error = EXCLUDED.error,
                         request_id = EXCLUDED.request_id,
                         page_order = EXCLUDED.page_order,
@@ -2544,11 +3337,15 @@ class PostgresBatchStore(BatchStore):
                     item_rows,
                 )
 
-    async def _hydrate_manifest(self, manifest: dict[str, Any]) -> dict[str, Any]:
-        rows = await self._pool.fetch(
+    async def _hydrate_manifest(
+        self, manifest: dict[str, Any], connection: Any = None
+    ) -> dict[str, Any]:
+        fetch = connection.fetch if connection is not None else self._pool.fetch
+        rows = await fetch(
             """
             SELECT i.id, i.manga_group_id, g.title AS manga_title,
-                   i.page_id, i.page_order, p.folder AS result_folder
+                   i.page_id, i.page_order, p.folder AS result_folder,
+                   i.status, i.stage, i.stage_started_at, i.error, i.request_id, i.payload
             FROM batch_items i
             LEFT JOIN manga_groups g ON g.id=i.manga_group_id
             LEFT JOIN pages p ON p.id=i.page_id
@@ -2562,6 +3359,20 @@ class PostgresBatchStore(BatchStore):
             row = by_id.get(item.get("id"))
             if row is None:
                 continue
+            payload = _json_load(row.get("payload"), {})
+            if isinstance(payload, dict):
+                item.update(payload)
+            for column, key in (
+                ("status", "status"),
+                ("stage", "stage"),
+                ("stage_started_at", "stageStartedAt"),
+                ("error", "error"),
+                ("request_id", "requestId"),
+            ):
+                if column in row.keys():
+                    if column == "stage_started_at" and row[column] is None:
+                        continue
+                    item[key] = row[column]
             item["mangaGroupId"] = row["manga_group_id"]
             item["pageId"] = row["page_id"]
             item["pageOrder"] = row["page_order"]
@@ -2570,16 +3381,39 @@ class PostgresBatchStore(BatchStore):
                 item["resultFolder"] = row["result_folder"]
         return hydrated
 
-    async def _db_manifest(self, batch_id: str) -> dict[str, Any]:
-        row = await self._pool.fetchrow(
-            "SELECT manifest FROM batches WHERE id=$1 AND active", batch_id
-        )
+    async def _db_manifest(
+        self, batch_id: str, connection: Any = None, for_update: bool = False
+    ) -> dict[str, Any]:
+        query = """SELECT manifest,status,title,dismissed,added_at,
+                           updated_at,total_items,completed_count
+                    FROM batches WHERE id=$1 AND active"""
+        if for_update:
+            query += " FOR UPDATE"
+        fetchrow = connection.fetchrow if connection is not None else self._pool.fetchrow
+        row = await fetchrow(query, batch_id)
         if row is None:
             raise BatchNotFound(batch_id)
         value = _json_load(row["manifest"], None)
         if not isinstance(value, dict):
             raise InvalidBatch(f"Malformed database manifest: {batch_id}")
-        return await self._hydrate_manifest(value)
+        return await self._hydrate_manifest(self._overlay_batch_columns(value, row), connection)
+
+    @staticmethod
+    def _overlay_batch_columns(manifest: dict[str, Any], row: Any) -> dict[str, Any]:
+        hydrated = copy.deepcopy(manifest)
+        fields = {
+            "status": "status",
+            "title": "title",
+            "dismissed": "dismissed",
+            "added_at": "addedAt",
+            "updated_at": "updatedAt",
+            "total_items": "totalItems",
+            "completed_count": "completedCount",
+        }
+        for column, key in fields.items():
+            if column in row.keys():
+                hydrated[key] = row[column]
+        return hydrated
 
     def _write_snapshot(self, manifest: dict[str, Any]) -> None:
         path = self._manifest_path(manifest["id"])
@@ -2670,23 +3504,34 @@ class PostgresBatchStore(BatchStore):
     async def list_runnable_batches(self) -> list[dict[str, Any]]:
         rows = await self._pool.fetch(
             """
-            SELECT manifest FROM batches
+            SELECT id,manifest,status,title,dismissed,added_at,
+                   updated_at,total_items,completed_count FROM batches
             WHERE active AND status IN ('waiting', 'processing')
             ORDER BY CASE WHEN manifest->>'priority' = 'true' THEN 0 ELSE 1 END, added_at, id
             """
         )
-        return [_json_load(row["manifest"], {}) for row in rows if isinstance(row["manifest"], (str, dict))]
+        result = []
+        for row in rows:
+            manifest = _json_load(row["manifest"], {})
+            if isinstance(manifest, dict):
+                manifest = self._overlay_batch_columns(manifest, row)
+                result.append(await self._hydrate_manifest(manifest) if manifest.get("items") else manifest)
+        return result
 
     async def list_batches(self) -> list[dict[str, Any]]:
         rows = await self._pool.fetch(
-            "SELECT manifest FROM batches WHERE active ORDER BY CASE WHEN manifest->>'priority' = 'true' THEN 0 ELSE 1 END, added_at, id"
+            """SELECT id,manifest,status,title,dismissed,added_at,
+                      updated_at,total_items,completed_count FROM batches WHERE active
+               ORDER BY CASE WHEN manifest->>'priority' = 'true' THEN 0 ELSE 1 END, added_at, id"""
         )
-        manifests = [_json_load(row["manifest"], {}) for row in rows]
-        return [
-            self._to_dto(await self._hydrate_manifest(value))
-            for value in manifests
-            if isinstance(value, dict)
-        ]
+        result = []
+        for row in rows:
+            manifest = _json_load(row["manifest"], {})
+            if isinstance(manifest, dict):
+                manifest = self._overlay_batch_columns(manifest, row)
+                hydrated = await self._hydrate_manifest(manifest) if manifest.get("items") else manifest
+                result.append(self._to_dto(hydrated))
+        return result
 
     async def list_batch_summaries(self) -> list[dict[str, Any]]:
         rows = await self._pool.fetch(
@@ -2799,19 +3644,21 @@ class PostgresBatchStore(BatchStore):
 
     async def mutate(self, batch_id: str, mutator: Any) -> dict[str, Any]:
         async with self._lock:
-            manifest = await self._db_manifest(batch_id)
-            result = mutator(manifest)
-            if result is False:
-                return self._to_dto(manifest)
-            manifest["updatedAt"] = int(dt.datetime.now().timestamp() * 1000)
-            manifest["totalItems"] = max(
-                len(manifest.get("items", [])), int(manifest.get("totalItems", 0))
-            )
-            manifest["completedCount"] = max(
-                sum(item.get("status") == "completed" for item in manifest.get("items", [])),
-                int(manifest.get("completedCount", 0)),
-            )
-            await self._save_db_manifest(manifest)
+            async with self._pool.acquire() as connection:
+                async with connection.transaction():
+                    manifest = await self._db_manifest(batch_id, connection, for_update=True)
+                    result = mutator(manifest)
+                    if result is False:
+                        return self._to_dto(manifest)
+                    manifest["updatedAt"] = int(dt.datetime.now().timestamp() * 1000)
+                    manifest["totalItems"] = max(
+                        len(manifest.get("items", [])), int(manifest.get("totalItems", 0))
+                    )
+                    manifest["completedCount"] = max(
+                        sum(item.get("status") == "completed" for item in manifest.get("items", [])),
+                        int(manifest.get("completedCount", 0)),
+                    )
+                    await self._save_db_manifest(manifest, connection)
             await asyncio.to_thread(self._write_snapshot, manifest)
             return self._to_dto(manifest)
 

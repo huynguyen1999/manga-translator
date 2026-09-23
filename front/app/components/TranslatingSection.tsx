@@ -4,7 +4,7 @@ import { Link } from "react-router";
 import type { QueuedImage, TranslationBatch, TranslationSettings, TranslatorKey } from "@/types";
 import { validTranslators } from "@/types";
 import { getTranslatorName } from "@/utils/getTranslatorName";
-import { formatStage, getBatchKind } from "@/utils/serverBatches";
+import { formatStage, formatStageElapsed, getBatchKind } from "@/utils/serverBatches";
 import PreviewImage from "./PreviewImage";
 import { apiUrl } from "@/utils/api";
 import { MANGA_TITLE_MAX_LENGTH } from "@/config";
@@ -53,13 +53,16 @@ const itemStatusLabel: Record<QueuedImage["status"], string> = {
   error: "Failed",
 };
 
-const resultFor = (item: QueuedImage) =>
-  item.result instanceof Blob && item.result.size < 1000 && item.folder
+export const resultFor = (item: QueuedImage) =>
+  item.status !== "finished"
+    ? null
+    : item.result instanceof Blob && item.result.size < 1000 && item.folder
     ? apiUrl(`/result/${item.folder}/final.png`)
     : typeof item.result === "string" ? apiUrl(item.result) : (item.result || (item.folder ? apiUrl(`/result/${item.folder}/final.png`) : null));
 
 const ItemRow: React.FC<{
   item: QueuedImage;
+  now: number;
   batchSettings?: Partial<TranslationSettings>;
   batchMangaTitle?: string;
   onRetryItem: (keepFailedPagesForEditing?: boolean) => void | Promise<void>;
@@ -87,6 +90,7 @@ const ItemRow: React.FC<{
   sourceType?: ImageSourceType;
 }> = ({
   item,
+  now,
   batchSettings,
   batchMangaTitle,
   onRetryItem,
@@ -200,10 +204,10 @@ const ItemRow: React.FC<{
           {isAwaitingTranslation ? (
             <span className="inline-flex items-center gap-1 rounded-full border border-sky-200/80 bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700 dark:border-sky-800/60 dark:bg-sky-950/40 dark:text-sky-300">
               <Icon icon="carbon:hourglass" className="h-3 w-3 text-sky-600 dark:text-sky-400" />
-              Inpainted · Waiting for batch AI
+              Prepared · Waiting for batch translation
             </span>
           ) : isProcessing && (
-            <span>{formatStage(item.step)}</span>
+            <span>{formatStage(item.step)}{item.stepStartedAt ? ` · ${formatStageElapsed(item.stepStartedAt, now)}` : ""}</span>
           )}
           {isProcessing && item.offlineModel && (
             <span className="truncate" title={item.offlineModel}>
@@ -366,15 +370,16 @@ export const BatchCard: React.FC<{
   const [expanded, setExpanded] = useState(false);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState(false);
+  const [clock, setClock] = useState(Date.now());
   const hasDetails = Boolean(batch.detailsLoaded || batch.items.length > 0);
-  const lastDetailsUpdatedAt = useMemo(() => batch.updatedAt?.getTime(), [batch.updatedAt]);
-  const previousDetailsUpdatedAtRef = React.useRef(lastDetailsUpdatedAt);
-  const wasDetailsLoadedRef = React.useRef(hasDetails);
+  const onLoadDetailsRef = React.useRef(onLoadDetails);
+  onLoadDetailsRef.current = onLoadDetails;
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState(batch.mangaTitle);
   const isPendingStage = (step?: string) => step === "awaiting_translation" || step === "reserved";
   const waiting = hasDetails ? batch.items.filter((item) => item.status === "queued" || isPendingStage(item.step)).length : (batch.queuedCount || 0);
   const processing = hasDetails ? batch.items.filter((item) => item.status === "processing" && !isPendingStage(item.step)).length : (batch.processingCount || 0);
+  const hasActiveStage = batch.items.some((item) => item.status === "processing" && item.stepStartedAt);
   const completed = batch.completedCount;
   const failedItems = hasDetails ? batch.items.filter((item) => item.status === "error") : [];
   const failed = hasDetails ? failedItems.length : (batch.failedCount || 0);
@@ -395,6 +400,12 @@ export const BatchCard: React.FC<{
   const batchKindLabel = batchKind === "manga-upload" ? "Manga upload" : batchKind === "rerender" ? "Layout rerender" : batchKind === "pipeline-rerun" ? `Pipeline rerun · ${rerunModeLabel}` : "Translation";
 
   useEffect(() => {
+    if (!expanded || !hasActiveStage) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [expanded, hasActiveStage]);
+
+  useEffect(() => {
     setTitleInput(batch.mangaTitle);
   }, [batch.mangaTitle]);
 
@@ -412,26 +423,13 @@ export const BatchCard: React.FC<{
   };
 
   useEffect(() => {
-    if (!expanded) return;
-    const itemsNeedRefresh =
-      !hasDetails ||
-      (batch.status === "completed" && batch.items.some((item) => item.status !== "finished" && item.status !== "error")) ||
-      (batch.completedCount > 0 && batch.items.filter((item) => item.status === "finished").length < batch.completedCount);
-
-    if (hasDetails && !wasDetailsLoadedRef.current) {
-      wasDetailsLoadedRef.current = true;
-      previousDetailsUpdatedAtRef.current = lastDetailsUpdatedAt;
-      if (!itemsNeedRefresh) return;
-    }
-    wasDetailsLoadedRef.current = hasDetails;
-    if (hasDetails && !itemsNeedRefresh && previousDetailsUpdatedAtRef.current === lastDetailsUpdatedAt) return;
-    previousDetailsUpdatedAtRef.current = lastDetailsUpdatedAt;
+    if (!expanded || hasDetails) return;
     setDetailsLoading(true);
     setDetailsError(false);
-    void onLoadDetails()
+    void onLoadDetailsRef.current()
       .catch(() => setDetailsError(true))
       .finally(() => setDetailsLoading(false));
-  }, [expanded, hasDetails, lastDetailsUpdatedAt, onLoadDetails, batch.status, batch.completedCount, batch.items]);
+  }, [expanded, hasDetails]);
 
   return (
     <div className="relative overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-xs dark:border-zinc-800 dark:bg-zinc-900">
@@ -780,6 +778,7 @@ export const BatchCard: React.FC<{
             <ItemRow
               key={item.id}
               item={item}
+              now={clock}
               batchSettings={batch.settings}
               batchMangaTitle={batch.mangaTitle}
               onRetryItem={(keepFailedPagesForEditing) => onRetryItem(item.id, keepFailedPagesForEditing)}

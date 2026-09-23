@@ -61,8 +61,6 @@ PHONE_API_URL=http://192.168.1.100:8000
 
 The frontend selects `PHONE_API_URL` for phones and `DESKTOP_API_URL` for other devices. Leave either value empty to use the frontend's relative `/api` proxy for that device.
 
-Open `/pipeline-lab` to load one image, choose the fixed-order pipeline stages, run the real translation, and inspect saved images, JSON, timings, skips, and failures. Runs are stored in the existing `result/` folders and can be reopened or deleted from the lab.
-
 ## Building for Production
 
 Create a production build:

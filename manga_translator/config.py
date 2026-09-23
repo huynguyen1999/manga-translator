@@ -519,11 +519,6 @@ class BubbleDetectionConfig(BaseModel):
     group_regions: bool = False
     """Whether to group and merge text regions falling inside the same detected bubble instance."""
 
-class PipelineLabConfig(BaseModel):
-    enabled: bool = False
-    stage_plan: dict[str, bool] = Field(default_factory=dict)
-    manual: bool = False
-
 class Config(BaseModel):
     # General
     filter_text: Optional[str] = None
@@ -544,7 +539,6 @@ class Config(BaseModel):
     """Ocr configs"""
     bubble_detection: BubbleDetectionConfig = BubbleDetectionConfig()
     """Optional speech-bubble detection and shape-aware typesetting."""
-    pipeline_lab: Optional[PipelineLabConfig] = None
     # ?
     force_simple_sort: bool = False
     """Don't use panel detection for sorting, use a simpler fallback logic instead"""

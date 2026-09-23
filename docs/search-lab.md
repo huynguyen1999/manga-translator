@@ -1,7 +1,7 @@
 # Search Lab
 
 Search English descriptions across manga summaries and **original input pages**.
-The Lab lives at `/search-lab` alongside Gallery and Pipeline Lab. It uses the
+The Lab lives at `/search-lab` alongside Gallery. It uses the
 existing PostgreSQL database for jobs and source checkpoints, local PyTorch
 models for inference, and a separate Qdrant service for vectors.
 

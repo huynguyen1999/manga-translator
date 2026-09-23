@@ -42,5 +42,19 @@ async def dispatch(ocr_key: Ocr, image: np.ndarray, regions: List[Quadrilateral]
     return await ocr.recognize(image, regions, config, verbose)
 
 @model_operation
+async def dispatch_batch(ocr_key: Ocr, pages: list[tuple[np.ndarray, List[Quadrilateral], OcrConfig]], device: str = 'cpu', verbose: bool = False):
+    ocr = get_ocr(ocr_key)
+    if isinstance(ocr, OfflineOCR):
+        await ocr.load(device)
+    if isinstance(ocr, Model48pxCTCOCR):
+        from .batching import recognize_ctc_batch
+
+        return recognize_ctc_batch(ocr, pages)
+    return [
+        await ocr.recognize(image, regions, config, verbose)
+        for image, regions, config in pages
+    ]
+
+@model_operation
 async def unload(ocr_key: Ocr):
     get_model_cache('ocr', ocr_cache).pop(ocr_key, None)

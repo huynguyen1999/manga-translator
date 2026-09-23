@@ -52,6 +52,19 @@ async def dispatch(detector_key: Detector | str, image: np.ndarray, detect_size:
     return await detector.detect(image, detect_size, text_threshold, box_threshold, unclip_ratio, invert, gamma_correct, rotate, auto_rotate, verbose)
 
 @model_operation
+async def dispatch_batch(detector_key: Detector | str, images: list[np.ndarray], detect_size: int, text_threshold: float, box_threshold: float, unclip_ratio: float,
+                         invert: bool, gamma_correct: bool, rotate: bool, auto_rotate: bool = False, device: str = 'cpu', verbose: bool = False):
+    detector = get_detector(detector_key)
+    if isinstance(detector, OfflineDetector):
+        await detector.load(device)
+    elif isinstance(detector, RustDetector):
+        await detector.load(device)
+    return await detector.detect_batch(
+        images, detect_size, text_threshold, box_threshold, unclip_ratio,
+        invert, gamma_correct, rotate, auto_rotate, verbose,
+    )
+
+@model_operation
 async def unload(detector_key: Detector | str):
     if isinstance(detector_key, str) and not isinstance(detector_key, Detector):
         try:

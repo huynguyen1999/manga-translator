@@ -35,16 +35,22 @@ from .utils import (
     sort_regions,
 )
 
-from .detection import dispatch as dispatch_detection, prepare as prepare_detection, unload as unload_detection
+from .detection import (
+    dispatch as dispatch_detection,
+    dispatch_batch as dispatch_detection_batch,
+    prepare as prepare_detection,
+    unload as unload_detection,
+)
 from .detection.bubble import (
     BubbleDetection,
     dispatch as dispatch_bubble_detection,
+    dispatch_batch as dispatch_bubble_detection_batch,
     detect as detect_bubbles,
     prepare as prepare_bubble_detection,
     unload as unload_bubble_detection,
 )
 from .upscaling import dispatch as dispatch_upscaling, prepare as prepare_upscaling, unload as unload_upscaling
-from .ocr import dispatch as dispatch_ocr, prepare as prepare_ocr, unload as unload_ocr
+from .ocr import dispatch as dispatch_ocr, dispatch_batch as dispatch_ocr_batch, prepare as prepare_ocr, unload as unload_ocr
 from .textline_merge import dispatch as dispatch_textline_merge
 from .typography import analyze_source_typography
 from .mask_refinement import dispatch as dispatch_mask_refinement
@@ -66,11 +72,22 @@ from .colorization import (
     is_image_colored,
 )
 from .rendering import dispatch as dispatch_rendering, dispatch_eng_render, dispatch_eng_render_pillow, get_default_eng_font, _composite_box_to_image, render_page
-from .rendering.bubble_layout import group_regions_by_bubbles, prepare_bubble_masks, prepare_bubbles, restore_original, encode_safe_shape, encode_rendered_box
+from .rendering.bubble_layout import group_regions_by_bubbles, prepare_bubbles, restore_original, encode_safe_shape, encode_rendered_box
 from .rendering.layout import layout_page, PlacementMode
 from .mask_builder import build_inpaint_masks, create_mask_sources_overlay
+from .geometry.bubbles import prepare_page_geometry
 from .detection.bubble import serialize_bubble_detections, deserialize_bubble_detections
-from .pipeline_lab import PipelineLabRun, save_result_documents, serialize_regions
+from .pipeline.run import (
+    PipelineRun,
+    deserialize_textlines,
+    save_result_documents,
+    serialize_regions,
+)
+from .pipeline.cpu import (
+    CPU_PRIORITY_BACKGROUND,
+    CPU_PRIORITY_NORMAL,
+    run_cpu_stage,
+)
 from .utils.model_cache import get_model_executor, model_operation
 from .utils.device_memory import empty_device_cache, configure_device_memory_limits
 from .utils.image_storage import save_jpeg
@@ -181,7 +198,7 @@ class MangaTranslator:
         self._gpu_limited_memory = False
         self.ignore_errors = False
         self.verbose = False
-        self._pipeline_lab_run = None
+        self._pipeline_run = None
         self.models_ttl = 0
         self.batch_size = 20
 
@@ -392,18 +409,18 @@ class MangaTranslator:
         ctx.verbose = self.verbose
         ctx.started_at_monotonic = time.monotonic()
         ctx.started_at_iso = datetime.now(timezone.utc).isoformat()
-        self._pipeline_lab_run = None
+        self._pipeline_run = None
 
         # 设置图片上下文以生成调试图片子文件夹
         self._set_image_context(config, image)
         if self._current_image_context:
             self._current_image_context['started_at'] = ctx.started_at_iso
 
-        self._pipeline_lab_run = PipelineLabRun(
+        self._pipeline_run = PipelineRun(
             self.result_root, self._get_image_subfolder(), image, config
         )
-        self._pipeline_lab_run.ctx = ctx
-        self._pipeline_lab_run.translator = self
+        self._pipeline_run.ctx = ctx
+        self._pipeline_run.translator = self
         
         # 保存debug文件夹信息到Context中（用于Web模式的缓存访问）
         # 在web模式下总是保存，不仅仅是verbose模式
@@ -416,8 +433,8 @@ class MangaTranslator:
         except Exception as e:
             logger.error(f"Error saving input.jpg debug image: {e}")
             logger.debug(f"Exception details: {traceback.format_exc()}")
-        if self._pipeline_lab_run is not None:
-            self._pipeline_lab_run.refresh()
+        if self._pipeline_run is not None:
+            self._pipeline_run.refresh()
             await self._report_progress(f'debug_folder:{self._get_image_subfolder()}')
 
         # preload and download models (not strictly necessary, remove to lazy load)
@@ -439,14 +456,14 @@ class MangaTranslator:
         try:
             ctx = await self._translate(config, ctx)
         except (Exception, asyncio.CancelledError) as e:
-            if self._pipeline_lab_run is not None:
+            if self._pipeline_run is not None:
                 if isinstance(e, asyncio.CancelledError):
-                    self._pipeline_lab_run.cancel("Stopped by user")
+                    self._pipeline_run.cancel("Stopped by user")
                 else:
-                    self._pipeline_lab_run.fail(str(e))
-                await self._pipeline_lab_run.checkpoint()
-                self._pipeline_lab_run.release_runtime()
-                self._pipeline_lab_run = None
+                    self._pipeline_run.fail(str(e))
+                await self._pipeline_run.checkpoint()
+                self._pipeline_run.release_runtime()
+                self._pipeline_run = None
             raise
 
         # 在翻译流程的最后保存翻译结果，确保保存的是最终结果（包括重试后的结果）
@@ -509,12 +526,12 @@ class MangaTranslator:
         else:
             ctx.img_colorized = ctx.input
 
-        if self._pipeline_lab_run is not None and colorization_ran and ctx.img_colorized is not None:
+        if self._pipeline_run is not None and colorization_ran and ctx.img_colorized is not None:
             colorized = np.array(ctx.img_colorized)
             if len(colorized.shape) == 3 and colorized.shape[2] == 3:
                 colorized = cv2.cvtColor(colorized, cv2.COLOR_RGB2BGR)
             await self._async_imwrite(self._result_path('colorized.png'), colorized)
-            self._pipeline_lab_run.refresh()
+            self._pipeline_run.refresh()
 
         # -- Upscaling
         # The default text detector doesn't work very well on smaller images, might want to
@@ -536,12 +553,12 @@ class MangaTranslator:
             ctx.upscaled = ctx.img_colorized
             ctx.upscaled_ran = False
 
-        if self._pipeline_lab_run is not None and upscaling_ran and ctx.upscaled is not None:
+        if self._pipeline_run is not None and upscaling_ran and ctx.upscaled is not None:
             upscaled = np.array(ctx.upscaled)
             if len(upscaled.shape) == 3 and upscaled.shape[2] == 3:
                 upscaled = cv2.cvtColor(upscaled, cv2.COLOR_RGB2BGR)
             await self._async_imwrite(self._result_path('upscaled.png'), upscaled)
-            self._pipeline_lab_run.refresh()
+            self._pipeline_run.refresh()
 
         ctx.img_rgb, ctx.img_alpha = load_image(ctx.upscaled)
 
@@ -557,7 +574,7 @@ class MangaTranslator:
             ctx.mask_raw = None
             ctx.mask = None
 
-        if (self.verbose or self._pipeline_lab_run is not None) and ctx.mask_raw is not None:
+        if (self.verbose or self._pipeline_run is not None) and ctx.mask_raw is not None:
             await self._async_imwrite(self._result_path('mask_raw.png'), ctx.mask_raw)
 
         if not ctx.textlines:
@@ -568,12 +585,13 @@ class MangaTranslator:
 
         detection_docs = serialize_regions(ctx.textlines)
         ctx.result_documents['detection.json'] = detection_docs
-        if self._pipeline_lab_run is not None:
-            self._pipeline_lab_run.write_json('detection.json', detection_docs)
+        if self._pipeline_run is not None:
+            self._pipeline_run.write_json('detection.json', detection_docs)
         elif self._current_image_context:
             await save_result_documents(
                 self._current_image_context['subfolder'],
                 {'detection.json': detection_docs},
+                self.result_root,
             )
 
         # -- OCR
@@ -589,12 +607,13 @@ class MangaTranslator:
         if ctx.textlines:
             ocr_docs = serialize_regions(ctx.textlines)
             ctx.result_documents['ocr.json'] = ocr_docs
-            if self._pipeline_lab_run is not None:
-                self._pipeline_lab_run.write_json('ocr.json', ocr_docs)
+            if self._pipeline_run is not None:
+                self._pipeline_run.write_json('ocr.json', ocr_docs)
             elif self._current_image_context:
                 await save_result_documents(
                     self._current_image_context['subfolder'],
                     {'ocr.json': ocr_docs},
+                    self.result_root,
                 )
 
         if not ctx.textlines:
@@ -616,12 +635,13 @@ class MangaTranslator:
         if ctx.text_regions:
             merged_docs = serialize_regions(ctx.text_regions)
             ctx.result_documents['text_regions_merged.json'] = merged_docs
-            if self._pipeline_lab_run is not None:
-                self._pipeline_lab_run.write_json('text_regions_merged.json', merged_docs)
+            if self._pipeline_run is not None:
+                self._pipeline_run.write_json('text_regions_merged.json', merged_docs)
             elif self._current_image_context:
                 await save_result_documents(
                     self._current_image_context['subfolder'],
                     {'text_regions_merged.json': merged_docs},
+                    self.result_root,
                 )
 
         # Detect before translation so grouped bubble text is translated as one flow.
@@ -651,8 +671,8 @@ class MangaTranslator:
             logger.error(f"Error during translating:\n{traceback.format_exc()}")  
             raise
 
-        if self._pipeline_lab_run is not None:
-            self._pipeline_lab_run.write_json(
+        if self._pipeline_run is not None:
+            self._pipeline_run.write_json(
                 'translations.json',
                 serialize_regions(ctx.text_regions if isinstance(ctx.text_regions, list) else []),
             )
@@ -674,13 +694,16 @@ class MangaTranslator:
         # (Delayed to take advantage of the region filtering done after ocr and translation)
         await self._report_progress('mask-generation')
         try:
-            bundle = await build_inpaint_masks(
+            bundle = await run_cpu_stage(
+                build_inpaint_masks,
                 image=ctx.img_rgb,
                 detector_textlines=getattr(ctx, 'textlines', None),
                 detector_mask=getattr(ctx, 'mask_raw', None),
                 text_regions=ctx.text_regions or [],
                 bubble_detections=getattr(ctx, 'bubble_detections', None),
                 config=config,
+                page_geometry=getattr(ctx, 'page_geometry', None),
+                priority=CPU_PRIORITY_BACKGROUND,
             )
             ctx.text_mask = bundle.text_mask
             ctx.bubble_mask = bundle.bubble_cleanup_mask
@@ -688,13 +711,17 @@ class MangaTranslator:
             ctx.bubble_residual_mask = bundle.bubble_residual_mask
             ctx.protected_edge_mask = bundle.protected_edge_mask
             ctx.mask_bundle = bundle
+            ctx.mask_profile = bundle.profile
+            ctx.page_geometry = bundle.page_geometry
+            if getattr(ctx, "result_documents", None) is not None:
+                ctx.result_documents["profiling.json"] = bundle.profile
             ctx.mask = bundle.final_inpaint_mask
             ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
         except Exception as e:
             logger.error(f"Error during mask-generation:\n{traceback.format_exc()}")
             raise
 
-        if (self.verbose or self._pipeline_lab_run is not None) and ctx.mask is not None:
+        if (self.verbose or self._pipeline_run is not None) and ctx.mask is not None:
             await self._async_imwrite(self._result_path('text_mask.png'), ctx.text_mask)
             await self._async_imwrite(self._result_path('bubble_mask.png'), ctx.bubble_mask)
             if getattr(ctx, 'detector_rescue_mask', None) is not None:
@@ -711,17 +738,20 @@ class MangaTranslator:
                     await self._async_imwrite(self._result_path('mask_sources_overlay.png'), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
                 except Exception as ex:
                     logger.warning(f"Could not save mask_sources_overlay.png: {ex}")
-            if self._pipeline_lab_run is not None:
-                self._pipeline_lab_run.refresh()
+            if self._pipeline_run is not None:
+                self._pipeline_run.refresh()
 
         # Layout owns placement; inpainting and rendering only consume its result.
         try:
+            await self._report_progress('layout')
             transform_text_case = getattr(config.render, "transform_text_case", None)
             if transform_text_case:
                 for region in (ctx.text_regions or []):
                     if getattr(region, "translation", None) and isinstance(region.translation, str):
                         region.translation = transform_text_case(region.translation)
-            layout_page(ctx, config, self.font_path)
+            await run_cpu_stage(layout_page, ctx, config, self.font_path, priority=CPU_PRIORITY_BACKGROUND)
+            if self._pipeline_run is not None:
+                self._pipeline_run.write_json('layout.json', serialize_regions(ctx.text_regions))
         except Exception as error:
             logger.warning('Production layout failed; preserving the existing render path: %s', error)
 
@@ -734,7 +764,7 @@ class MangaTranslator:
             raise
         ctx.gimp_mask = np.dstack((cv2.cvtColor(ctx.img_inpainted, cv2.COLOR_RGB2BGR), ctx.mask))
 
-        if self.verbose or self._pipeline_lab_run is not None:
+        if self.verbose or self._pipeline_run is not None:
             try:
                 inpainted_path = self._result_path('inpainted.jpg')
                 await asyncio.to_thread(save_jpeg, ctx.img_inpainted, inpainted_path)
@@ -742,8 +772,8 @@ class MangaTranslator:
                     os.unlink(self._result_path('inpainted.png'))
                 except FileNotFoundError:
                     pass
-                if self._pipeline_lab_run is not None:
-                    self._pipeline_lab_run.refresh()
+                if self._pipeline_run is not None:
+                    self._pipeline_run.refresh()
             except Exception as e:  
                 logger.error(f"Error saving inpainted.jpg debug image: {e}")
                 logger.debug(f"Exception details: {traceback.format_exc()}")
@@ -781,9 +811,9 @@ class MangaTranslator:
             await self._report_progress('downscaling')
             ctx.result = ctx.result.resize(ctx.input.size)
 
-        # 保存verbose或Pipeline Lab的final.jpg到调试文件夹
+        # 保存verbose或pipeline run的final.jpg到调试文件夹
         final_saved = False
-        if ctx.result and (self.verbose or self._pipeline_lab_run is not None):
+        if ctx.result and (self.verbose or self._pipeline_run is not None):
             try:
                 final_img = np.array(ctx.result)
                 final_path = self._result_path('final.jpg')
@@ -796,7 +826,7 @@ class MangaTranslator:
         # Web流式模式优化：保存final.jpg并使用占位符
         if ctx.result and (
             (not self.result_sub_folder and hasattr(self, '_is_streaming_mode') and self._is_streaming_mode)
-            or self._pipeline_lab_run is not None
+            or self._pipeline_run is not None
         ):
             # 保存final.jpg文件 (skip if already saved above)
             if not final_saved:
@@ -999,7 +1029,7 @@ class MangaTranslator:
                 started_at = (
                     getattr(ctx, 'started_at_iso', None)
                     or (self._current_image_context.get('started_at') if self._current_image_context else None)
-                    or (self._pipeline_lab_run.manifest.get('createdAt') if self._pipeline_lab_run else None)
+                    or (self._pipeline_run.manifest.get('createdAt') if self._pipeline_run else None)
                 )
                 finished_at = datetime.now(timezone.utc).isoformat()
                 duration_ms = None
@@ -1068,15 +1098,15 @@ class MangaTranslator:
 
             folder_name = self._current_image_context['subfolder']
             documents = {
-                **ctx.result_documents,
+                **(getattr(ctx, 'result_documents', None) or {}),
                 'meta.json': meta,
                 'text_regions.json': text_regions_data,
             }
-            if self._pipeline_lab_run is not None:
-                self._pipeline_lab_run.documents.update(documents)
-                await self._pipeline_lab_run.checkpoint()
+            if self._pipeline_run is not None:
+                self._pipeline_run.documents.update(documents)
+                await self._pipeline_run.checkpoint()
             else:
-                await save_result_documents(folder_name, documents)
+                await save_result_documents(folder_name, documents, self.result_root)
 
             # 通知前端文件已就绪
             if hasattr(self, '_progress_hooks') and self._current_image_context:
@@ -1159,6 +1189,29 @@ class MangaTranslator:
             config.upscale.upscaler, [ctx.img_colorized], config.upscale.upscale_ratio, self.device
         ))[0]
 
+    async def _run_upscaling_batch(self, configs: list[Config], contexts: list[Context]):
+        if len(configs) != len(contexts):
+            raise ValueError("Upscaling config/context count mismatch")
+        if not configs:
+            return []
+        upscale = configs[0].upscale
+        if any(config.upscale.dict() != upscale.dict() for config in configs[1:]):
+            raise ValueError("Upscaling batch settings must match")
+        images = [context.img_colorized or context.input for context in contexts]
+        if any(image is None for image in images):
+            raise RuntimeError("No image available for upscaling")
+        self._model_usage_timestamps[("upscaling", upscale.upscaler)] = time.time()
+        output = await self._mps_call(
+            dispatch_upscaling,
+            upscale.upscaler,
+            images,
+            upscale.upscale_ratio,
+            self.device,
+        )
+        if len(output) != len(images):
+            raise RuntimeError(f"Upscaler returned {len(output)} pages for {len(images)} inputs")
+        return output
+
     async def _run_detection(self, config: Config, ctx: Context):
         current_time = time.time()
         self._model_usage_timestamps[("detection", config.detector.detector)] = current_time
@@ -1171,6 +1224,37 @@ class MangaTranslator:
             config.detector.det_auto_rotate,
             self.device, self.verbose
         )
+
+    async def _run_detection_batch(self, configs: list[Config], contexts: list[Context]):
+        if len(configs) != len(contexts):
+            raise ValueError("Detection config/context count mismatch")
+        if not configs:
+            return []
+        detector = configs[0].detector
+        if any(config.detector.dict() != detector.dict() for config in configs[1:]):
+            raise ValueError("Detection batch settings must match")
+        images = [context.img_rgb for context in contexts]
+        if any(image is None for image in images):
+            raise RuntimeError("No image canvas available for detection")
+        self._model_usage_timestamps[("detection", detector.detector)] = time.time()
+        output = await self._mps_call(
+            dispatch_detection_batch,
+            detector.detector,
+            images,
+            detector.detection_size,
+            detector.text_threshold,
+            detector.box_threshold,
+            detector.unclip_ratio,
+            detector.det_invert,
+            detector.det_gamma_correct,
+            detector.det_rotate,
+            detector.det_auto_rotate,
+            self.device,
+            self.verbose,
+        )
+        if len(output) != len(images):
+            raise RuntimeError(f"Detector returned {len(output)} pages for {len(images)} inputs")
+        return output
 
     async def _unload_model(self, tool: str, model: str):
         logger.info(f"Unloading {tool} model: {model}")
@@ -1239,6 +1323,32 @@ class MangaTranslator:
             elif 'MANGA_OCR_RESULT_DIR' in os.environ:
                 del os.environ['MANGA_OCR_RESULT_DIR']
 
+        return self._finish_ocr_textlines(textlines, config, ctx)
+
+    @model_operation
+    async def _run_ocr_batch(self, pages: list[tuple[Context, Config]]):
+        if not pages:
+            return []
+        if self.verbose or len({config.ocr.ocr for _, config in pages}) != 1:
+            return [await self._run_ocr(config, ctx) for ctx, config in pages]
+        for _, config in pages:
+            self._model_usage_timestamps[("ocr", config.ocr.ocr)] = time.time()
+        outputs = await self._mps_call(
+            dispatch_ocr_batch,
+            pages[0][1].ocr.ocr,
+            [(ctx.img_rgb, ctx.textlines, config.ocr) for ctx, config in pages],
+            self.device,
+            self.verbose,
+        )
+        if len(outputs) != len(pages):
+            raise RuntimeError("OCR batch returned a different number of page results than inputs")
+        return [
+            self._finish_ocr_textlines(textlines, config, ctx)
+            for (ctx, config), textlines in zip(pages, outputs)
+        ]
+
+    @staticmethod
+    def _finish_ocr_textlines(textlines, config: Config, ctx: Context):
         analyze_source_typography(textlines, ctx.img_rgb)
         new_textlines = []
         for textline in textlines:
@@ -1679,8 +1789,8 @@ class MangaTranslator:
                 print("Don't continue if --save-text is used")  
                 exit(-1)  
 
-        if self._pipeline_lab_run is not None:
-            self._pipeline_lab_run.record_translation(
+        if self._pipeline_run is not None:
+            self._pipeline_run.record_translation(
                 config,
                 [{"index": index, "text": text} for index, text in enumerate(texts)],
                 [{"index": index, "translation": translation} for index, translation in enumerate(translated_sentences)],
@@ -1952,35 +2062,64 @@ class MangaTranslator:
         layout_page(ctx, config, active_font)
         return True
 
-    async def _detect_speech_bubbles(self, config: Config, ctx: Context, report_progress: bool = True):
+    async def _run_bubble_detection_batch(self, configs: list[Config], contexts: list[Context]):
+        if len(configs) != len(contexts):
+            raise ValueError("Bubble detection config/context count mismatch")
+        if not configs:
+            return []
+        bubble_config = configs[0].bubble_detection
+        if any(config.bubble_detection.dict() != bubble_config.dict() for config in configs[1:]):
+            raise ValueError("Bubble detection batch settings must match")
+        images = [context.img_rgb for context in contexts]
+        if any(image is None for image in images):
+            raise RuntimeError("No image canvas available for bubble detection")
+        self._model_usage_timestamps[("bubble_detection", bubble_config.model)] = time.time()
+        output = await self._mps_call(
+            dispatch_bubble_detection_batch, images, bubble_config, self.device
+        )
+        if len(output) != len(images):
+            raise RuntimeError(f"Bubble detector returned {len(output)} pages for {len(images)} inputs")
+        return output
+
+    async def _detect_speech_bubbles(
+        self,
+        config: Config,
+        ctx: Context,
+        report_progress: bool = True,
+        precomputed_detections: list[BubbleDetection] | None = None,
+    ):
         """Run optional bubble detection before translation in every pipeline mode."""
         ctx.bubble_detections = []
         ctx._bubble_detection_done = True
         for region in ctx.text_regions or []:
             if not getattr(region, 'region_id', None):
                 region.region_id = uuid.uuid4().hex
-        if not config.bubble_detection.enabled or getattr(ctx, 'img_rgb', None) is None or not ctx.text_regions:
+        if precomputed_detections is not None:
+            ctx.bubble_detections = precomputed_detections
+        if not config.bubble_detection.enabled or getattr(ctx, 'img_rgb', None) is None:
             return
         try:
-            if report_progress:
-                await self._report_progress('bubble-detection')
-            if hasattr(self, '_model_usage_timestamps'):
-                self._model_usage_timestamps[("bubble_detection", config.bubble_detection.model)] = time.time()
-            if hasattr(detect_bubbles, 'mock_calls') or hasattr(detect_bubbles, 'assert_called'):
-                res = detect_bubbles(ctx.img_rgb, config.bubble_detection)
-                ctx.bubble_detections = await res if asyncio.iscoroutine(res) else res
-            else:
-                ctx.bubble_detections = await self._mps_call(
-                    dispatch_bubble_detection, ctx.img_rgb, config.bubble_detection, self.device
+            if precomputed_detections is None:
+                if report_progress:
+                    await self._report_progress('bubble-detection')
+                if hasattr(self, '_model_usage_timestamps'):
+                    self._model_usage_timestamps[("bubble_detection", config.bubble_detection.model)] = time.time()
+                if hasattr(detect_bubbles, 'mock_calls') or hasattr(detect_bubbles, 'assert_called'):
+                    res = detect_bubbles(ctx.img_rgb, config.bubble_detection)
+                    ctx.bubble_detections = await res if asyncio.iscoroutine(res) else res
+                else:
+                    ctx.bubble_detections = await self._mps_call(
+                        dispatch_bubble_detection, ctx.img_rgb, config.bubble_detection, self.device
+                    )
+            if ctx.text_regions:
+                group_regions = getattr(config.bubble_detection, 'group_regions', False)
+                ctx.text_regions = group_regions_by_bubbles(
+                    ctx.text_regions, ctx.bubble_detections, group=group_regions
                 )
-            group_regions = getattr(config.bubble_detection, 'group_regions', False)
-            ctx.text_regions = group_regions_by_bubbles(
-                ctx.text_regions, ctx.bubble_detections, group=group_regions
-            )
-            for region in ctx.text_regions:
-                if not getattr(region, 'region_id', None):
-                    region.region_id = uuid.uuid4().hex
-            if ctx.bubble_detections and (getattr(self, 'verbose', False) or self._pipeline_lab_run is not None):
+                for region in ctx.text_regions:
+                    if not getattr(region, 'region_id', None):
+                        region.region_id = uuid.uuid4().hex
+            if ctx.bubble_detections and (getattr(self, 'verbose', False) or self._pipeline_run is not None):
                 bubble_mask = np.zeros(ctx.img_rgb.shape[:2], np.uint8)
                 for detection in ctx.bubble_detections:
                     bubble_mask = np.maximum(bubble_mask, np.asarray(detection.mask, dtype=np.uint8))
@@ -1988,7 +2127,7 @@ class MangaTranslator:
             logger.info(
                 'Detected %d speech bubbles; matched %d text regions',
                 len(ctx.bubble_detections),
-                sum(1 for region in ctx.text_regions if getattr(region, '_bubble_mask', None) is not None),
+                sum(1 for region in (ctx.text_regions or []) if getattr(region, '_bubble_mask', None) is not None),
             )
         except Exception as error:
             logger.warning('Speech-bubble detection unavailable; using the existing pipeline: %s', error)
@@ -2060,6 +2199,11 @@ class MangaTranslator:
         current_time = time.time()
         self._model_usage_timestamps[("rendering", config.render.renderer)] = current_time
         active_font = self.font_path or getattr(config.render, 'font_path', None) or get_default_eng_font()
+        cpu_priority = (
+            CPU_PRIORITY_BACKGROUND
+            if getattr(ctx, '_background_batch_render', False)
+            else CPU_PRIORITY_NORMAL
+        )
         bubble_detection_enabled = bool(getattr(getattr(config, 'bubble_detection', None), 'enabled', False))
         if (bubble_detection_enabled
                 and not getattr(ctx, '_bubble_detection_done', False)):
@@ -2071,9 +2215,21 @@ class MangaTranslator:
                 if getattr(region, 'translation', None) and isinstance(region.translation, str):
                     region.translation = transform_text_case(region.translation)
 
-        if getattr(ctx, 'img_rgb', None) is not None and not getattr(ctx, '_bubble_layout_ready', False):
+        pipeline_run = getattr(self, '_pipeline_run', None)
+        layout_stage = next((
+            stage for stage in getattr(pipeline_run, 'manifest', {}).get('stages', [])
+            if stage.get('id') == 'layout'
+        ), None)
+        if layout_stage and layout_stage.get('status') == 'completed':
+            ctx._bubble_layout_ready = True
+
+        if (getattr(ctx, 'img_rgb', None) is not None
+                and not getattr(ctx, '_bubble_layout_ready', False)):
             try:
-                layout_page(ctx, config, active_font)
+                await self._report_progress('layout')
+                await run_cpu_stage(layout_page, ctx, config, active_font, priority=cpu_priority)
+                if self._pipeline_run is not None:
+                    self._pipeline_run.write_json('layout.json', serialize_regions(ctx.text_regions))
             except Exception as error:
                 logger.warning('Bubble layout failed; preserving the existing render path: %s', error)
 
@@ -2082,13 +2238,19 @@ class MangaTranslator:
                 ctx.mask = getattr(ctx, 'bubble_mask', None)
             ctx.img_inpainted = ctx.img_rgb.copy()
 
-        return await render_page(ctx, config, active_font)
+        return await run_cpu_stage(render_page, ctx, config, active_font, priority=cpu_priority)
 
     def _result_path(self, path: str) -> str:
         """
         Returns path to result folder where intermediate images are saved when using verbose flag
         or web mode input/result images are cached.
         """
+        output_override = getattr(self, '_result_path_override', None)
+        if output_override is not None:
+            result_path = os.path.join(os.fspath(output_override), path)
+            os.makedirs(os.path.dirname(result_path), exist_ok=True)
+            return result_path
+
         # 只有在verbose模式下才使用图片级子文件夹
         if self.verbose:
             image_subfolder = self._get_image_subfolder()
@@ -2128,14 +2290,8 @@ class MangaTranslator:
             await ph(state, finished)
 
     async def _report_progress(self, state: str, finished: bool = False):
-        if self._pipeline_lab_run is not None:
-            if self._pipeline_lab_run.is_stop_requested():
-                self._pipeline_lab_run.cancel("Pipeline stopped by user")
-                raise asyncio.CancelledError("Pipeline stopped by user")
-            stage_id = self._pipeline_lab_run.stage_for_progress(state)
-            if stage_id:
-                await self._pipeline_lab_run.wait_for_continue(stage_id, self._emit_progress)
-            run = self._pipeline_lab_run
+        if self._pipeline_run is not None:
+            run = self._pipeline_run
             run.progress(state, finished)
             await run.checkpoint()
             if finished and state == 'finished':
@@ -2143,9 +2299,9 @@ class MangaTranslator:
                 run.refresh()
                 await run.checkpoint()
         await self._emit_progress(state, finished)
-        if finished and state == 'finished' and self._pipeline_lab_run is not None:
-            self._pipeline_lab_run.release_runtime()
-            self._pipeline_lab_run = None
+        if finished and state == 'finished' and self._pipeline_run is not None:
+            self._pipeline_run.release_runtime()
+            self._pipeline_run = None
 
     def _add_logger_hook(self):
         # TODO: Pass ctx to logger hook
@@ -2185,7 +2341,7 @@ class MangaTranslator:
 
     async def prepare(self, image: Image.Image, config: Config) -> Context:
         """
-        Pre-process a single image through inpainting and persist canvas artifacts.
+        Pre-process one image through OCR and persist its canvas for later stages.
         """
         memory_optimization_enabled = not self.disable_memory_optimization
         if memory_optimization_enabled:
@@ -2207,18 +2363,18 @@ class MangaTranslator:
                 image_md5 = self._current_image_context['file_md5']
                 self._save_current_image_context(image_md5)
                 self._current_image_context['started_at'] = datetime.now(timezone.utc).isoformat()
-            self._pipeline_lab_run = PipelineLabRun(
+            self._pipeline_run = PipelineRun(
                 self.result_root, subfolder, image, config
             )
-            self._pipeline_lab_run.translator = self
+            self._pipeline_run.translator = self
             ctx = await self._translate_until_translation(image, config, prepare_canvas=True)
-            if self._pipeline_lab_run is not None:
-                self._pipeline_lab_run.ctx = ctx
+            if self._pipeline_run is not None:
+                self._pipeline_run.ctx = ctx
             if self._current_image_context:
                 ctx.image_context = self._current_image_context.copy()
                 ctx.debug_folder = self._current_image_context['subfolder']
-            if self._pipeline_lab_run is not None:
-                await self._pipeline_lab_run.checkpoint()
+            if self._pipeline_run is not None:
+                await self._pipeline_run.checkpoint()
             if ctx.text_regions and hasattr(ctx, 'cleanup_intermediate'):
                 ctx.cleanup_intermediate(keep_input=True)
             ctx.verbose = self.verbose
@@ -2336,17 +2492,27 @@ class MangaTranslator:
         if getattr(ctx, 'image_context', None):
             self._current_image_context = ctx.image_context.copy()
         folder = getattr(ctx, 'debug_folder', None) or (self._current_image_context.get('subfolder') if self._current_image_context else None)
-        if self._pipeline_lab_run is None and folder:
-            self._pipeline_lab_run = PipelineLabRun.get_or_load(self.result_root, folder)
-            if self._pipeline_lab_run is None:
-                img_in = getattr(ctx, 'input', None) or Image.new('RGB', (1, 1))
-                self._pipeline_lab_run = PipelineLabRun(self.result_root, folder, img_in, config)
-        if self._pipeline_lab_run is not None:
-            self._pipeline_lab_run.ctx = ctx
-            self._pipeline_lab_run.translator = self
+        if self._pipeline_run is None and folder:
+            documents = getattr(ctx, 'result_documents', {}) or {}
+            if 'pipeline_manifest.json' in documents:
+                ctx.result_documents = {
+                    name: document for name, document in documents.items()
+                    if name != 'pipeline_manifest.json'
+                }
+            self._pipeline_run = PipelineRun.get_or_load(self.result_root, folder)
+            if self._pipeline_run is None:
+                self._pipeline_run = PipelineRun.from_documents(
+                    self.result_root, folder, documents
+                )
+                if self._pipeline_run is None:
+                    img_in = getattr(ctx, 'input', None) or Image.new('RGB', (1, 1))
+                    self._pipeline_run = PipelineRun(self.result_root, folder, img_in, config)
+        if self._pipeline_run is not None:
+            self._pipeline_run.ctx = ctx
+            self._pipeline_run.translator = self
             if getattr(ctx, 'translation_duration_ms', None) is not None:
                 try:
-                    trans_stage = self._pipeline_lab_run._stage('translation')
+                    trans_stage = self._pipeline_run._stage('translation')
                     if trans_stage:
                         trans_stage['status'] = 'completed'
                         trans_stage['startedAt'] = getattr(ctx, 'translation_started_at', None) or trans_stage.get('startedAt')
@@ -2368,6 +2534,17 @@ class MangaTranslator:
             logger.error(f'Render error: {e}')
             ctx.translation_error = str(e)
             ctx.result = None
+            run = self._pipeline_run
+            if run is not None:
+                try:
+                    run.fail(str(e))
+                    await run.checkpoint()
+                except Exception as checkpoint_error:
+                    logger.error(f'Could not checkpoint failed render: {checkpoint_error}')
+                finally:
+                    run.release_runtime()
+                    if self._pipeline_run is run:
+                        self._pipeline_run = None
             return ctx
 
     async def render_saved(self, ctx: Context, config: Config) -> Context:
@@ -2472,7 +2649,6 @@ class MangaTranslator:
                 await prepare_upscaling(config.upscale.upscaler)
             await prepare_detection(config.detector.detector)
             await prepare_ocr(config.ocr.ocr, self.device)
-            await prepare_inpainting(config.inpainter.inpainter, self.device)
             await prepare_translation(config.translator.translator_gen)
             if config.colorizer.colorizer != Colorizer.none:
                 await prepare_colorization(config.colorizer.colorizer)
@@ -2538,16 +2714,17 @@ class MangaTranslator:
         if ctx.textlines:
             detection_docs = serialize_regions(ctx.textlines)
             ctx.result_documents['detection.json'] = detection_docs
-            if self._pipeline_lab_run is not None:
-                self._pipeline_lab_run.write_json('detection.json', detection_docs)
+            if self._pipeline_run is not None:
+                self._pipeline_run.write_json('detection.json', detection_docs)
             elif self._current_image_context:
                 await save_result_documents(
                     self._current_image_context['subfolder'],
                     {'detection.json': detection_docs},
+                    self.result_root,
                 )
 
-        if self.verbose and ctx.mask_raw is not None:
-            cv2.imwrite(self._result_path('mask_raw.png'), ctx.mask_raw)
+        if (self.verbose or self._pipeline_run is not None) and ctx.mask_raw is not None:
+            await self._async_imwrite(self._result_path('mask_raw.png'), ctx.mask_raw)
 
         if not ctx.textlines:
             await self._report_progress('skip-no-regions', True)
@@ -2569,12 +2746,13 @@ class MangaTranslator:
         if ctx.textlines:
             ocr_docs = serialize_regions(ctx.textlines)
             ctx.result_documents['ocr.json'] = ocr_docs
-            if self._pipeline_lab_run is not None:
-                self._pipeline_lab_run.write_json('ocr.json', ocr_docs)
+            if self._pipeline_run is not None:
+                self._pipeline_run.write_json('ocr.json', ocr_docs)
             elif self._current_image_context:
                 await save_result_documents(
                     self._current_image_context['subfolder'],
                     {'ocr.json': ocr_docs},
+                    self.result_root,
                 )
 
         if not ctx.textlines:
@@ -2597,12 +2775,13 @@ class MangaTranslator:
         if ctx.text_regions:
             merged_docs = serialize_regions(ctx.text_regions)
             ctx.result_documents['text_regions_merged.json'] = merged_docs
-            if self._pipeline_lab_run is not None:
-                self._pipeline_lab_run.write_json('text_regions_merged.json', merged_docs)
+            if self._pipeline_run is not None:
+                self._pipeline_run.write_json('text_regions_merged.json', merged_docs)
             elif self._current_image_context:
                 await save_result_documents(
                     self._current_image_context['subfolder'],
                     {'text_regions_merged.json': merged_docs},
+                    self.result_root,
                 )
 
         if not ctx.text_regions:
@@ -2615,7 +2794,11 @@ class MangaTranslator:
         # Optional speech-bubble detection runs after OCR merging so every
         # assigned bubble is translated as one text flow.
         await self._detect_speech_bubbles(config, ctx)
-        ctx.bubble_mask = prepare_bubble_masks(ctx.img_rgb, ctx.text_regions)
+        ctx.page_geometry, ctx.bubble_mask = prepare_page_geometry(
+            ctx.img_rgb,
+            ctx.text_regions,
+            padding=int(getattr(config.bubble_detection, "padding", 9)),
+        )
 
         # Apply pre-dictionary after textline merge
         pre_dict = load_dictionary(self.pre_dict)
@@ -2633,76 +2816,41 @@ class MangaTranslator:
         else:
             logger.info("No pre-translation replacements made.")
 
-        # Batch-only pipeline: build and persist the clean canvas before any
-        # remote translation request is made.
+        # Keep the canvas and geometry ready for translation-dependent stages.
         if prepare_canvas and ctx.text_regions:
             merged = serialize_regions(ctx.text_regions)
             ctx.result_documents['text_regions_merged.json'] = merged
-            if getattr(ctx, 'bubble_detections', None):
-                ctx.result_documents['bubble_detections.json'] = serialize_bubble_detections(ctx.bubble_detections)
-            await self._report_progress('mask-generation')
-            bundle = await build_inpaint_masks(
-                image=ctx.img_rgb,
-                detector_textlines=getattr(ctx, 'textlines', None),
-                detector_mask=getattr(ctx, 'mask_raw', None),
-                text_regions=ctx.text_regions or [],
-                bubble_detections=getattr(ctx, 'bubble_detections', None),
-                config=config,
+            bubble_documents = serialize_bubble_detections(
+                getattr(ctx, 'bubble_detections', None) or []
             )
-            ctx.text_mask = bundle.text_mask
-            ctx.bubble_mask = bundle.bubble_cleanup_mask
-            ctx.detector_rescue_mask = bundle.detector_rescue_mask
-            ctx.bubble_residual_mask = bundle.bubble_residual_mask
-            ctx.protected_edge_mask = bundle.protected_edge_mask
-            ctx.mask_bundle = bundle
-            ctx.mask = bundle.final_inpaint_mask
-            ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
-            await self._report_progress('inpainting')
-            ctx.img_inpainted = await self._run_inpainting(config, ctx)
-            ctx.gimp_mask = np.dstack((cv2.cvtColor(ctx.img_inpainted, cv2.COLOR_RGB2BGR), ctx.mask))
+            ctx.result_documents['bubble_detections.json'] = bubble_documents
             if self._current_image_context:
                 await self._async_imwrite(
                     self._result_path('original_canvas.png'),
                     cv2.cvtColor(ctx.img_rgb, cv2.COLOR_RGB2BGR),
                 )
-                await self._async_imwrite(self._result_path('text_mask.png'), ctx.text_mask)
-                await self._async_imwrite(self._result_path('bubble_mask.png'), ctx.bubble_mask)
-                if getattr(ctx, 'detector_rescue_mask', None) is not None:
-                    await self._async_imwrite(self._result_path('detector_rescue_mask.png'), ctx.detector_rescue_mask)
-                if getattr(ctx, 'bubble_residual_mask', None) is not None:
-                    await self._async_imwrite(self._result_path('bubble_residual_mask.png'), ctx.bubble_residual_mask)
-                if getattr(ctx, 'protected_edge_mask', None) is not None:
-                    await self._async_imwrite(self._result_path('protected_bubble_edge.png'), ctx.protected_edge_mask)
-                await self._async_imwrite(self._result_path('mask_final.png'), ctx.mask)
-                await self._async_imwrite(self._result_path('inpaint_mask.png'), ctx.inpaint_mask)
-                if ctx.img_rgb is not None and getattr(ctx, 'mask_bundle', None) is not None:
-                    try:
-                        overlay = create_mask_sources_overlay(ctx.img_rgb, ctx.mask_bundle)
-                        await self._async_imwrite(self._result_path('mask_sources_overlay.png'), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
-                    except Exception as ex:
-                        logger.warning(f"Could not save mask_sources_overlay.png: {ex}")
+                if ctx.bubble_mask is not None:
+                    await self._async_imwrite(self._result_path('bubble_mask.png'), ctx.bubble_mask)
                 if getattr(ctx, 'bubble_detections', None):
                     bd_path = self._result_path('bubble_detections.json')
                     with open(bd_path, 'w', encoding='utf-8') as f:
                         json.dump(serialize_bubble_detections(ctx.bubble_detections), f, indent=2)
-                await self._async_imwrite(
-                    self._result_path('inpainted.png'),
-                    cv2.cvtColor(ctx.img_inpainted, cv2.COLOR_RGB2BGR),
+            ctx.mask = None
+            ctx.inpaint_mask = None
+            saved_docs = {
+                'text_regions_merged.json': merged,
+                'bubble_detections.json': bubble_documents,
+            }
+            if self._pipeline_run is not None:
+                for name, document in saved_docs.items():
+                    self._pipeline_run.write_json(name, document)
+                await self._pipeline_run.checkpoint()
+            elif self._current_image_context:
+                await save_result_documents(
+                    self._current_image_context['subfolder'],
+                    saved_docs,
+                    self.result_root,
                 )
-                await asyncio.to_thread(save_jpeg, ctx.img_inpainted, self._result_path('inpainted.jpg'))
-                saved_docs = {'text_regions_merged.json': merged}
-                if getattr(ctx, 'bubble_detections', None):
-                    saved_docs['bubble_detections.json'] = serialize_bubble_detections(ctx.bubble_detections)
-                if self._pipeline_lab_run is not None:
-                    self._pipeline_lab_run.write_json('text_regions_merged.json', merged)
-                    if getattr(ctx, 'bubble_detections', None):
-                        self._pipeline_lab_run.write_json('bubble_detections.json', serialize_bubble_detections(ctx.bubble_detections))
-                    await self._pipeline_lab_run.checkpoint()
-                else:
-                    await save_result_documents(
-                        self._current_image_context['subfolder'],
-                        saved_docs,
-                    )
             await self._report_progress('awaiting_translation')
 
         # 保存当前图片上下文到ctx中，用于并发翻译时的路径管理
@@ -3492,12 +3640,37 @@ class MangaTranslator:
         if getattr(ctx, 'img_rgb', None) is None and getattr(ctx, 'upscaled', None) is not None:
             ctx.img_rgb, ctx.img_alpha = load_image(ctx.upscaled)
 
+        if not getattr(ctx, 'textlines', None):
+            documents = getattr(ctx, 'result_documents', {}) or {}
+            saved_textlines = (
+                documents.get('ocr.json')
+                or (self._pipeline_run._document('ocr.json') if self._pipeline_run else None)
+                or documents.get('detection.json')
+                or (self._pipeline_run._document('detection.json') if self._pipeline_run else None)
+            )
+            if saved_textlines is not None:
+                ctx.textlines = deserialize_textlines(saved_textlines)
+        if getattr(ctx, 'mask_raw', None) is None:
+            mask_raw_path = self._result_path('mask_raw.png')
+            if os.path.isfile(mask_raw_path):
+                ctx.mask_raw = cv2.imread(mask_raw_path, cv2.IMREAD_GRAYSCALE)
+
         if getattr(ctx, 'bubble_detections', None) is None:
             bd_path = self._result_path('bubble_detections.json')
-            if os.path.exists(bd_path) and getattr(ctx, 'img_rgb', None) is not None:
+            documents = getattr(ctx, 'result_documents', {}) or {}
+            bubble_document = (
+                documents.get('bubble_detections.json')
+                or (self._pipeline_run._document('bubble_detections.json') if self._pipeline_run else None)
+            )
+            if bubble_document is None and os.path.exists(bd_path):
                 try:
                     with open(bd_path, 'r', encoding='utf-8') as f:
-                        bds_raw = json.load(f)
+                        bubble_document = json.load(f)
+                except Exception as e:
+                    logger.warning(f"Failed to load existing bubble_detections.json: {e}")
+            if bubble_document is not None and getattr(ctx, 'img_rgb', None) is not None:
+                try:
+                    bds_raw = bubble_document
                     ctx.bubble_detections = deserialize_bubble_detections(bds_raw, ctx.img_rgb.shape)
                     ctx._bubble_detection_done = True
                     group_regions = getattr(config.bubble_detection, 'group_regions', False)
@@ -3511,11 +3684,9 @@ class MangaTranslator:
                 and not getattr(ctx, '_bubble_detection_done', False)):
             await self._detect_speech_bubbles(config, ctx, report_progress=False)
 
-        # -- Mask refinement (normally already completed by batch preparation)
+        # A detector mask is input to refinement, not a completed inpainting mask.
         if ctx.mask is None:
             mask_path = self._result_path('mask_final.png')
-            if not os.path.exists(mask_path):
-                mask_path = self._result_path('mask_raw.png')
             if os.path.exists(mask_path):
                 try:
                     ctx.mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
@@ -3531,33 +3702,65 @@ class MangaTranslator:
             if ctx.inpaint_mask is None and ctx.mask is not None:
                 ctx.inpaint_mask = ctx.mask.copy()
 
-        if ctx.mask is None and ctx.img_inpainted is None:
+        if ctx.mask is None:
+            if ctx.img_inpainted is not None:
+                logger.info('Discarding cached inpainted image because its erasing mask is missing')
+                ctx.img_inpainted = None
             await self._report_progress('mask-generation')
             try:
-                bundle = await build_inpaint_masks(
+                bundle = await run_cpu_stage(
+                    build_inpaint_masks,
                     image=ctx.img_rgb,
                     detector_textlines=getattr(ctx, 'textlines', None),
                     detector_mask=getattr(ctx, 'mask_raw', None),
                     text_regions=ctx.text_regions or [],
                     bubble_detections=getattr(ctx, 'bubble_detections', None),
                     config=config,
+                    page_geometry=getattr(ctx, 'page_geometry', None),
+                priority=CPU_PRIORITY_BACKGROUND,
                 )
                 ctx.text_mask = bundle.text_mask
                 ctx.bubble_mask = bundle.bubble_cleanup_mask
+                ctx.detector_rescue_mask = bundle.detector_rescue_mask
+                ctx.bubble_residual_mask = bundle.bubble_residual_mask
+                ctx.protected_edge_mask = bundle.protected_edge_mask
+                ctx.mask_bundle = bundle
+                ctx.mask_profile = bundle.profile
+                ctx.page_geometry = bundle.page_geometry
+                if getattr(ctx, "result_documents", None) is not None:
+                    ctx.result_documents["profiling.json"] = bundle.profile
                 ctx.mask = bundle.final_inpaint_mask
                 ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
+                if self.verbose or self._pipeline_run is not None:
+                    for name, mask in (
+                        ('text_mask.png', ctx.text_mask),
+                        ('bubble_mask.png', ctx.bubble_mask),
+                        ('detector_rescue_mask.png', ctx.detector_rescue_mask),
+                        ('bubble_residual_mask.png', ctx.bubble_residual_mask),
+                        ('protected_bubble_edge.png', ctx.protected_edge_mask),
+                        ('mask_final.png', ctx.mask),
+                        ('inpaint_mask.png', ctx.inpaint_mask),
+                    ):
+                        if mask is not None:
+                            await self._async_imwrite(self._result_path(name), mask)
+                    if self._pipeline_run is not None:
+                        self._pipeline_run.write_json('profiling.json', bundle.profile)
+                        self._pipeline_run.refresh()
             except Exception as e:  
                 logger.error(f"Error during mask-generation:\n{traceback.format_exc()}")  
                 raise
 
         if getattr(ctx, 'text_regions', None) and getattr(ctx, 'img_rgb', None) is not None and not getattr(ctx, '_bubble_layout_ready', False):
             try:
+                await self._report_progress('layout')
                 transform_text_case = getattr(config.render, "transform_text_case", None)
                 if transform_text_case:
                     for region in (ctx.text_regions or []):
                         if getattr(region, "translation", None) and isinstance(region.translation, str):
                             region.translation = transform_text_case(region.translation)
-                layout_page(ctx, config, self.font_path)
+                await run_cpu_stage(layout_page, ctx, config, self.font_path, priority=CPU_PRIORITY_BACKGROUND)
+                if self._pipeline_run is not None:
+                    self._pipeline_run.write_json('layout.json', serialize_regions(ctx.text_regions))
             except Exception as error:
                 logger.warning('Production layout failed; preserving the existing render path: %s', error)
 
@@ -3572,7 +3775,7 @@ class MangaTranslator:
                 logger.error(f"Error saving debug image (mask_final.png): {e}")
                 logger.debug(f"Exception details: {traceback.format_exc()}")
 
-        # -- Inpainting (normally already completed by batch preparation)
+        # -- Inpainting
         if ctx.img_inpainted is None:
             await self._report_progress('inpainting')
             try:
@@ -3580,6 +3783,10 @@ class MangaTranslator:
             except Exception as e:
                 logger.error(f"Error during inpainting:\n{traceback.format_exc()}")
                 raise
+            if ctx.img_inpainted is not None and (self.verbose or self._pipeline_run is not None):
+                await asyncio.to_thread(
+                    save_jpeg, ctx.img_inpainted, self._result_path('inpainted.jpg')
+                )
         if ctx.mask is not None and ctx.img_inpainted is not None:
             ctx.gimp_mask = np.dstack((cv2.cvtColor(ctx.img_inpainted, cv2.COLOR_RGB2BGR), ctx.mask))
 

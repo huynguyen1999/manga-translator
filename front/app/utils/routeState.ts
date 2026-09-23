@@ -1,4 +1,4 @@
-export type AppView = 'studio' | 'gallery' | 'pipeline' | 'search';
+export type AppView = 'studio' | 'gallery' | 'search';
 export type OverlayType = 'none' | 'reader' | 'viewer' | 'editor';
 export type GallerySection = 'manga' | 'series';
 export type GallerySort = 'alpha-asc' | 'alpha-desc' | 'date-asc' | 'date-desc';
@@ -42,18 +42,10 @@ export function parseAppPath(pathname: string, search = ''): ParsedRoute {
   const cleanPath = (pathname || '/').replace(/\/+$/, '') || '/';
   const query = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
 
-  // Pipeline lab
+  // Search diagnostics
   if (cleanPath === '/search-lab') {
     return { view: 'search', overlay: 'none', rawPath: cleanPath };
   }
-  if (cleanPath === '/pipeline-lab') {
-    return {
-      view: 'pipeline',
-      overlay: 'none',
-      rawPath: cleanPath,
-    };
-  }
-
   // Reader overlay: /read?manga=...
   if (cleanPath === '/read') {
     const manga = query.get('manga')?.trim() || '';
@@ -206,13 +198,12 @@ export function getLegacyRedirect(pathname: string, search = ''): string | null 
 
 /**
  * Validates the prior route for explicit modal close.
- * Only internal base routes (/gallery, /gallery/manga/..., /pipeline-lab, /studio) are allowed. Fallbacks to /gallery.
+ * Only internal base routes (/gallery, /gallery/manga/..., /studio) are allowed. Fallbacks to /gallery.
  */
 export function validatePriorRoute(from?: string | null, fallback = '/gallery'): string {
   if (!from || typeof from !== 'string') return fallback;
   const clean = from.trim();
   if (clean.startsWith('/studio')) return '/studio';
-  if (clean.startsWith('/pipeline-lab')) return '/pipeline-lab';
   if (clean === '/search-lab') return '/search-lab';
   if (clean.startsWith('/gallery/manga/')) return clean;
   if (clean.startsWith('/gallery/series/')) return clean;

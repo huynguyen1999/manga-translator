@@ -257,7 +257,7 @@ class BubbleLayoutTests(unittest.TestCase):
         cv2.ellipse(mask, (150, 125), (95, 110), 0, 0, 360, 255, -1)
         translator = MangaTranslator.__new__(MangaTranslator)
         translator._progress_hooks = []
-        translator._pipeline_lab_run = None
+        translator._pipeline_run = None
         region = block(160)
         ctx = Context(img_rgb=image, text_regions=[region])
         config = Config(bubble_detection={'enabled': True})
@@ -270,6 +270,33 @@ class BubbleLayoutTests(unittest.TestCase):
 
         self.assertEqual(len(ctx.bubble_detections), 1)
         self.assertIs(ctx.text_regions[0]._bubble_mask, mask)
+
+    def test_detector_result_survives_missing_text_regions(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from manga_translator.config import Config
+        from manga_translator.detection.bubble import BubbleDetection
+        from manga_translator.manga_translator import MangaTranslator
+        from manga_translator.utils import Context
+
+        image = page()
+        detections = [BubbleDetection(np.ones(image.shape[:2], np.uint8), 0.9)]
+        translator = MangaTranslator.__new__(MangaTranslator)
+        translator._model_usage_timestamps = {}
+        translator._pipeline_run = None
+        translator.device = "cpu"
+        translator._mps_call = AsyncMock(return_value=detections)
+        ctx = Context(img_rgb=image, text_regions=None)
+
+        asyncio.run(translator._detect_speech_bubbles(
+            Config(bubble_detection={"enabled": True}),
+            ctx,
+            report_progress=False,
+        ))
+
+        translator._mps_call.assert_awaited_once()
+        self.assertEqual(ctx.bubble_detections, detections)
 
     def test_detector_bubble_places_english_from_vertical_ocr_region(self):
         image = page()
@@ -368,7 +395,7 @@ class BubbleLayoutTests(unittest.TestCase):
         translator = MangaTranslator.__new__(MangaTranslator)
         translator.font_path = FONT
         translator._model_usage_timestamps = {}
-        translator._pipeline_lab_run = None
+        translator._pipeline_run = None
         region = block(160, "First")
         other = block(120, "Second")
         ctx = Context(img_rgb=image, img_inpainted=None,

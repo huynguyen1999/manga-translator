@@ -5,8 +5,7 @@ import { apiUrl } from "@/utils/api";
 import { languageOptions } from "@/config";
 import { resultFolderFromUrl } from "@/utils/resultPaths";
 import { countOriginalTextRegions } from "@/utils/textRegions";
-import type { FinishedImage, TranslationSettings } from "@/types";
-import type { PipelineLabManifest } from "@/utils/pipelineLab";
+import type { FinishedImage, PipelineRunManifest, PipelineRunStage, TranslationSettings } from "@/types";
 
 export const formatElapsedTime = (durationMs?: number | null): string => {
   if (durationMs == null || !Number.isFinite(durationMs) || durationMs < 0) return "—";
@@ -177,7 +176,7 @@ export const resolveTranslatorEngine = (translator: unknown): string => {
 export const resolveTranslatorModel = (
   translator: unknown,
   settings: Partial<TranslationSettings> | null | undefined,
-  manifest: PipelineLabManifest | null | undefined,
+  manifest: PipelineRunManifest | null | undefined,
   translationDetail: Record<string, unknown> | null | undefined,
 ): string => {
   const detailTranslator = recordValue(translationDetail?.translator);
@@ -263,7 +262,7 @@ export interface ResolvedPipelineStepSettings {
 
 export const resolvePipelineStepSettings = (
   settings: Partial<TranslationSettings> | null | undefined,
-  manifest: PipelineLabManifest | null | undefined,
+  manifest: PipelineRunManifest | null | undefined,
   translationDetail: Record<string, unknown> | null | undefined,
 ): ResolvedPipelineStepSettings => {
   const manifestConfig = recordValue(manifest?.config);
@@ -453,7 +452,7 @@ export const timestampTooltip = (value?: string | number | Date | null): string 
 };
 
 export const resolveTranslationTiming = (
-  manifest: PipelineLabManifest | null | undefined,
+  manifest: PipelineRunManifest | null | undefined,
   finishedAt?: string | number | Date | null,
   startedAt?: string | number | Date | null,
   durationMs?: number | null,
@@ -475,6 +474,37 @@ export const resolveTranslationTiming = (
       ? endMs - startMs
       : stageDuration || null,
   };
+};
+
+export const resolveStagesToRetry = (
+  stages: PipelineRunStage[] | undefined,
+  selectedStageId: string,
+): string[] => {
+  const canonical = (id: string) => ({
+    upscaling: "upscale",
+    textline_merge: "text_grouping",
+  }[id] ?? id);
+  const selected = canonical(selectedStageId);
+  if (!stages) return [];
+  const manifestStages = new Map(stages.map((stage) => [canonical(stage.id), stage]));
+  if (!manifestStages.has(selected)) return [];
+  const affected = new Set([selected]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [stageId, stage] of manifestStages) {
+      const required = (stage.dependsOn || []).map(canonical);
+      if (!affected.has(stageId) && required.some((id) => affected.has(id))) {
+        affected.add(stageId);
+        changed = true;
+      }
+    }
+  }
+  return Array.from(manifestStages)
+    .filter(([stageId]) => affected.has(stageId))
+    .map(([, stage]) => stage)
+    .flatMap((stage) => !stage || stage.status === "skipped" ? [] : [stage])
+    .map((stage) => stage.label || stage.id);
 };
 
 export const shouldLoadTranslationArtifacts = (sourceType?: FinishedImage["sourceType"]): boolean =>
@@ -549,6 +579,7 @@ export interface PageDetailModalProps {
   onDelete?: (image: FinishedImage) => void;
   onEdit?: (image: FinishedImage) => void;
   onRetry?: (image: FinishedImage) => void | Promise<void>;
+  onRetryFromStage?: (image: FinishedImage, stageId: string) => void | Promise<void>;
   onRerender?: (image: FinishedImage) => void | Promise<void>;
   titlePrefix?: string;
 }
@@ -563,6 +594,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   onDelete,
   onEdit,
   onRetry,
+  onRetryFromStage,
   onRerender,
   titlePrefix = "Page Detail",
 }) => {
@@ -576,9 +608,12 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
 
   const [isRetrying, setIsRetrying] = useState(false);
   const [retryStatus, setRetryStatus] = useState<"queued" | "error" | null>(null);
+  const [selectedRetryStage, setSelectedRetryStage] = useState<string | null>(null);
+  const [isRetryingFromStage, setIsRetryingFromStage] = useState(false);
+  const [retryFromStageError, setRetryFromStageError] = useState<string | null>(null);
   const [isRerendering, setIsRerendering] = useState(false);
   const [rerenderStatus, setRerenderStatus] = useState<"queued" | "error" | null>(null);
-  const [pipelineManifest, setPipelineManifest] = useState<PipelineLabManifest | null>(null);
+  const [pipelineManifest, setPipelineManifest] = useState<PipelineRunManifest | null>(null);
   const [isPipelineTimingLoading, setIsPipelineTimingLoading] = useState(false);
   const [translationDetail, setTranslationDetail] = useState<Record<string, unknown> | null>(null);
   const [professionalAudit, setProfessionalAudit] = useState<ProfessionalTranslationAudit | null>(null);
@@ -611,6 +646,9 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
     setOriginalRegionCount(null);
     setIsRetrying(false);
     setRetryStatus(null);
+    setSelectedRetryStage(null);
+    setIsRetryingFromStage(false);
+    setRetryFromStageError(null);
     setIsRerendering(false);
     setRerenderStatus(null);
   }, [image.id, image.folder, image.sourceType]);
@@ -650,7 +688,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
     if (!resolvedFolder || !shouldLoadTranslationArtifacts(image.sourceType)) return;
 
     setIsPipelineTimingLoading(true);
-    fetch(apiUrl(`/pipeline-lab/runs/${encodeURIComponent(resolvedFolder)}/manifest`), {
+    fetch(apiUrl(`/pipeline-runs/${encodeURIComponent(resolvedFolder)}/manifest`), {
       cache: "no-store",
     })
       .then(async (response) => {
@@ -660,7 +698,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
         });
         return fallbackRes.ok ? fallbackRes.json() : null;
       })
-      .then((manifest: PipelineLabManifest | null) => {
+      .then((manifest: PipelineRunManifest | null) => {
         if (!cancelled && manifest) setPipelineManifest(manifest);
       })
       .catch(() => {})
@@ -766,6 +804,23 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
     }
   }, [image, isRetrying, onRetry, retryStatus]);
 
+  const handleRetryFromStage = useCallback(async () => {
+    if (!selectedRetryStage || !onRetryFromStage || isRetryingFromStage) return;
+    setIsRetryingFromStage(true);
+    setRetryFromStageError(null);
+    setRetryStatus(null);
+    try {
+      await onRetryFromStage(image, selectedRetryStage);
+      setRetryStatus("queued");
+      setSelectedRetryStage(null);
+    } catch (error) {
+      setRetryStatus("error");
+      setRetryFromStageError(error instanceof Error ? error.message : "Could not queue this stage retry.");
+    } finally {
+      setIsRetryingFromStage(false);
+    }
+  }, [image, isRetryingFromStage, onRetryFromStage, selectedRetryStage]);
+
   const handleRerender = useCallback(async () => {
     if (!onRerender || isRerendering || rerenderStatus === "queued") return;
     setIsRerendering(true);
@@ -849,6 +904,10 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   const engine = stepSettings.translation.engine;
   const model = stepSettings.translation.model;
   const timing = resolveTranslationTiming(pipelineManifest, image.finishedAt, image.startedAt, image.durationMs);
+  const selectedRetryStageData = pipelineManifest?.stages.find((stage) => stage.id === selectedRetryStage);
+  const stagesToRetry = selectedRetryStage
+    ? resolveStagesToRetry(pipelineManifest?.stages, selectedRetryStage)
+    : [];
   const originalTextAvailable = Boolean(
     image.hasTextRegions || image.textRegionsUrl || (bubbleCount !== null && bubbleCount > 0),
   );
@@ -1362,26 +1421,90 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                                 Loading timings…
                               </div>
                             ) : pipelineManifest?.stages?.length ? (
-                              <div className="space-y-1">
-                                {pipelineManifest.stages.map((stage) => (
-                                  <div
-                                    key={stage.id}
-                                    className="flex items-center justify-between gap-3 rounded-lg bg-black/20 px-3 py-2"
-                                  >
-                                    <div className="min-w-0">
-                                      <div className="truncate text-xs font-medium text-zinc-200">
-                                        {stage.label || stage.id}
+                              <>
+                                <div className="space-y-1">
+                                  {pipelineManifest.stages.map((stage) => {
+                                    const canRetry = Boolean(
+                                      onRetryFromStage
+                                      && stage.id !== "input"
+                                      && stage.status !== "skipped"
+                                      && !["running", "paused"].includes(pipelineManifest.status),
+                                    );
+                                    return (
+                                      <div
+                                        key={stage.id}
+                                        className={`flex items-center justify-between gap-3 rounded-lg px-3 py-2 ${
+                                          selectedRetryStage === stage.id ? "bg-indigo-500/15 ring-1 ring-indigo-400/40" : "bg-black/20"
+                                        }`}
+                                      >
+                                        <div className="min-w-0">
+                                          <div className="truncate text-xs font-medium text-zinc-200">
+                                            {stage.label || stage.id}
+                                          </div>
+                                          <div className="mt-0.5 text-xs capitalize text-zinc-400">
+                                            {stage.status}
+                                          </div>
+                                        </div>
+                                        <div className="flex shrink-0 items-center gap-2">
+                                          <span className="font-mono text-xs text-indigo-200">
+                                            {formatElapsedTime(stage.durationMs)}
+                                          </span>
+                                          {onRetryFromStage && stage.id !== "input" && stage.status !== "skipped" && (
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setSelectedRetryStage(stage.id);
+                                                setRetryFromStageError(null);
+                                              }}
+                                              disabled={!canRetry || isRetryingFromStage}
+                                              aria-pressed={selectedRetryStage === stage.id}
+                                              aria-label={`Retry from ${stage.label || stage.id}`}
+                                              title="Choose this stage and its downstream stages to run again"
+                                              className="inline-flex min-h-7 items-center gap-1 rounded-md border border-indigo-400/30 px-2 text-xs font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20 focus-visible:outline-2 focus-visible:outline-indigo-300 disabled:cursor-not-allowed disabled:opacity-50"
+                                            >
+                                              <Icon icon="carbon:renew" className="h-3 w-3" />
+                                              <span>Retry</span>
+                                            </button>
+                                          )}
+                                        </div>
                                       </div>
-                                      <div className="mt-0.5 text-xs capitalize text-zinc-400">
-                                        {stage.status}
-                                      </div>
+                                    );
+                                  })}
+                                </div>
+                                {selectedRetryStage && selectedRetryStageData && onRetryFromStage && (
+                                  <section className="mt-3 rounded-lg border border-indigo-400/30 bg-indigo-500/10 p-3" aria-label="Stage retry plan">
+                                    <h4 className="text-xs font-semibold text-indigo-100">
+                                      Retry from {selectedRetryStageData.label || selectedRetryStageData.id}?
+                                    </h4>
+                                    <p className="mt-1 text-xs leading-5 text-indigo-100">
+                                      Stages to run: {stagesToRetry.join(" → ") || "No stages available"}.
+                                    </p>
+                                    <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => setSelectedRetryStage(null)}
+                                        disabled={isRetryingFromStage}
+                                        className="min-h-8 rounded-md px-2.5 text-xs font-medium text-zinc-300 hover:bg-white/10 focus-visible:outline-2 focus-visible:outline-zinc-300 disabled:opacity-50"
+                                      >
+                                        Cancel
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleRetryFromStage()}
+                                        disabled={!stagesToRetry.length || isRetryingFromStage}
+                                        aria-busy={isRetryingFromStage}
+                                        className="inline-flex min-h-8 items-center gap-1.5 rounded-md bg-indigo-600 px-3 text-xs font-semibold text-white transition-colors hover:bg-indigo-500 focus-visible:outline-2 focus-visible:outline-indigo-300 disabled:cursor-wait disabled:opacity-60"
+                                      >
+                                        <Icon icon="carbon:renew" className={`h-3.5 w-3.5 ${isRetryingFromStage ? "animate-spin" : ""}`} />
+                                        {isRetryingFromStage ? "Queueing…" : "Queue retry"}
+                                      </button>
                                     </div>
-                                    <span className="shrink-0 font-mono text-xs text-indigo-200">
-                                      {formatElapsedTime(stage.durationMs)}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
+                                    {retryFromStageError && (
+                                      <p className="mt-2 text-xs text-rose-300" role="alert">{retryFromStageError}</p>
+                                    )}
+                                  </section>
+                                )}
+                              </>
                             ) : (
                               <div className="py-2 text-xs leading-5 text-zinc-400">
                                 No pipeline timing data is available for this page.

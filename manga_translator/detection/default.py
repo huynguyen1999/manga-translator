@@ -13,7 +13,7 @@ from typing import List, Tuple
 
 from .default_utils.DBNet_resnet34 import TextDetection as TextDetectionDefault
 from .default_utils import imgproc, dbnet_utils, craft_utils
-from .common import OfflineDetector
+from .common import OfflineDetector, dbnet_detect_batch
 from ..utils import TextBlock, Quadrilateral, det_rearrange_forward
 
 _GLOBAL_MODEL = None
@@ -75,6 +75,30 @@ class DefaultDetector(OfflineDetector):
 
     async def _unload(self):
         del self.model
+
+    async def _detect_batch(self, images, detect_size, text_threshold, box_threshold, unclip_ratio, verbose=False):
+        output = [None] * len(images)
+        eligible = []
+        for index, image in enumerate(images):
+            height, width = image.shape[:2]
+            long_side, short_side = max(height, width), min(height, width)
+            if long_side / detect_size > 2.5 and long_side / short_side > 3:
+                output[index] = await self._detect(
+                    image, detect_size, text_threshold, box_threshold, unclip_ratio, verbose
+                )
+            else:
+                eligible.append((index, image))
+        if eligible:
+            forward = partial(det_batch_forward_default, model=self.model)
+            results = dbnet_detect_batch(
+                [image for _, image in eligible], forward, self.device, detect_size,
+                text_threshold, box_threshold, unclip_ratio,
+                interpolation=cv2.INTER_LINEAR,
+                blur_before_resize=False,
+            )
+            for (index, _), result in zip(eligible, results):
+                output[index] = result
+        return output
 
     async def _infer(self, image: np.ndarray, detect_size: int, text_threshold: float, box_threshold: float,
                      unclip_ratio: float, verbose: bool = False):

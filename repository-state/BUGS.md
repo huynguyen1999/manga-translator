@@ -2,6 +2,160 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-23 — Group reruns used stale page metadata for group identity
+
+- Symptom: Saving a rerun batch warned that its item's group differed from the page's PostgreSQL group.
+- Root cause: `group_pages()` omitted the relational group identity, and group-wide reruns preferred `meta.mangaGroupId`; old page metadata could therefore seed a rerun item with a stale group ID.
+- Fix: Return the joined PostgreSQL group ID/title from `group_pages()` and use those canonical fields when building rerun items.
+- Prevention: Derive group identity from the relational page row; metadata is a compatibility payload and may lag.
+
+## 2026-09-23 — Bubble detector results were discarded when a page had no text regions
+
+- Symptom: Bubble detection logged `NoneType object is not iterable` and claimed to be unavailable on pages whose `text_regions` was `None`.
+- Root cause: The success log counted matched regions by iterating `ctx.text_regions` without handling `None`; its exception handler then erased successful bubble detections.
+- Fix: Count over an empty list when there are no text regions, preserving the detector output.
+- Prevention: Optional diagnostic metrics must tolerate empty or absent pipeline data and must not invalidate successful stage results.
+
+## 2026-09-23 — Checkpointed batch rendering repeated the layout solver
+
+- Symptom: Batch logs showed layout after inpainting, and pages appeared stalled while the UI said they were waiting for batch AI.
+- Root cause: Layout ran after mask generation, but its checkpoint reload did not restore the saved mask. Later, rendering rebuilt a fresh `Context` and did not restore `_bubble_layout_ready`, rerunning the expensive solver. Log IDs used a shared prefix, obscuring per-page ordering, and the waiting badge described the former inpaint-before-translation flow.
+- Fix: Layout reloads the persisted mask and declares that dependency; rendering trusts a completed persisted layout stage; per-page log/task IDs use unique suffixes; and the badge says pages are prepared and waiting for batch translation.
+- Prevention: Restore required artifacts and ephemeral context flags from persisted stage state before downstream retries.
+
+## 2026-09-23 — CPU lane workers were garbage-collected while idle
+
+- Symptom: Asyncio logged `Task was destroyed but it is pending` for idle `_CpuLane._work()` tasks; CPU-backed stages could then lose their worker lane.
+- Root cause: The per-loop executor cache held only a weak reference to each executor, leaving its worker tasks without a strong owner after a request completed.
+- Fix: Make the event loop own its CPU executor and close both lanes during server and in-process executor shutdown.
+- Prevention: Keep lane-worker lifetime tied to the event loop and test collection plus explicit shutdown.
+
+## 2026-09-23 — Bubble detection stage depended on grouped OCR regions
+
+- Symptom: Moving bubble detection before text grouping would produce an empty bubble artifact and skip the detector.
+- Root cause: `_detect_speech_bubbles()` returned early when `ctx.text_regions` was empty, even though the detector only needs the page image.
+- Fix: Run bubble inference from the image alone, then apply saved detections when text grouping runs; reload those detections for mask generation.
+- Prevention: Keep bubble inference image-scoped and apply region association only after grouped text regions exist.
+
+## 2026-09-23 — Checkpointed textless pages failed while saving final metadata
+
+- Symptom: A batch page with no detected text failed after detection with `TypeError: 'NoneType' object is not a mapping`.
+- Root cause: Reconstructed `PipelineRun` contexts do not initialize `result_documents`, but `_revert_upscale()` expanded that optional field as a mapping while finalizing textless pages.
+- Fix: Treat missing result documents as an empty mapping when assembling the final documents.
+- Prevention: Cover `_revert_upscale()` with a checkpoint context that has no `result_documents`.
+
+## 2026-09-23 — Checkpointed image stages were skipped and requeued forever
+
+- Symptom: Individual batch pages could remain on one pipeline step while their elapsed time repeatedly restarted.
+- Root cause: The per-page retry body sat outside the executor callback; its context guard ran before the callback initialized that context, so the pending stage was never executed and was queued again.
+- Fix: Run the retry body inside the in-process executor callback; cover that the stage executes there and advances the item.
+- Prevention: Keep page context setup and stage execution together on the executor loop.
+
+## 2026-09-23 — Checkpoint CPU work competed with interactive Studio work
+
+- Symptom: Mask and layout checkpoint retries could occupy the CPU lane reserved for Studio interactions.
+- Root cause: Their normal-priority requests were routed to the interactive lane, while the background lane remained idle.
+- Fix: Run checkpoint mask/layout stages at background priority; retain normal priority for interactive and direct work.
+- Prevention: Assign priority at the batch scheduler boundary, not from the stage's resource class alone.
+
+## 2026-09-23 — Concurrent batch detail refreshes caused redundant API reads
+
+- Symptom: Active batches emitted several `GET /batches/{id}` requests around every progress update.
+- Root cause: The global batch SSE handler and each expanded `BatchCard` both fetched details when `updatedAt` changed; single-flight coalescing only joined overlapping requests, while these fast reads completed before the next trigger.
+- Fix: Send changed full batch details as an SSE event, apply them to loaded/completed batches, and fetch from REST only when a user first expands a batch with missing details.
+- Prevention: Do not turn summary timestamps into detail-fetch triggers; stream the changed detail payload to existing subscribers.
+
+## 2026-09-23 — Batch reads trusted stale manifest item state
+
+- Symptom: A batch snapshot could report an older page status or stage than the relational `batch_items` row.
+- Root cause: PostgreSQL reads decoded `batches.manifest` and only overlaid page identity fields; status, stage, and item payload were read back from the same duplicated snapshot.
+- Fix: Hydrate batch and item state from relational columns, persist `stage_started_at`, and keep the manifest for compatibility metadata.
+- Prevention: Read mutable batch/page state from relational rows; treat manifest JSON as a compatibility payload, not the authority.
+
+## 2026-09-23 — Grouped page stages displayed the wrong progress label
+
+- Symptom: Pages claimed for batched detection were reported as OCR in the item status.
+- Root cause: The shared grouped-stage claim path hardcoded `stage="ocr"` for every stage.
+- Fix: Store the actual claimed stage and cover detection claims in the scheduler test.
+- Prevention: Derive display state from the stage being claimed instead of the helper's default stage.
+
+## 2026-09-23 — Shared detector methods were shadowed by a batch helper
+
+- Symptom: The new batch wrapper would lose access to shared detector postprocessing methods at runtime.
+- Root cause: A module-level DBNet batch helper was inserted before the end of `CommonDetector`, leaving following methods nested inside the helper.
+- Fix: Moved the helper after the detector classes and added a regression check through `detect_batch()`.
+- Prevention: Keep class-boundary checks and exercise shared postprocessing when adding module-level helpers.
+
+## 2026-09-23 — Moved pipeline run imports resolved under the wrong package
+
+- Symptom: Serialization and rerun tests failed to import `manga_translator.pipeline.rendering` after moving the run manager into `manga_translator.pipeline`.
+- Root cause: Inline relative imports still treated `run.py` as if it were directly under `manga_translator`.
+- Fix: Updated rendering and detection imports to ascend from the pipeline package.
+- Prevention: Audit inline imports as well as top-level imports whenever a Python module moves between packages.
+
+## 2026-09-23 — Independent pipeline stages were marked skipped by display order
+
+- Symptom: Preparation can finish inpainting before grouped translation, but the run manifest marked translation and layout skipped; the later layout progress could not reopen its skipped record.
+- Root cause: `PipelineRun._begin()` treated manifest order as a strict execution order even though stages can run on independent branches.
+- Fix: Keep unvisited stages pending while work continues and mark remaining stages skipped only when the run finishes.
+- Prevention: Do not infer dependency completion from stage-list position; use actual stage execution and the pipeline dependency graph.
+
+## 2026-09-23 — Checkpoint retries reran batch preparation
+
+- Symptom: A page retried from a saved pipeline stage entered full preparation again.
+- Root cause: The mutable-store scheduler always dispatched queued translation items to `_process_prepare_item`, even when the item carried a saved result folder or retry stage.
+- Fix: Route checkpoint-backed items through the resume processor, which reuses the saved stage checkpoint.
+- Prevention: Test retry dispatch through `_launch_available`; direct tests of the resume processor alone do not cover scheduler routing.
+
+## 2026-09-23 — In-progress batch thumbnails requested missing final images
+
+- Symptom: Pages still in preparation showed broken thumbnails in the Jobs drawer.
+- Root cause: `TranslatingSection` built a final-result URL for every item with a result folder, including unfinished items whose final image had not been written.
+- Fix: Only expose the result preview after an item reaches `finished`; in-progress rows use their source image.
+- Prevention: Treat a result folder as metadata, not proof that its final artifact exists; cover preview selection for unfinished and completed states.
+
+## 2026-09-23 — Concurrent batch claims could overwrite each other
+
+- Symptom: Separate server workers could both read one queued batch item and overwrite scheduler progress with stale manifest snapshots.
+- Root cause: PostgreSQL batch mutations used only an in-process lock and did not lock the database manifest row across read-modify-write.
+- Fix: Lock the batch row with `FOR UPDATE` and persist the mutation on the same transaction/connection.
+- Prevention: Keep scheduler state transitions inside row-locked PostgreSQL mutations; use stage-row claims if future workers need finer-grained scheduling.
+
+## 2026-09-23 — Professional translation could cross failed story prerequisites
+
+- Symptom: A professional batch could translate later pages after one page in a configured story failed preparation, shifting the story plan and potentially combining unrelated stories.
+- Root cause: The scheduler removed failed pages before evaluating the professional translation barrier, then selected all remaining ready pages as one group.
+- Fix: Claim complete configured story segments independently, block any segment containing a failed/completed partial prerequisite, and remap its story/archive ranges to the selected group.
+- Prevention: Evaluate professional readiness against the full logical batch, including failed pages, before forming model input groups.
+
+## 2026-09-23 — Checkpoint documents ignored the configured result root
+
+- Symptom: `MangaTranslator.prepare()` attempted to write pipeline documents to `/Volumes/storage/data/results` during a test using a temporary result directory.
+- Root cause: `save_result_documents()` used the global server result root whenever no database saver was installed, even when its caller owned a different result root.
+- Fix: Accept an optional result root and pass the translator or pipeline-run root at each call site.
+- Prevention: Keep sidecar document writes rooted beside the image artifacts that own them; test with a non-default result root.
+
+## 2026-09-23 — Stale page geometry could survive bubble reassignment
+
+- Symptom: A reused `PageGeometry` could retain a removed or replaced bubble mask.
+- Root cause: `PageGeometry.matches()` treated maskless regions as wildcards and checked only the current regions, so removed assignments were not detected.
+- Fix: Require the current region-to-mask identity map to equal the prepared map; cover removal and replacement in the reuse regression test.
+- Prevention: Cache validation must compare the complete input identity set, including removed inputs.
+
+## 2026-09-23 — Mask profiling treated NumPy lines as a boolean
+
+- Symptom: Profiling failed with NumPy's ambiguous truth-value error while counting OCR lines.
+- Root cause: Workload counting used boolean fallback on a NumPy array.
+- Fix: Check for `None` explicitly before taking the array length.
+- Prevention: Never use NumPy arrays in boolean fallback expressions; use explicit `None`/size checks.
+
+## 2026-09-23 — Professional analysis prompt raised NameError
+
+- Symptom: Translation failed with `name 'default' is not defined` before the analysis request.
+- Root cause: A literal schema example inside an f-string used unescaped braces, so Python evaluated `default` as an expression.
+- Fix: Escape the example's braces and add a focused analysis-prompt regression test.
+- Prevention: Escape literal JSON/schema braces in f-string prompts; exercise prompt construction in tests.
+
 ## 2026-09-23 — Bubble-wide cleanup erased speech-bubble outlines
 
 - Symptom: Recent pre-inpainting cleanup could erase or damage a speech-bubble outline when text sat close to the border.
@@ -273,8 +427,8 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 
 - Symptom: When a translation job finished in the translation batch sidebar, clicking on a batch page image opened the viewer with the original image instead of the translated result until manually refreshing the browser.
 - Root cause: (1) `subscribeServerBatches` SSE handler received `ServerBatchSummary[]` without items and merged them into `translationBatches`, preserving stale in-memory items with `queued` status and missing `resultUrl`/`folder` without auto-refreshing detailed batch items; (2) `loadTranslationBatchDetails` discarded duplicate calls when an in-flight fetch was pending without queuing a post-completion fetch; (3) `BatchCard` skipped detail refreshes on expansion because `hasDetails` was initialized to true on batch upload; (4) `ItemRow` defaulted to original image preview source when items lacked `finished` status.
-- Fix: Auto-refresh batch details in `subscribeServerBatches` whenever active/loaded batches receive summary updates or transition to `completed`, add re-fetch queueing in `loadTranslationBatchDetails`, trigger fresh detail loads on `BatchCard` expansion when items are incomplete, and pass accurate file names to `onOpenLightbox`.
-- Prevention: Ensure summary SSE streams proactively rehydrate loaded item arrays upon status transitions and cover batch item lifecycle transitions with automated tests.
+- Fix: Deliver changed full batch details through `subscribeServerBatches`, fetch details only when a batch is expanded without them, and pass accurate file names to `onOpenLightbox`.
+- Prevention: Keep summary and item detail updates on the same SSE stream; cover batch item lifecycle transitions with automated tests.
 
 ## 2026-09-21 — 48px OCR dropped detected text from the cleanup mask
 
@@ -348,9 +502,9 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 ## 2026-09-20 — 'NoneType' object has no attribute 'ctx' during textless image preparation
 
 - Symptom: Batch translation of pages without detected text (e.g. splash pages or textless art) failed with `'NoneType' object has no attribute 'ctx'`.
-- Root cause: In `prepare()`, when `_translate_until_translation` detected no text regions, it short-circuited through `_revert_upscale` and emitted `finished: True`, which invoked `release_runtime()` and cleared `self._pipeline_lab_run = None`. Returning to `prepare()`, an unguarded `self._pipeline_lab_run.ctx = ctx` raised an AttributeError.
-- Fix: Guarded `self._pipeline_lab_run.ctx = ctx` with `if self._pipeline_lab_run is not None:`.
-- Prevention: Guard all lifecycle-dependent references to `_pipeline_lab_run` across pipeline stages and test textless page pre-processing.
+- Root cause: In `prepare()`, when `_translate_until_translation` detected no text regions, it short-circuited through `_revert_upscale` and emitted `finished: True`, which invoked `release_runtime()` and cleared `self._pipeline_run = None`. Returning to `prepare()`, an unguarded `self._pipeline_run.ctx = ctx` raised an AttributeError.
+- Fix: Guarded `self._pipeline_run.ctx = ctx` with `if self._pipeline_run is not None:`.
+- Prevention: Guard all lifecycle-dependent references to `_pipeline_run` across pipeline stages and test textless page pre-processing.
 
 ## 2026-09-21 — Review editor hid its decision path
 
@@ -365,3 +519,80 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 - Root cause: `Detector` enum lacked `_missing_` alias mapping for legacy/alternate detector names (such as `manga_text_detector`, `comic_text_detector`, `paddle_rust`, etc.).
 - Fix: Added `_missing_` classmethod to `Detector` (and other configuration enums) to normalize and map aliases and case variants to canonical enum members, and updated `get_detector` / `unload` to accept and coerce string inputs.
 - Prevention: Implement `_missing_` mapping on configuration enums for backward compatibility with external clients and legacy options.
+
+## 2026-09-23 — Checkpoint cache retained every processed page
+
+- Symptom: Long manga batches released decoded images but kept every `PipelineRun` manifest and document set in the process-wide active-run cache.
+- Root cause: OCR and single-page checkpoint stages cleared only `ctx` and `translator`, leaving the run registered in `ACTIVE_RUNS` after its checkpoint was persisted.
+- Fix: Release each run after its stage checkpoint so later stages reload the saved documents on demand.
+- Prevention: Keep image and checkpoint runtime state bounded to the current page group.
+
+## 2026-09-23 — Scheduler checkpoint fields lost before worker execution
+
+- Symptom: A selected-stage retry loaded its deleted input file, and normal page processing repeated detection while resetting the page timer; legacy items with a saved initialization checkpoint also failed to resume.
+- Root cause: `BatchStore._to_dto()` omitted scheduler-control fields `retryFromStage` and `pipelineStage`, so workers lost the requested resume point and treated checkpointed pages as new. Existing items already saved at initialization also needed their next pending stage recovered from the saved manifest.
+- Fix: Preserve both fields in the batch item DTO and resume existing initialization checkpoints at their first pending stage.
+- Prevention: Keep scheduler-control fields in the DTO and cover the request-to-worker path.
+
+## 2026-09-23 — Layout preview worker missed its NumPy import
+
+- Symptom: Layout preview requests failed after layout completed with `NameError: name 'np' is not defined` while checking the rendered box.
+- Root cause: The thread worker imported OpenCV locally but referenced NumPy without importing it.
+- Fix: Import NumPy in the layout worker.
+- Prevention: Keep endpoint tests that execute the worker through its final response construction.
+
+## 2026-09-23 — Stage retry reran unrelated downstream work
+
+- Symptom: Retrying from Translation repeated mask generation and inpainting even though their inputs had not changed.
+- Root cause: Checkpoint retry followed the displayed stage list as a linear suffix instead of using the canonical dependency graph.
+- Fix: Retry now selects the dependency closure; OCR regrouping reuses saved bubble geometry, and text-grouping changes invalidate mask and layout.
+- Prevention: Test retries from Translation and OCR against the dependency graph, including preserved independent artifacts.
+
+## 2026-09-23 — Normal batch checkpoints were absent from canonical stage tables
+
+- Symptom: Normal batch pages lacked canonical stage/artifact records, and later checkpoint updates could leave `get_document()` returning stale structured JSON.
+- Root cause: Result indexing only imported JSON sidecars present on disk; checkpoints could be virtual rows on a temporary `pipeline_runs` record, while later page-owned saves continued writing recognized JSON to the compatibility table.
+- Fix: Import virtual checkpoint documents before removing the temporary run, route page-owned structured JSON through revisioned rows, register completed disk artifacts, seed stage state/history from newer terminal checkpoints, and re-index an existing page after a retry fails so the failed attempt is durable.
+- Prevention: Keep tests that index virtual run documents, update a checkpoint, and fail a page retry, verifying canonical stage state, active structured output, and artifact references.
+
+## 2026-09-23 — Mask and layout work blocked the API event loop
+
+- Symptom: Expensive mask construction and shape-aware layout could delay unrelated FastAPI and Studio requests while a page was processing.
+- Root cause: CPU-heavy OpenCV and geometry functions ran synchronously inside async pipeline methods; awaiting an async wrapper did not move that work off the event loop.
+- Fix: Added separate bounded interactive and background CPU lanes, limited OpenCV native threads to one, and routed production mask/layout work plus editor previews through the lanes.
+- Prevention: Keep executor tests for event-loop responsiveness, single-worker background limits, and interactive progress while a background task occupies its slot.
+
+## 2026-09-23 — Fast translation groups retained every decoded page image
+
+- Symptom: Large fast-translation groups could keep one decoded source image per page resident during text translation.
+- Root cause: Deferred loading was enabled only for professional mode even though context-based fast translation consumes OCR regions and settings, not source pixels.
+- Fix: Keep source paths on the contexts for both translation modes and decode each page only inside the semaphore-bounded render worker.
+- Prevention: Test fast and professional groups for zero decoded inputs during translation, one open per rendered page, and the render concurrency ceiling.
+
+## 2026-09-23 — Translation-dependent mask work ran before translation
+
+- Symptom: Batch preparation built masks and inpainted pages before translated text was available, and a slow earlier page could hold ready fast-translation pages behind it.
+- Root cause: Mask generation and inpainting were included in the pre-translation stage list, while fast-group selection stopped at the first unready batch item.
+- Fix: Stop preparation at bubble geometry, form fast groups from ready pages in batch order, and build masks, layout, and inpainting after translation. Clear heavy per-page render state when each bounded render worker finishes.
+- Prevention: Cover preparation stopping at the translation barrier, ready-page grouping around a delayed page, and render-state cleanup.
+
+## 2026-09-23 — Full pipeline rerun bypassed batch translation dispatch
+
+- Symptom: A full rerun could route translation outside the shared serialized model executor and write intermediate output into a new live page folder.
+- Root cause: The rerun path used the public `translate()` wrapper instead of the batch's underlying translation dispatch and did not route output through its staging directory.
+- Fix: Reuse the batch translation dispatch inside the atomic rerun staging workspace and restore translator state after the run.
+- Prevention: Verify rerun translation dispatch and that a failed or staged rerun leaves live page output untouched.
+
+## 2026-09-23 — Batch rendering blocked the API event loop
+
+- Symptom: CPU-heavy final text rendering could stall unrelated API and Studio work while a batch page finished.
+- Root cause: The async rendering wrapper called its CPU renderer directly on the event-loop thread.
+- Fix: Run page rendering through the existing bounded CPU lanes and mark batch page renders for the background lane.
+- Prevention: Verify batch render contexts select the background lane and keep API-facing CPU work off the event loop.
+
+## 2026-09-23 — Cached inpainted image had no matching erasing mask
+
+- Symptom: A page failed inpainting with `No erasing mask for detected text` even though its result folder contained an inpainted image.
+- Root cause: Post-translation mask generation was skipped when an inpainted image existed, even if the corresponding final mask was missing or stale.
+- Fix: Treat a missing mask as an incomplete artifact pair: discard the cached inpainted image, rebuild the translation-dependent mask, and rerun inpainting.
+- Prevention: Cover the cached-image/no-mask state and require mask generation before inpainting.

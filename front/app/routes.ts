@@ -6,7 +6,7 @@ export default [
     index("routes/workspace-page.tsx", { id: "workspace-index" }),
     route("studio", "routes/workspace-page.tsx", { id: "workspace-studio" }),
     route("gallery", "routes/workspace-page.tsx", { id: "workspace-gallery" }),
-    route("pipeline-lab", "routes/workspace-page.tsx", { id: "workspace-pipeline" }),
+    route("pipeline-lab", "routes/pipeline-lab.tsx"),
     route("search-lab", "routes/workspace-page.tsx", { id: "workspace-search" }),
     route("read", "routes/workspace-page.tsx", { id: "workspace-read" }),
     route("gallery/pages/:folder", "routes/workspace-page.tsx", { id: "workspace-page-view" }),

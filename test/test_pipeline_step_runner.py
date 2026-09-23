@@ -129,7 +129,7 @@ class PipelineStepRunnerTests(unittest.TestCase):
         config = Config()
         config.render.font_size = 10
         config.render.font_size_minimum = 6
-        apply_shape_aware_bubble_layout(ctx, config, solver_max_y_trials=4)
+        apply_shape_aware_bubble_layout(ctx, config, solver_max_y_trials=4, layout_debug=True)
 
         self.assertIs(bubble.placement_mode, PlacementMode.BUBBLE)
         self.assertIs(free.placement_mode, PlacementMode.FREE_TEXT)
@@ -1145,7 +1145,7 @@ class PipelineStepRunnerTests(unittest.TestCase):
         config = Config()
         config.render.font_size = 14
         config.render.font_size_minimum = 8
-        apply_shape_aware_bubble_layout(ctx, config, solver_max_y_trials=8)
+        apply_shape_aware_bubble_layout(ctx, config, solver_max_y_trials=8, layout_debug=True)
 
         self.assertTrue(free_region._free_text_solver_applied)
         self.assertEqual(free_region._solver_path, "free_text")
@@ -1184,7 +1184,7 @@ class PipelineStepRunnerTests(unittest.TestCase):
         config = Config()
         config.render.font_size = 12
         config.render.font_size_minimum = 8
-        apply_shape_aware_bubble_layout(ctx, config, solver_max_y_trials=8)
+        apply_shape_aware_bubble_layout(ctx, config, solver_max_y_trials=8, layout_debug=True)
 
         self.assertTrue(bubble._solver_applied)
         self.assertTrue(free._free_text_solver_applied)

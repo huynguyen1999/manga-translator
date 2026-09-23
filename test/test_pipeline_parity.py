@@ -7,7 +7,7 @@ from manga_translator.config import Config, RenderConfig, BubbleDetectionConfig,
 from manga_translator.utils import Context, TextBlock
 from manga_translator.mask_builder import build_inpaint_masks, build_detector_cleanup_mask, MaskBundle
 from manga_translator.detection.bubble import BubbleDetection, serialize_bubble_detections, deserialize_bubble_detections
-from manga_translator.pipeline_lab import serialize_regions, deserialize_textblocks
+from manga_translator.pipeline.run import serialize_regions, deserialize_textblocks
 from manga_translator.rendering.layout import layout_page
 from manga_translator.rendering import render_page, get_default_eng_font
 from devscripts.pipeline_step_runner import run_fast_placement_and_render

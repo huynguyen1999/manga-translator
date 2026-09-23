@@ -295,7 +295,7 @@ Each important recurring character has name and voice: register, politeness, dir
 (level, categories, localization_strategy), sentence_style, verbal_habits, pronoun_notes, and localization_notes.
 Use language_features entries with pages, speaker, source, type, literal_meaning, contextual_meaning, tone,
 function, preferred_strategy, possible_renderings, and confidence (omit inapplicable fields). Use
-honorific_policy {default, rules:[{form, strategy, reason}]} and localization_conventions with dialect_strategy,
+honorific_policy {{default, rules:[{{form, strategy, reason}}]}} and localization_conventions with dialect_strategy,
 slang_strategy, profanity_strategy, recurring_idioms, and forms_of_address.
 Analyze translation-relevant speech rather than treating all dialogue as standard Japanese. Detect supported
 dialects and sociolects (including regional, rough, feminine-coded, gyaru, delinquent, elderly, childish,

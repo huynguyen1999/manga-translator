@@ -16,6 +16,7 @@ from manga_translator.mask_builder import (
     recover_bubble_residual_text,
     build_inpaint_masks,
     create_mask_sources_overlay,
+    _constrained_text_growth,
 )
 
 
@@ -69,6 +70,40 @@ class MaskBuilderTests(unittest.TestCase):
         self.assertEqual(np.count_nonzero(rescue[40:120, 60:140]), (120 - 40) * (140 - 60))
         # Pixels outside the box should be zero
         self.assertEqual(np.count_nonzero(rescue[:40, :]), 0)
+
+    def test_constrained_text_growth_matches_full_page_reference(self):
+        rng = np.random.default_rng(73)
+        seed = (rng.random((72, 91)) < 0.025).astype(np.uint8) * 255
+        seed[0, 0] = seed[-1, -1] = 255
+        interior_a = np.zeros(seed.shape, dtype=np.uint8)
+        interior_b = np.zeros(seed.shape, dtype=np.uint8)
+        interior_a[4:48, 3:53] = 1
+        interior_b[31:70, 45:88] = 1
+        protected = np.zeros(seed.shape, dtype=np.uint8)
+        protected[20:24, 20:70] = 255
+        regions = [
+            TextBlock(lines=np.empty((0, 4, 2), dtype=np.int32), texts=[""]),
+            TextBlock(lines=np.empty((0, 4, 2), dtype=np.int32), texts=[""]),
+            TextBlock(lines=np.empty((0, 4, 2), dtype=np.int32), texts=[""]),
+        ]
+        regions[0]._bubble_interior = interior_a
+        regions[1]._bubble_interior = interior_a
+        regions[2]._bubble_interior = interior_b
+
+        binary = (seed > 0).astype(np.uint8)
+        count, labels, _, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        interiors = [interior_a > 0, interior_a > 0, interior_b > 0]
+        for radius in (1, 3, 4):
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
+            expected = np.zeros_like(seed)
+            for label in range(1, count):
+                component = labels == label
+                grown = cv2.dilate(component.astype(np.uint8), kernel) > 0
+                owners = [interior for interior in interiors if np.any(component & interior)]
+                allowed = np.logical_or.reduce(owners) if owners else np.ones_like(component, dtype=bool)
+                expected[grown & allowed & (protected == 0)] = 255
+            actual = _constrained_text_growth(seed, regions, protected, radius)
+            np.testing.assert_array_equal(actual, expected)
 
     def test_detector_segmentation_is_erased_when_ocr_misses_it(self):
         h, w = 120, 180

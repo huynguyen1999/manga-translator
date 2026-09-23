@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import type { TranslationBatch } from "@/types";
-import { canChangeBatchTranslator, sortBatchesLatestFirst } from "./TranslatingSection";
-import { getBatchKind } from "@/utils/serverBatches";
+import type { QueuedImage, TranslationBatch } from "@/types";
+import { canChangeBatchTranslator, resultFor, sortBatchesLatestFirst } from "./TranslatingSection";
+import { formatStageElapsed, getBatchKind } from "@/utils/serverBatches";
+import { apiUrl } from "@/utils/api";
 
 const makeBatch = (id: string, addedAt: Date, dismissed = false): TranslationBatch => ({
   id,
@@ -66,6 +67,8 @@ assert.equal(canChangeBatchTranslator({ ...b1, status: "error", failedCount: 0 }
 assert.equal(getBatchKind({ id: "batch-translation", kind: "translation" }), "translation");
 assert.equal(getBatchKind({ id: "original-legacy-upload" }), "manga-upload");
 assert.equal(getBatchKind({ id: "upload-new-batch", kind: "manga-upload" }), "manga-upload");
+assert.equal(formatStageElapsed(new Date(0), 59000), "59s");
+assert.equal(formatStageElapsed(new Date(0), 62000), "1m 02s");
 
 // 7. Queued/waiting batches filtering
 const bWaiting = makeBatch("batch-waiting", new Date("2026-01-01T10:00:00Z"));
@@ -91,3 +94,14 @@ assert.equal(targetWithGroup, "/gallery/manga/uuid-5678", "Batch with mangaGroup
 assert.equal(targetWithoutGroup, `/gallery/manga/${mangaIdForTitle("Sakura Garden")}`, "Batch without mangaGroupId must fallback to /gallery/manga/manga-<hash>");
 
 console.log("TranslatingSection redirect URL tests passed successfully!");
+
+assert.equal(
+  resultFor({ status: "processing", folder: "in-progress" } as QueuedImage),
+  null,
+  "Unfinished items should preview their input instead of requesting a final result that does not exist yet",
+);
+assert.equal(
+  resultFor({ status: "finished", result: "/result/finished/final.jpg" } as QueuedImage),
+  apiUrl("/result/finished/final.jpg"),
+  "Finished items should keep their translated result preview",
+);

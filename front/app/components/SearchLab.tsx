@@ -87,22 +87,25 @@ export default function SearchLab() {
   const progressKey = latestJob ? `${latestJob.id}:${latestJob.status}:${finishedSearchItems(latestJob)}` : '';
 
   useEffect(() => {
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const controller = new AbortController();
-    const poll = async () => {
+    const source = new EventSource(apiUrl('/api/search/status/events'));
+    source.onmessage = (event) => {
       try {
-        const next = await searchRequest<SearchStatus>('/status', undefined, controller.signal);
-        if (!stopped) { setStatus(next); setServiceError(''); }
-      } catch (caught) {
-        if (!stopped) setServiceError((caught as Error).message);
-      } finally {
-        if (!stopped) timer = setTimeout(poll, 3000);
+        setStatus(JSON.parse(event.data) as SearchStatus);
+        setServiceError('');
+      } catch {
+        setServiceError('Could not read Search Lab status. Reconnecting…');
       }
     };
-    void poll();
-    return () => { stopped = true; clearTimeout(timer); controller.abort(); };
-  }, [refresh]);
+    source.onerror = () => setServiceError('Search Lab status stream disconnected. Reconnecting…');
+    return () => source.close();
+  }, []);
+
+  const refreshStatus = () => {
+    setRefresh(value => value + 1);
+    void searchRequest<SearchStatus>('/status')
+      .then(value => { setStatus(value); setServiceError(''); })
+      .catch(caught => setServiceError((caught as Error).message));
+  };
 
   useEffect(() => {
     const controller = new AbortController();
@@ -155,7 +158,7 @@ export default function SearchLab() {
     <header className="flex flex-wrap items-start justify-between gap-3">
       <div><h1 className="text-2xl font-bold tracking-tight">Search Lab</h1>
         <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Find manga by story or scene. Compare summary and original-page matches.</p></div>
-      <button className={button} onClick={() => setRefresh(value => value + 1)}>Refresh status</button>
+      <button className={button} onClick={refreshStatus}>Refresh status</button>
     </header>
     {(serviceError || status?.error) && <div role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
       <p className="break-words">{serviceError || status?.error}</p><p className="mt-2">Your gallery and translation tools are still available.</p>

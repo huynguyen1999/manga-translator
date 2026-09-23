@@ -12,7 +12,6 @@ import logging
 import math
 import os
 import re
-import uuid
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -30,10 +29,10 @@ from .. import (
 from ..bubble_layout import (
     _estimate_adaptive_font_size,
     decode_safe_shape,
-    prepare_bubble_masks,
     prepare_bubbles,
     render_positioned_lines,
 )
+from ...geometry.bubbles import PageGeometry, prepare_page_geometry
 from .geometry import (
     BubbleGeometry,
     build_lobe_graph,
@@ -57,26 +56,16 @@ from .models import (
     ScanInterval,
     ZoneShapeProfile,
 )
-from .obstacles import _region_source_mask
+from .ownership import build_free_text_ownership_zones
 from .obstacles import build_page_obstacle_map, classify_placement_modes
-
-
-def _ensure_region_identities(regions: Optional[List[Any]]) -> List[Any]:
-    for region in regions or []:
-        region_id = str(getattr(region, "region_id", "") or "")
-        if not region_id:
-            region.region_id = uuid.uuid4().hex
-            region_id = region.region_id
-        source_ids = getattr(region, "source_region_ids", None)
-        if isinstance(source_ids, str):
-            source_ids = [source_ids]
-        if not source_ids:
-            members = getattr(region, "group_members", None)
-            if isinstance(members, str):
-                members = [members]
-            source_ids = [str(member) for member in members] if members else [region_id]
-        region.source_region_ids = [str(member) for member in source_ids]
-    return regions or []
+from .regions import prepare_regions as _ensure_region_identities
+from .raster import (
+    _candidate_cropped_visual_masks,
+    _candidate_global_glyph_mask,
+    _candidate_visual_masks,
+    _cropped_masks_overlap,
+    _render_line_alpha,
+)
 
 
 def _render_text(region: Any) -> str:
@@ -217,8 +206,6 @@ def reset_solver_profile() -> SolverProfileStats:
     global _GLOBAL_SOLVER_PROFILE
     _GLOBAL_SOLVER_PROFILE = SolverProfileStats()
     return _GLOBAL_SOLVER_PROFILE
-
-
 
 # Composite-objective weights (Phase 7). Hard validity stays in the glyph
 # validators; everything here is soft preference.
@@ -1583,35 +1570,6 @@ def _validate_glyph_pixels(
     return True, p5
 
 
-_LINE_ALPHA_CACHE: Dict[Tuple[str, int, int], Optional[np.ndarray]] = {}
-
-
-def _render_line_alpha(line: PlacedLine, font_size: int) -> Optional[np.ndarray]:
-    global _LINE_ALPHA_CACHE
-    key = (line.text, line.width, font_size)
-    if key in _LINE_ALPHA_CACHE:
-        cached = _LINE_ALPHA_CACHE[key]
-        return cached.copy() if cached is not None else None
-
-    try:
-        from manga_translator.rendering import text_render
-        canvas = np.zeros((font_size + 4, line.width + font_size + 4), dtype=np.uint8)
-        border = canvas.copy()
-        pen = [0, font_size]
-        for c in line.text:
-            adv = text_render.put_char_horizontal(font_size, c, pen, canvas, border, border_size=0)
-            pen[0] += adv
-        if len(_LINE_ALPHA_CACHE) >= 1024:
-            first_k = next(iter(_LINE_ALPHA_CACHE))
-            del _LINE_ALPHA_CACHE[first_k]
-        _LINE_ALPHA_CACHE[key] = canvas
-        return canvas.copy()
-    except Exception:
-        if len(_LINE_ALPHA_CACHE) >= 1024:
-            first_k = next(iter(_LINE_ALPHA_CACHE))
-            del _LINE_ALPHA_CACHE[first_k]
-        _LINE_ALPHA_CACHE[key] = None
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1724,234 +1682,6 @@ def normalize_words(words: List[str]) -> List[str]:
     return cleaned
 
 
-def _extract_region_damage_masks(
-    regions: List[Any],
-    shape: Tuple[int, int],
-    inpaint_mask: Optional[np.ndarray] = None,
-) -> Dict[int, np.ndarray]:
-    """Assign captured inpaint/text-removal mask pixels to individual text regions."""
-    h, w = shape[:2]
-    free_regions = [
-        r for r in regions or []
-        if getattr(r, "placement_mode", None) is PlacementMode.FREE_TEXT
-    ]
-    if not free_regions:
-        return {}
-
-    source_masks = [_region_source_mask(r, (h, w)) > 0 for r in free_regions]
-    if inpaint_mask is not None and np.any(inpaint_mask):
-        raw_mask = (inpaint_mask > 0).astype(np.uint8)
-        if raw_mask.shape[:2] != (h, w):
-            raw_mask = cv2.resize(raw_mask, (w, h), interpolation=cv2.INTER_NEAREST)
-    else:
-        raw_mask = np.zeros((h, w), dtype=np.uint8)
-
-    # Scope the shared mask around each source region before assigning ownership.
-    # Otherwise one free-text region would claim every unrelated erased pixel on the page.
-    scopes = []
-    distances = []
-    for region, source in zip(free_regions, source_masks):
-        profile = getattr(region, "_source_profile", None)
-        font_s = max(8.0, float(profile.font_size if profile else getattr(region, "font_size", 12) or 12))
-        radius = max(3, int(round(font_s * 1.5)))
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
-        scopes.append(cv2.dilate(source.astype(np.uint8), kernel) > 0)
-        distances.append(cv2.distanceTransform((~source).astype(np.uint8), cv2.DIST_L2, 5))
-    scope_union = np.any(np.stack(scopes, axis=0), axis=0)
-    owner = np.argmin(np.stack(distances, axis=0), axis=0)
-    active_damage = (raw_mask > 0) & scope_union
-
-    region_damages: Dict[int, np.ndarray] = {}
-    for idx, r in enumerate(free_regions):
-        claimed = (owner == idx) & active_damage & scopes[idx]
-        # Keep the exact pixels sent to inpainting. Source geometry is only a fallback
-        # for legacy captures that did not persist a mask.
-        claimed |= source_masks[idx] if not np.any(raw_mask) else False
-        region_damages[id(r)] = claimed.astype(np.uint8)
-
-    return region_damages
-
-
-def build_free_text_ownership_zones(
-    regions: List[Any],
-    obstacles: PageObstacleMap,
-    inpaint_mask: Optional[np.ndarray] = None,
-) -> Dict[int, FreeTextZone]:
-    """Assign all free-text seeds simultaneously to disjoint FreeTextZones."""
-    free_regions = [
-        region for region in regions or []
-        if getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
-    ]
-    if not free_regions:
-        return {}
-
-    shape = obstacles.panel_mask.shape[:2]
-    h, w = shape
-    forbidden_global = (
-        (obstacles.protected_bubble_mask > 0)
-        | (obstacles.panel_mask == 0)
-    )
-    available = (obstacles.panel_mask > 0) & ~forbidden_global
-
-    seeds = [_region_source_mask(region, shape) > 0 for region in free_regions]
-    distances = [
-        cv2.distanceTransform((~seed).astype(np.uint8), cv2.DIST_L2, 5)
-        for seed in seeds
-    ]
-    owner = np.argmin(np.stack(distances, axis=0), axis=0)
-    damage_dict = _extract_region_damage_masks(free_regions, shape, inpaint_mask=inpaint_mask)
-
-    zones: Dict[int, FreeTextZone] = {}
-    for index, region in enumerate(free_regions):
-        rid = id(region)
-        ownership = (owner == index) & available
-        raw_damage = damage_dict.get(rid, seeds[index].astype(np.uint8)) > 0
-        damage_mask = raw_damage & (owner == index)  # Don't let regions fight over damage
-        if not np.any(damage_mask):
-            damage_mask = seeds[index].copy()
-
-        # Build distance transform & weight map over damage
-        damage_dt = cv2.distanceTransform(damage_mask.astype(np.uint8), cv2.DIST_L2, 5)
-        max_dt = float(damage_dt.max())
-        if max_dt > 0.0:
-            norm_dt = damage_dt / max_dt
-            weight_map = np.where(damage_mask, 1.0 + 1.5 * norm_dt, 0.0)
-            core_mask = damage_mask & (norm_dt >= 0.50)
-        else:
-            weight_map = np.where(damage_mask, 1.0, 0.0)
-            core_mask = damage_mask.copy()
-
-        # Other text obstacles (all other sources)
-        other_text_mask = obstacles.text_mask.astype(bool) & ~seeds[index]
-        obstacle_mask = forbidden_global | other_text_mask | ~ownership
-        coverable_damage = damage_mask & ownership & ~forbidden_global & ~other_text_mask
-
-        # Precompute total weights for instant local cropped coverage checks
-        core_m = core_mask > 0
-        core_coverable = core_m & coverable_damage
-        core_total = int(np.sum(core_coverable))
-        total_w = float(np.sum(weight_map[coverable_damage]))
-        if total_w <= 0.0:
-            total_w = float(np.sum(coverable_damage))
-        if total_w <= 0.0:
-            total_w = 1.0
-
-        # Derive source bounding box
-        ys, xs = np.nonzero(seeds[index])
-        if len(xs):
-            s_bbox = (int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1))
-        else:
-            s_bbox = (0, 0, w, h)
-
-        damage_centroid, _ = _mask_moments(damage_mask)
-        source_centroid, _ = _mask_moments(seeds[index])
-        dys, dxs = np.nonzero(damage_mask)
-        if len(dxs):
-            d_bbox = (int(dxs.min()), int(dys.min()), int(dxs.max() + 1), int(dys.max() + 1))
-        else:
-            d_bbox = s_bbox
-        target_mask = (damage_mask > 0) | seeds[index]
-        target_centroid, _ = _mask_moments(target_mask)
-        tys, txs = np.nonzero(target_mask)
-        target_bbox = (
-            (int(txs.min()), int(tys.min()), int(txs.max() + 1), int(tys.max() + 1))
-            if len(txs) else s_bbox
-        )
-        damage_target = FreeTextDamageTarget(
-            mask=target_mask.astype(np.uint8),
-            centroid_x=float(target_centroid[0]),
-            centroid_y=float(target_centroid[1]),
-            bbox=target_bbox,
-            area=int(np.count_nonzero(target_mask)),
-            width=max(0, target_bbox[2] - target_bbox[0]),
-            height=max(0, target_bbox[3] - target_bbox[1]),
-            source_centroid=(float(source_centroid[0]), float(source_centroid[1])),
-            source_bbox=s_bbox,
-            inpaint_bbox=d_bbox,
-            inpaint_centroid=(float(damage_centroid[0]), float(damage_centroid[1])),
-        )
-
-        ft_zone = FreeTextZone(
-            source_bbox=s_bbox,
-            ownership_mask=ownership.astype(np.uint8),
-            obstacle_mask=obstacle_mask.astype(np.uint8),
-            coverage_target_mask=damage_mask.astype(np.uint8),
-            coverable_damage_mask=coverable_damage.astype(np.uint8),
-            coverage_weight_map=weight_map.astype(np.float32),
-            core_damage_mask=core_mask.astype(np.uint8),
-            total_coverable_weight=total_w,
-            total_core_coverable=core_total,
-            damage_target=damage_target,
-        )
-        zones[rid] = ft_zone
-        region._free_text_source_mask = seeds[index].astype(np.uint8)
-        region._free_text_inpaint_mask = damage_mask.astype(np.uint8)
-        region._free_text_ownership_mask = ownership.astype(np.uint8)
-        region._free_text_zone = ft_zone
-
-    return zones
-
-
-def _candidate_cropped_visual_masks(
-    candidate: LayoutCandidate,
-    stroke_width: int,
-    image_shape: Tuple[int, int],
-) -> Tuple[Tuple[int, int, int, int], np.ndarray, np.ndarray, np.ndarray]:
-    """Rasterize candidate ink_mask, visual_mask (ink + stroke), and block_mask in a local bounding box crop."""
-    h, w = image_shape[:2]
-    if not candidate.lines:
-        return (0, 0, 0, 0), np.zeros((0, 0), bool), np.zeros((0, 0), bool), np.zeros((0, 0), bool)
-
-    b_left = min(line.x for line in candidate.lines)
-    b_top = min(line.y for line in candidate.lines)
-    b_right = max(line.x + line.width for line in candidate.lines)
-    b_bottom = max(line.y + line.height for line in candidate.lines)
-
-    radius = max(1, int(stroke_width))
-    pad = radius + 2
-    cx1 = max(0, b_left - pad)
-    cy1 = max(0, b_top - pad)
-    cx2 = min(w, b_right + pad)
-    cy2 = min(h, b_bottom + pad)
-
-    ch = cy2 - cy1
-    cw = cx2 - cx1
-    if ch <= 0 or cw <= 0:
-        return (cx1, cy1, cx2, cy2), np.zeros((0, 0), bool), np.zeros((0, 0), bool), np.zeros((0, 0), bool)
-
-    ink_crop = np.zeros((ch, cw), dtype=bool)
-    block_crop = np.zeros((ch, cw), dtype=bool)
-
-    for line in candidate.lines:
-        lx1 = max(0, line.x - cx1)
-        ly1 = max(0, line.y - cy1)
-        lx2 = min(cw, line.x + line.width - cx1)
-        ly2 = min(ch, line.y + line.height - cy1)
-        if lx2 > lx1 and ly2 > ly1:
-            block_crop[ly1:ly2, lx1:lx2] = True
-
-        alpha = _render_line_alpha(line, candidate.font_size)
-        if alpha is None:
-            if lx2 > lx1 and ly2 > ly1:
-                ink_crop[ly1:ly2, lx1:lx2] = True
-        else:
-            glyph = alpha > 127
-            ay, ax = glyph.shape
-            gx1 = max(0, line.x - cx1)
-            gy1 = max(0, line.y - cy1)
-            gx2 = min(cw, line.x + ax - cx1)
-            gy2 = min(ch, line.y + ay - cy1)
-            if gx2 > gx1 and gy2 > gy1:
-                ink_crop[gy1:gy2, gx1:gx2] |= glyph[:gy2 - gy1, :gx2 - gx1]
-
-    if stroke_width > 0:
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
-        vis_crop = cv2.dilate(ink_crop.astype(np.uint8), kernel) > 0
-    else:
-        vis_crop = ink_crop.copy()
-    return (cx1, cy1, cx2, cy2), ink_crop, vis_crop, block_crop
-
-
 def _measure_damage_coverage_crop(
     crop_box: Tuple[int, int, int, int],
     vis_crop: np.ndarray,
@@ -1998,24 +1728,6 @@ def _measure_damage_coverage_crop(
         "u_damage": 1.0 - c_damage,
     }
 
-
-def _candidate_visual_masks(
-    candidate: LayoutCandidate,
-    image_shape: Tuple[int, int],
-    stroke_width: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Rasterize candidate ink_mask, visual_mask (ink + stroke), and block_mask."""
-    h, w = image_shape[:2]
-    crop_box, ink_c, vis_c, blk_c = _candidate_cropped_visual_masks(candidate, stroke_width, (h, w))
-    cx1, cy1, cx2, cy2 = crop_box
-    ink_mask = np.zeros((h, w), dtype=bool)
-    visual_mask = np.zeros((h, w), dtype=bool)
-    block_mask = np.zeros((h, w), dtype=bool)
-    if cx2 > cx1 and cy2 > cy1:
-        ink_mask[cy1:cy2, cx1:cx2] = ink_c
-        visual_mask[cy1:cy2, cx1:cx2] = vis_c
-        block_mask[cy1:cy2, cx1:cx2] = blk_c
-    return ink_mask, visual_mask, block_mask
 
 
 def _free_text_words(text: str) -> List[str]:
@@ -2465,14 +2177,15 @@ def _free_text_ink_overflow(
     other_text: np.ndarray,
 ) -> float:
     """Measure glyph pixels outside the legal page/obstacle area."""
-    glyph = _candidate_global_glyph_mask(candidate, image_shape)
+    crop_box, glyph, _, _ = _candidate_cropped_visual_masks(candidate, 0, image_shape)
     total = int(np.count_nonzero(glyph))
     if not total:
         return 1.0
+    x1, y1, x2, y2 = crop_box
     allowed = (
-        (obstacles.panel_mask > 0)
-        & ~(obstacles.protected_bubble_mask > 0)
-        & ~other_text
+        (obstacles.panel_mask[y1:y2, x1:x2] > 0)
+        & ~(obstacles.protected_bubble_mask[y1:y2, x1:x2] > 0)
+        & ~other_text[y1:y2, x1:x2]
     )
     return float(np.count_nonzero(glyph & ~allowed)) / total
 
@@ -2819,14 +2532,14 @@ def _select_free_text_joint_candidates(
     # Keep the hard collision invariant even when no full Cartesian
     # combination is legal; place the most constrained candidates greedily.
     selected: Dict[int, LayoutCandidate] = {}
-    occupied: List[np.ndarray] = []
+    occupied = []
     for region in sorted(regions, key=lambda item: len(plans.get(id(item), [])) or 999):
         for candidate in plans.get(id(region), []):
-            glyph_mask, _, _ = _candidate_data(candidate, image_shape)
-            if any(np.any(glyph_mask & other) for other in occupied):
+            crop_box, glyph_mask, _, _ = _candidate_data(candidate, image_shape)
+            if any(_cropped_masks_overlap(crop_box, glyph_mask, other_box, other_mask) for other_box, other_mask in occupied):
                 continue
             selected[id(region)] = candidate
-            occupied.append(glyph_mask)
+            occupied.append((crop_box, glyph_mask))
             break
     return selected
 
@@ -2837,6 +2550,7 @@ def _apply_free_text_candidate(
     profile: OriginalLayoutProfile,
     config: Config,
     image_shape: Tuple[int, int],
+    layout_debug: bool = False,
 ) -> bool:
     text = (
         region.get_translation_for_rendering()
@@ -2875,8 +2589,13 @@ def _apply_free_text_candidate(
         "lines": line_dicts,
     }]
     region._layout_input_text = text
-    region._free_text_glyph_mask = _candidate_global_glyph_mask(candidate, image_shape)
-    region._free_text_visual_mask = _candidate_visual_masks(candidate, image_shape, 1)[1]
+    if layout_debug:
+        region._free_text_glyph_mask = _candidate_global_glyph_mask(candidate, image_shape)
+        region._free_text_visual_mask = _candidate_visual_masks(candidate, image_shape, 1)[1]
+    else:
+        for attr in ("_free_text_glyph_mask", "_free_text_visual_mask"):
+            if hasattr(region, attr):
+                delattr(region, attr)
     region._free_text_solver_applied = True
     region._solver_applied = True
     region._solver_path = "free_text"
@@ -2901,94 +2620,6 @@ def _apply_free_text_candidate(
     ]
     return True
 
-
-def create_free_text_layout_debug(
-    image: np.ndarray,
-    regions: List[Any],
-    obstacles: PageObstacleMap,
-    zones: Dict[int, Union[np.ndarray, FreeTextZone]],
-) -> np.ndarray:
-    """Rich debug overlay: BLUE (source), MAGENTA (damage), BRIGHT (core), GREEN (zone), RED (bubble), YELLOW (halo), CYAN (visual), WHITE (block)."""
-    debug = image.copy()
-    h, w = debug.shape[:2]
-
-    for region in regions or []:
-        if getattr(region, "placement_mode", None) is not PlacementMode.FREE_TEXT:
-            continue
-        rid = id(region)
-        source = getattr(region, "_free_text_source_mask", np.zeros((h, w), np.uint8)) > 0
-        raw_zone = zones.get(rid)
-        if isinstance(raw_zone, FreeTextZone):
-            zone_mask = raw_zone.ownership_mask > 0
-            damage_mask = raw_zone.coverage_target_mask > 0
-            core_mask = raw_zone.core_damage_mask > 0
-        elif raw_zone is not None:
-            zone_mask = raw_zone > 0
-            damage_mask = source
-            core_mask = source
-        else:
-            zone_mask = np.zeros((h, w), bool)
-            damage_mask = source
-            core_mask = source
-
-        tint = np.zeros_like(debug)
-        # BLUE: original source footprint
-        tint[source] = (255, 0, 0)
-        # GREEN: ownership territory
-        tint[zone_mask] = (0, 180, 0)
-        # MAGENTA: actual damage mask
-        tint[damage_mask] = (220, 0, 220)
-        # BRIGHT MAGENTA / WHITE: high weight damage core
-        tint[core_mask] = (255, 120, 255)
-        debug = cv2.addWeighted(debug, 1.0, tint, 0.22, 0)
-
-        # Outlines
-        for mask, color, thickness in (
-            (obstacles.bubble_mask, (0, 0, 255), 2),              # RED: speech bubbles
-            (obstacles.protected_bubble_mask, (0, 255, 255), 1),  # YELLOW: bubble safety halo
-            (zone_mask, (0, 200, 0), 1),                          # GREEN: ownership boundary
-            (damage_mask, (200, 0, 200), 1),                      # MAGENTA: damage boundary
-            (source, (255, 100, 0), 1),                           # BLUE: source boundary
-        ):
-            contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(debug, contours, -1, color, thickness)
-
-        # CYAN: candidate visual footprint (with stroke)
-        vis_mask = getattr(region, "_free_text_visual_mask", None)
-        if vis_mask is not None:
-            contours, _ = cv2.findContours(vis_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(debug, contours, -1, (255, 255, 0), 1)
-
-        # WHITE: selected glyph mask & block bounds
-        glyph = getattr(region, "_free_text_glyph_mask", None)
-        if glyph is not None:
-            contours, _ = cv2.findContours(glyph.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(debug, contours, -1, (255, 255, 255), 1)
-
-        bounds = getattr(region, "layout_bounds", None)
-        if bounds is not None and len(bounds) == 4:
-            x1, y1, x2, y2 = [int(v) for v in bounds]
-            cv2.rectangle(debug, (x1, y1), (x2, y2), (255, 255, 255), 1)
-
-        target = raw_zone.damage_target if isinstance(raw_zone, FreeTextZone) else None
-        if target is not None:
-            damage_pt = (int(round(target.centroid_x)), int(round(target.centroid_y)))
-            cv2.drawMarker(debug, damage_pt, (255, 0, 255), cv2.MARKER_CROSS, 9, 1, cv2.LINE_AA)
-            glyph_centroid = getattr(region, "_solver_qa", {}).get("ink_centroid")
-            if glyph_centroid:
-                glyph_pt = (int(round(glyph_centroid[0])), int(round(glyph_centroid[1])))
-                cv2.drawMarker(debug, glyph_pt, (255, 255, 0), cv2.MARKER_TILTED_CROSS, 9, 1, cv2.LINE_AA)
-                cv2.arrowedLine(debug, damage_pt, glyph_pt, (255, 255, 255), 1, cv2.LINE_AA, tipLength=0.2)
-            qa = getattr(region, "_solver_qa", {}) or {}
-            label = (
-                f"FREE {getattr(region, 'region_id', '')} "
-                f"font:{getattr(region, 'font_size', 0)} "
-                f"lines:{len(getattr(region, 'layout_segments', [{}])[0].get('lines', [])) if getattr(region, 'layout_segments', None) else 0} "
-                f"cov:{qa.get('damage_coverage', 0.0):.0%}"
-            )
-            cv2.putText(debug, label, (damage_pt[0] + 6, damage_pt[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
-
-    return debug
 
 
 def _ink_centroid(
@@ -3568,26 +3199,6 @@ def partition_bubble_zones(
     return eroded_zones
 
 
-def _candidate_global_glyph_mask(
-    candidate: LayoutCandidate,
-    shape: Tuple[int, int],
-) -> np.ndarray:
-    """Rasterize a candidate in page coordinates for collision checks."""
-    mask = np.zeros(shape, dtype=bool)
-    h, w = shape
-    for line in candidate.lines:
-        alpha = _render_line_alpha(line, candidate.font_size)
-        if alpha is None:
-            glyph = np.ones((line.height, line.width), dtype=bool)
-        else:
-            glyph = alpha > 127
-        ay, ax = glyph.shape
-        x1, y1 = max(0, line.x), max(0, line.y)
-        x2, y2 = min(w, line.x + ax), min(h, line.y + ay)
-        if x1 < x2 and y1 < y2:
-            mask[y1:y2, x1:x2] |= glyph[y1 - line.y:y2 - line.y, x1 - line.x:x2 - line.x]
-    return mask
-
 
 def _rect_gap(first: Tuple[int, int, int, int], second: Tuple[int, int, int, int]) -> float:
     dx = max(first[0] - second[2], second[0] - first[2], 0)
@@ -3604,14 +3215,13 @@ def _candidate_bbox(candidate: LayoutCandidate) -> Tuple[int, int, int, int]:
     )
 
 
-def _candidate_data(candidate: LayoutCandidate, image_shape: Tuple[int, int]) -> Tuple[np.ndarray, Tuple[int, int, int, int], Tuple[float, float]]:
-    glyph_mask = _candidate_global_glyph_mask(candidate, image_shape)
+def _candidate_data(candidate: LayoutCandidate, image_shape: Tuple[int, int]):
+    crop_box, glyph_mask, _, _ = _candidate_cropped_visual_masks(candidate, 0, image_shape)
     if candidate.status.startswith("free_text") and np.any(glyph_mask):
-        metrics = _mask_metrics(glyph_mask)
-        return glyph_mask, metrics["bbox"], metrics["centroid"]
-    bbox = _candidate_bbox(candidate)
-    centroid = _ink_centroid(candidate.lines, candidate.font_size)
-    return glyph_mask, bbox, centroid
+        metrics = _mask_metrics(glyph_mask, (crop_box[0], crop_box[1]))
+        return crop_box, glyph_mask, metrics["bbox"], metrics["centroid"]
+    return crop_box, glyph_mask, _candidate_bbox(candidate), _ink_centroid(candidate.lines, candidate.font_size)
+
 
 
 def _choose_joint_layout(
@@ -3627,7 +3237,7 @@ def _choose_joint_layout(
         return None
 
     # Precompute candidate data once per unique candidate
-    candidate_cache: Dict[int, Tuple[np.ndarray, Tuple[int, int, int, int], Tuple[float, float]]] = {}
+    candidate_cache: Dict[int, Any] = {}
     for plan in plans:
         for cand in plan.candidates:
             cid = id(cand)
@@ -3639,10 +3249,10 @@ def _choose_joint_layout(
         # Check pairwise collision first using cached glyph masks.
         collision = False
         for i in range(len(combination)):
-            res_i, _, _ = candidate_cache[id(combination[i])]
+            box_i, res_i, _, _ = candidate_cache[id(combination[i])]
             for j in range(i + 1, len(combination)):
-                res_j, _, _ = candidate_cache[id(combination[j])]
-                if np.any(res_i & res_j):
+                box_j, res_j, _, _ = candidate_cache[id(combination[j])]
+                if _cropped_masks_overlap(box_i, res_i, box_j, res_j):
                     collision = True
                     break
             if collision:
@@ -3653,12 +3263,12 @@ def _choose_joint_layout(
         score = sum(candidate.penalty for candidate in combination)
         for first in range(len(combination)):
             first_cand = combination[first]
-            _, first_bbox, first_centroid = candidate_cache[id(first_cand)]
+            _, _, first_bbox, first_centroid = candidate_cache[id(first_cand)]
             first_profile = plans[first].source_profile
 
             for second in range(first + 1, len(combination)):
                 second_cand = combination[second]
-                _, second_bbox, second_centroid = candidate_cache[id(second_cand)]
+                _, _, second_bbox, second_centroid = candidate_cache[id(second_cand)]
                 second_profile = plans[second].source_profile
 
                 if first_profile is None or second_profile is None:
@@ -3943,6 +3553,8 @@ def apply_shape_aware_bubble_layout(
     legacy_only: bool = False,
     infer_bubbles: bool = False,
     timing: Optional[Dict[str, float]] = None,
+    layout_debug: bool = False,
+    page_geometry: Optional[PageGeometry] = None,
 ) -> None:
     """Execute shape-aware 2D free-space text fitting and layout on ctx.text_regions."""
     with _RENDER_LOCK:
@@ -4018,9 +3630,14 @@ def apply_shape_aware_bubble_layout(
                 ]
                 regions = ctx.text_regions
 
-        # Ensure bubble masks/interiors are populated
+        # Reuse the geometry produced during mask construction when available.
         phase_start = perf_counter()
-        prepare_bubble_masks(img, regions)
+        bubble_padding = int(getattr(getattr(config, "bubble_detection", None), "padding", 9))
+        if page_geometry is None or not page_geometry.matches(img, regions, bubble_padding):
+            page_geometry, _ = prepare_page_geometry(
+                img, regions, bubble_padding, return_cleanup=False,
+            )
+        ctx.page_geometry = page_geometry
         layout_timing["mask_prep_ms"] = (perf_counter() - phase_start) * 1000.0
         phase_start = perf_counter()
         classify_placement_modes(regions)
@@ -4153,7 +3770,9 @@ def apply_shape_aware_bubble_layout(
                         region._solver_status = "no_joint_layout"
                         region._render_suppressed = True
                     continue
-                if not _apply_free_text_candidate(region, candidate, profile, config, img.shape[:2]):
+                if not _apply_free_text_candidate(
+                    region, candidate, profile, config, img.shape[:2], layout_debug=layout_debug
+                ):
                     region._solver_path = "free_text"
                     region._solver_status = "rasterization_failed"
                     region._render_suppressed = True
@@ -4171,11 +3790,16 @@ def apply_shape_aware_bubble_layout(
                     f"has_zone={getattr(region, '_free_text_zone', None) is not None}"
                 )
 
-            ctx._free_text_obstacle_map = obstacles
-            ctx._free_text_zones = free_zones
-            ctx._free_text_layout_debug = create_free_text_layout_debug(
-                img, free_regions, obstacles, free_zones
-            )
+            if layout_debug:
+                ctx._free_text_obstacle_map = obstacles
+                ctx._free_text_zones = free_zones
+                from .debug import create_free_text_layout_debug
+
+                ctx._free_text_layout_debug = create_free_text_layout_debug(
+                    img, free_regions, obstacles, free_zones
+                )
+            else:
+                ctx._free_text_layout_debug = None
             layout_timing["free_text_solver_ms"] = (perf_counter() - phase_start) * 1000.0
 
         # Store layout groups on ctx for diagnostic overlay generation

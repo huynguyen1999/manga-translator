@@ -13,6 +13,18 @@ from manga_translator.professional_translation import (
 
 
 class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_analysis_prompt_keeps_honorific_example_as_literal_text(self):
+        config = TranslatorConfig(translator="deepseek", target_lang="ENG", translation_quality="professional")
+        engine = ProfessionalTranslator(config)
+        engine._json_request = AsyncMock(return_value=(
+            {"stories": [{"start_page": 1, "end_page": 1, "confidence": 1.0}]}, "deepseek"
+        ))
+
+        await engine.analyze([{"number": 1, "regions": [{"source": "こんにちは"}]}], None)
+
+        prompt = engine._json_request.await_args.args[1]
+        self.assertIn("honorific_policy {default, rules:[{form, strategy, reason}]}", prompt)
+
     def test_story_range_validation(self):
         self.assertEqual(parse_story_ranges("1-2,3-5", 5), [(1, 2), (3, 5)])
         for invalid in ("1", "0-2", "1-3,3-5", "2-5", "1-6"):

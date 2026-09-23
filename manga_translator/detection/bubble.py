@@ -73,14 +73,35 @@ class BubbleDetector:
         self.model = YOLO(str(_resolve_checkpoint(model)))
 
     def __call__(self, image: np.ndarray) -> list[BubbleDetection]:
-        result = self.model.predict(
-            source=cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
+        return self._read_result(
+            self.model.predict(
+                source=cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
+                device=self.device,
+                conf=self.confidence,
+                imgsz=self.image_size,
+                retina_masks=True,
+                verbose=False,
+            )[0],
+            image.shape[:2],
+        )
+
+    def detect_batch(self, images: list[np.ndarray]) -> list[list[BubbleDetection]]:
+        if not images:
+            return []
+        results = self.model.predict(
+            source=[cv2.cvtColor(image, cv2.COLOR_RGB2BGR) for image in images],
             device=self.device,
             conf=self.confidence,
             imgsz=self.image_size,
             retina_masks=True,
+            batch=len(images),
             verbose=False,
-        )[0]
+        )
+        if len(results) != len(images):
+            raise RuntimeError(f"Bubble detector returned {len(results)} pages for {len(images)} inputs")
+        return [self._read_result(result, image.shape[:2]) for result, image in zip(results, images)]
+
+    def _read_result(self, result, image_shape: tuple[int, int]) -> list[BubbleDetection]:
         if result.masks is None:
             return []
         detections = []
@@ -89,8 +110,8 @@ class BubbleDetector:
             if score < self.confidence:
                 continue
             values = mask.detach().float().cpu().numpy()
-            if values.shape != image.shape[:2]:
-                values = cv2.resize(values, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR)
+            if values.shape != image_shape:
+                values = cv2.resize(values, (image_shape[1], image_shape[0]), interpolation=cv2.INTER_LINEAR)
             binary = np.where(values >= self.mask_threshold, 255, 0).astype(np.uint8)
             if np.count_nonzero(binary) >= 100:
                 detections.append(BubbleDetection(binary, score))
@@ -124,6 +145,15 @@ async def prepare(config, device: str = "cpu"):
 @model_operation
 async def dispatch(image: np.ndarray, config, device: str = "cpu") -> list[BubbleDetection]:
     return detect(image, config, device=device)
+
+
+@model_operation
+async def dispatch_batch(images: list[np.ndarray], config, device: str = "cpu") -> list[list[BubbleDetection]]:
+    if not images:
+        return []
+    target_device = device if device and device != "auto" else getattr(config, "device", "cpu")
+    detector = get_detector(config.model, config.confidence, config.mask_threshold, config.image_size, target_device)
+    return detector.detect_batch(images)
 
 
 @model_operation
@@ -201,4 +231,3 @@ def deserialize_bubble_detections(
             mask[y1:y2, x1:x2] = 255
         reconstructed.append(BubbleDetection(mask=mask, confidence=conf))
     return reconstructed
-

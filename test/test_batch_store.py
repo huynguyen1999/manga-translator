@@ -8,6 +8,25 @@ from server.batch_store import BatchConflict, BatchStore, InvalidBatch
 
 
 class BatchStoreTest(unittest.IsolatedAsyncioTestCase):
+    async def test_checkpoint_stage_survives_batch_item_dto(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            store = BatchStore(workspace / "batches", workspace / "results")
+            batch = await store.put_batch(
+                "batch-checkpoint",
+                {
+                    "id": "batch-checkpoint",
+                    "items": [{
+                        "id": "page-1",
+                        "name": "page-1.png",
+                        "pipelineStage": "detection",
+                    }],
+                },
+                {"page-1": ("page-1.png", b"image")},
+            )
+
+            self.assertEqual(batch["items"][0]["pipelineStage"], "detection")
+
     async def test_upload_is_atomic_and_duplicate_put_is_idempotent(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = Path(root)

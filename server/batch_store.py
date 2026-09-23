@@ -380,6 +380,7 @@ class BatchStore:
                     "mangaTitle": item.get("mangaTitle", manifest.get("mangaTitle", "Ungrouped")),
                     "status": item.get("status", "queued"),
                     "stage": item.get("stage"),
+                    "stageStartedAt": item.get("stageStartedAt"),
                     "error": item.get("error"),
                     "addedAt": item.get("addedAt", manifest.get("addedAt")),
                     "inputUrl": input_url,
@@ -391,6 +392,8 @@ class BatchStore:
                     "model": item.get("model") or {},
                     "excludeColor": bool(item.get("excludeColor", False)),
                     "needsReview": bool(item.get("needsReview", False)),
+                    "pipelineStage": item.get("pipelineStage"),
+                    "retryFromStage": item.get("retryFromStage"),
                 }
             )
         return {

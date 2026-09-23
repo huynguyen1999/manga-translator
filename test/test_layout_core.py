@@ -11,6 +11,8 @@ from manga_translator.rendering.layout import (
     classify_placement_modes,
     layout_page,
 )
+from manga_translator.rendering.layout.models import LayoutCandidate, PlacedLine
+from manga_translator.rendering.layout.solver import _candidate_data, _cropped_masks_overlap
 from manga_translator.rendering.bubble_layout import group_regions_by_bubbles
 from manga_translator.detection.bubble import BubbleDetection
 from manga_translator.utils import Context, TextBlock
@@ -75,4 +77,32 @@ def test_layout_page_assigns_ids_modes_and_disjoint_free_text_zones():
 
     assert set(result.regions) == {"first", "second"}
     assert all(region.placement_mode is PlacementMode.FREE_TEXT for region in ctx.text_regions)
+    assert ctx._free_text_layout_debug is None
+    assert not hasattr(first, "_free_text_glyph_mask")
     assert not np.any(zones[id(first)].ownership_mask & zones[id(second)].ownership_mask)
+
+
+def test_candidate_collisions_match_page_masks_using_only_overlapping_crops():
+    def candidate(x):
+        return LayoutCandidate(
+            font_size=12,
+            y_origin=30,
+            line_spacing=0.0,
+            lines=[PlacedLine("TEXT", y=30, x=x, width=35, height=16)],
+            penalty=0.0,
+            glyph_clearance_p5=0.0,
+            status="free_text",
+        )
+
+    shape = (90, 180)
+    first = _candidate_data(candidate(20), shape)
+    for x in (35, 56, 80):
+        second = _candidate_data(candidate(x), shape)
+        full_first = np.zeros(shape, dtype=bool)
+        full_second = np.zeros(shape, dtype=bool)
+        x1, y1, x2, y2 = first[0]
+        full_first[y1:y2, x1:x2] = first[1]
+        x1, y1, x2, y2 = second[0]
+        full_second[y1:y2, x1:x2] = second[1]
+        assert _cropped_masks_overlap(first[0], first[1], second[0], second[1]) == bool(np.any(full_first & full_second))
+        assert first[1].size < shape[0] * shape[1]
