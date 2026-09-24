@@ -984,10 +984,8 @@ export const App: React.FC = () => {
             }));
 
             if (hasNewCompletions || hasRerenderTerminal) {
-              if (hasRerenderTerminal) {
-                galleryPageCacheRef.current.clear();
-                setGalleryRevision((revision) => revision + 1);
-              }
+              galleryPageCacheRef.current.clear();
+              setGalleryRevision((revision) => revision + 1);
               void loadMangaSummaries();
             }
           }
@@ -1464,6 +1462,7 @@ export const App: React.FC = () => {
     setTranslationBatches((prev) => prev.map((batch) =>
       batch.id === uploadBatch.id ? failedBatch : batch
     ));
+    // Do not restore a failed import as an active upload on the next page load.
     await removeTranslationBatchFromIDB(uploadBatch.id).catch((removeError) =>
       console.warn(`Failed to remove failed translation upload ${uploadBatch.id}:`, removeError)
     );
@@ -1718,7 +1717,6 @@ export const App: React.FC = () => {
     setTranslationBatches((prev) => prev.map((batch) =>
       batch.id === uploadBatch.id ? failedBatch : batch
     ));
-    // Do not restore a failed import as an active upload on the next page load.
     await removeTranslationBatchFromIDB(uploadBatch.id).catch((removeError) =>
       console.warn(`Failed to remove failed manga upload ${uploadBatch.id}:`, removeError)
     );
@@ -1847,6 +1845,38 @@ export const App: React.FC = () => {
     } catch (error) {
       await failStudioMangaUpload(uploadBatch, error);
     }
+  };
+
+  const restoreBatchPages = async (groupId: string, mangaTitle: string): Promise<number> => {
+    const cleanTitle = mangaTitle.trim().toLocaleLowerCase();
+    const summaries = await fetchServerBatches();
+    const candidates = summaries.filter((batch) =>
+      getBatchKind(batch) === "translation" &&
+      (batch.status === "completed" || batch.status === "error") &&
+      (batch.mangaGroupId === groupId || batch.mangaTitle.trim().toLocaleLowerCase() === cleanTitle)
+    );
+    const batches = await Promise.all(candidates.map((batch) => fetchServerBatch(batch.id)));
+    const folders = Array.from(new Set(batches.flatMap((batch) =>
+      batch.items
+        .filter((item) => item.status === "completed" && item.resultFolder)
+        .map((item) => item.resultFolder as string)
+    )));
+    if (folders.length === 0) throw new Error("No completed batch pages were found for this manga.");
+
+    const response = await fetch(apiUrl("/api/results/update-meta"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folders, mangaTitle }),
+    });
+    const payload = await response.json().catch(() => ({})) as { detail?: string; updated?: number };
+    if (!response.ok) {
+      throw new Error(payload.detail || `Could not restore batch pages (${response.status})`);
+    }
+
+    galleryPageCacheRef.current.clear();
+    setGalleryRevision((revision) => revision + 1);
+    await loadMangaSummaries();
+    return payload.updated ?? folders.length;
   };
 
   const closeStudioMangaUploadModal = () => {
@@ -2663,6 +2693,7 @@ export const App: React.FC = () => {
               onDeleteManga={deleteMangaGroup}
               onDeleteMangas={deleteMangaGroups}
               onReorderMangaPages={reorderMangaPages}
+              onRestoreBatchPages={restoreBatchPages}
               onUpdateImage={updateFinishedImage}
               onUpdateMangaTitle={handleUpdateMangaTitle}
               onOpenPageView={handleOpenPageView}

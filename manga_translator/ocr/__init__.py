@@ -48,6 +48,10 @@ async def dispatch_batch(ocr_key: Ocr, pages: list[tuple[np.ndarray, List[Quadri
         from .batching import recognize_ctc_batch
 
         return recognize_ctc_batch(ocr, pages)
+    if isinstance(ocr, Model48pxOCR):
+        return await ocr._infer_batch(pages, verbose)
+    if isinstance(ocr, ModelMangaOCR):
+        return await ocr._infer_batch(pages, verbose)
     return [
         await ocr.recognize(image, regions, config, verbose)
         for image, regions, config in pages

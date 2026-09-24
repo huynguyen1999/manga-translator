@@ -663,6 +663,7 @@ class PipelineRun:
         precomputed_upscale: Image.Image | None = None,
         precomputed_detection: tuple[list, np.ndarray | None, np.ndarray | None] | None = None,
         precomputed_bubbles: list | None = None,
+        precomputed_inpainting: np.ndarray | None = None,
         stage_already_running: bool = False,
     ) -> dict[str, Any]:
         valid_stages = {
@@ -946,11 +947,19 @@ class PipelineRun:
                     mask_final_path = self.path / "mask_final.png"
                     if mask_final_path.is_file():
                         ctx.mask = cv2.imread(str(mask_final_path), cv2.IMREAD_GRAYSCALE)
+                if getattr(ctx, "protected_edge_mask", None) is None:
+                    protected_path = self.path / "protected_bubble_edge.png"
+                    if protected_path.is_file():
+                        ctx.protected_edge_mask = cv2.imread(str(protected_path), cv2.IMREAD_GRAYSCALE)
                 if not getattr(ctx, "text_regions", None):
-                    merged = self._document("text_regions_merged.json")
-                    if merged is not None:
-                        ctx.text_regions = deserialize_textblocks(merged)
-                ctx.img_inpainted = await translator._run_inpainting(config, ctx)
+                    regions = self._document("translations.json") or self._document("text_regions_merged.json")
+                    if regions is not None:
+                        ctx.text_regions = deserialize_textblocks(regions)
+                ctx.img_inpainted = (
+                    precomputed_inpainting
+                    if precomputed_inpainting is not None
+                    else await translator._run_inpainting(config, ctx)
+                )
                 if ctx.img_inpainted is not None:
                     save_jpeg(ctx.img_inpainted, self.path / "inpainted.jpg")
                     (self.path / "inpainted.png").unlink(missing_ok=True)

@@ -59,7 +59,7 @@ def parse_arguments(args=None):
                         help='Execution mode: "inprocess" shares models and allows up to two concurrent GPU tasks; "subprocess" spawns separate worker processes (default: inprocess)')
     parser.add_argument('--workers', type=int, default=3, help='Number of active image pipelines; in-process workers share models (default: 3)')
     parser.add_argument('--cpu-stage-workers', type=cpu_stage_workers, default=None,
-                        help='Maximum concurrent background CPU stages (default: auto, capped at 3)')
+                        help='Maximum concurrent background CPU stages (default: auto, capped at 3; keeps 2 for --workers=2)')
     parser.add_argument('--inpainting-concurrency', type=int, default=0, help='Maximum concurrent inpainting passes to avoid VRAM spikes (0 = unlimited, default: 0)')
     parser.add_argument('--gpu-ids', type=str, default=None, help='Comma-separated list of GPU indices to distribute workers across, e.g. "0,1"')
     g = parser.add_mutually_exclusive_group()

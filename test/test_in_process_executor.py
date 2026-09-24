@@ -42,6 +42,7 @@ class InProcessExecutorTest(unittest.IsolatedAsyncioTestCase):
     def test_cpu_stage_budget_is_worker_and_cpu_bounded(self):
         self.assertEqual(_cpu_stage_worker_count(1, cpu_count=8), 1)
         self.assertEqual(_cpu_stage_worker_count(2, cpu_count=8), 2)
+        self.assertEqual(_cpu_stage_worker_count(2, cpu_count=2), 2)
         self.assertEqual(_cpu_stage_worker_count(4, cpu_count=8), 3)
         self.assertEqual(_cpu_stage_worker_count(10, configured=4, cpu_count=8), 4)
         self.assertEqual(_cpu_stage_worker_count(2, configured=4, cpu_count=8), 2)

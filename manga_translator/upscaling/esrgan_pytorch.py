@@ -544,10 +544,21 @@ class ESRGANUpscalerPytorch(OfflineUpscaler):
 
         if max(max(image.size) for image in image_batch) <= self._TILE_SIZE:
             batch = torch.cat([einops.rearrange(torch.from_numpy(np.array(img.convert('RGB'))[:,:,::-1].copy()).float() / 255.0, 'h w c -> 1 c h w') for img in image_batch], dim=0).to(self.device)
+            self.logger.info(
+                'UltraSharp inference tensor batch pages=%d device=%s', batch.shape[0], batch.device
+            )
             with torch.no_grad():
                 output = self.model(batch)
             ret = [Image.fromarray((einops.rearrange(img.clip(0, 1), 'c h w -> h w c').cpu().numpy()[:,:,::-1].copy() * 255.0).astype(np.uint8)) for img in output]
         else:
+            tile_calls = sum(
+                math.ceil(image.width / self._TILE_SIZE) * math.ceil(image.height / self._TILE_SIZE)
+                for image in image_batch
+            )
+            self.logger.info(
+                'UltraSharp inference pages=%d mode=tiled model_calls=%d model_batch=1 device=%s',
+                len(image_batch), tile_calls, self.device,
+            )
             ret = [self._infer_tiled(image) for image in image_batch]
 
         return [img.resize(size=(int(round(img.size[0] * ratio)), int(round(img.size[1] * ratio))), resample=Image.Resampling.BILINEAR) for img in ret]

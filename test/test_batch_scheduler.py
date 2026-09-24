@@ -25,7 +25,10 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manifest["items"][0]["stageStartedAt"], 2000)
 
     def test_ocr_group_batches_only_compatible_page_settings(self):
-        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
+        scheduler = BatchScheduler(
+            None, None, tempfile.gettempdir(),
+            resource_limits=stage_resource_limits(2, 2, gpu_concurrency=2),
+        )
         batch = {"id": "manga-a", "settings": {"ocr": "48px_ctc"}}
         items = [
             {"id": "p1", "status": "queued", "pipelineStage": "ocr"},
@@ -48,7 +51,10 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_page_inference_group_batches_only_matching_model_settings(self):
-        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
+        scheduler = BatchScheduler(
+            None, None, tempfile.gettempdir(),
+            resource_limits=stage_resource_limits(2, 2, gpu_concurrency=2),
+        )
         batch = {"id": "manga-a", "settings": {}}
         items = [
             {"id": "p1", "status": "queued", "pipelineStage": "detection"},
@@ -70,10 +76,8 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    def test_mps_scheduler_keeps_default_detector_pages_single(self):
-        scheduler = BatchScheduler(
-            None, None, tempfile.gettempdir(), mps_memory_mode=True
-        )
+    def test_single_gpu_slot_keeps_page_inference_unbatched(self):
+        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
         batch = {"id": "manga-a", "settings": {}}
         items = [
             {"id": "p1", "status": "queued", "pipelineStage": "detection"},
@@ -82,21 +86,15 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(scheduler._find_page_inference_group(batch, items))
 
-        with patch.object(
-            BatchScheduler,
-            "_config_for",
-            return_value=SimpleNamespace(upscale=SimpleNamespace(dict=lambda: {})),
-        ):
-            stage, group = scheduler._find_page_inference_group(
+        self.assertIsNone(
+            scheduler._find_page_inference_group(
                 batch,
                 [
                     {"id": "p1", "status": "queued", "pipelineStage": "upscaling"},
                     {"id": "p2", "status": "queued", "pipelineStage": "upscaling"},
                 ],
             )
-
-        self.assertEqual(stage, "upscaling")
-        self.assertEqual(len(group), 2)
+        )
 
     async def test_ocr_group_claim_is_atomic_and_keeps_stage_checkpoint(self):
         with tempfile.TemporaryDirectory() as root:

@@ -75,6 +75,10 @@ class ESRGANUpscaler(OfflineUpscaler):
             image.save(os.path.join(in_dir, f'{i}.png'))
 
         try:
+            self.logger.info(
+                'RealESRGAN NCNN-Vulkan processing pages=%d through one directory process',
+                len(image_batch),
+            )
             self._run_esrgan_executable(in_dir, out_dir, upscale_ratio, 0)
         except Exception:
             # Maybe throw exception instead

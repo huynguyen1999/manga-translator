@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Icon } from "@iconify/react";
 import { apiUrl } from "@/utils/api";
-import { countOriginalTextRegions, parseDetectionRegions, parseTextRegions, type DetectedRegionLine } from "@/utils/textRegions";
+import { countOriginalTextRegions, parseBubbleDetections, parseDetectionRegions, parseTextRegions, type DetectedBubbleRegion, type DetectedRegionLine } from "@/utils/textRegions";
 import type { EditableTextBlock } from "@/types";
 
 interface PreviewImageProps {
@@ -12,6 +12,7 @@ interface PreviewImageProps {
   textRegionsUrl?: string | null;
   textRegions?: EditableTextBlock[] | null;
   showBubbleBoxes?: boolean;
+  showBubbleRegions?: boolean;
   showOriginalRegions?: boolean;
   onToggleBubbleBoxes?: (show: boolean) => void;
   isHoldingOriginal?: boolean;
@@ -73,6 +74,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     textRegionsUrl,
     textRegions,
     showBubbleBoxes: controlledShowBubbleBoxes,
+    showBubbleRegions = false,
     showOriginalRegions = false,
     onToggleBubbleBoxes,
     isHoldingOriginal: controlledIsHoldingOriginal,
@@ -110,6 +112,8 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     // Bubble detection & text inspection state
     const [internalTextRegions, setInternalTextRegions] = useState<EditableTextBlock[]>([]);
     const [detectedTextLines, setDetectedTextLines] = useState<DetectedRegionLine[] | null>(null);
+    const [detectedBubbleRegions, setDetectedBubbleRegions] = useState<DetectedBubbleRegion[]>([]);
+    const [bubbleRegionsStatus, setBubbleRegionsStatus] = useState<"idle" | "loading" | "loaded" | "error">("idle");
     const [isLoadingRegions, setIsLoadingRegions] = useState(false);
     const [internalShowBubbleBoxes, setInternalShowBubbleBoxes] = useState(false);
     const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
@@ -128,6 +132,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     const pendingSliderPosRef = useRef(50);
     const sliderFrameRef = useRef<number | null>(null);
     const sliderBadgeRef = useRef<HTMLDivElement>(null);
+    const imageMeasureFrameRef = useRef<number | null>(null);
 
     const showBubbleBoxes = controlledShowBubbleBoxes ?? internalShowBubbleBoxes;
     const setShowBubbleBoxes = (show: boolean) => {
@@ -236,10 +241,12 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     const resultFeedback = isShowingTranslatedResult && !resultLoaded ? (
       <div role="status" className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-zinc-100/90 dark:bg-zinc-950/90 text-zinc-600 dark:text-zinc-300">
         <span>{resultLoadFailed ? "Image could not be loaded" : "Loading image…"}</span>
-        <button type="button" className="rounded bg-indigo-600 px-3 py-2 text-sm text-white"
-          onClick={(event) => { event.stopPropagation(); setRetryCount((count) => count + 1); }}>
-          Retry image
-        </button>
+        {showComparisonControls && (
+          <button type="button" className="rounded bg-indigo-600 px-3 py-2 text-sm text-white"
+            onClick={(event) => { event.stopPropagation(); setRetryCount((count) => count + 1); }}>
+            Retry image
+          </button>
+        )}
       </div>
     ) : null;
 
@@ -310,6 +317,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       });
     }, [effectiveBlocks]);
     const originalTextLines: DetectedRegionLine[] = detectedTextLines ?? fallbackOriginalTextLines;
+    const bubbleCoordinateSize = detectedBubbleRegions.find((region) => region.imageSize)?.imageSize ?? naturalSize;
     const originalRegionCount = detectedTextLines?.length ?? countOriginalTextRegions(effectiveBlocks);
     const hasOriginalRegionData = originalRegionCount > 0;
     const effectiveTextRegionsUrl = textRegionsUrl
@@ -403,25 +411,69 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       };
     }, [folder, onOriginalRegionCountLoaded]);
 
+    useEffect(() => {
+      if (!showBubbleRegions) return;
+      if (!folder) {
+        setDetectedBubbleRegions([]);
+        setBubbleRegionsStatus("error");
+        return;
+      }
+
+      let isMounted = true;
+      setDetectedBubbleRegions([]);
+      setBubbleRegionsStatus("loading");
+      fetch(apiUrl(`/api/result/${encodeURIComponent(folder)}/bubble_detections.json`))
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then((data) => {
+          if (!isMounted) return;
+          setDetectedBubbleRegions(parseBubbleDetections(data));
+          setBubbleRegionsStatus("loaded");
+        })
+        .catch((error) => {
+          if (!isMounted) return;
+          console.warn("PreviewImage could not load speech bubble regions:", error);
+          setDetectedBubbleRegions([]);
+          setBubbleRegionsStatus("error");
+        });
+
+      return () => {
+        isMounted = false;
+      };
+    }, [folder, showBubbleRegions]);
+
     // Measure rendered image rect within container
     const updateImageRect = useCallback(() => {
-      if (!imgRef.current || !containerRef.current) return;
-      const imgBounds = imgRef.current.getBoundingClientRect();
-      const containerBounds = containerRef.current.getBoundingClientRect();
-      if (imgBounds.width > 0 && imgBounds.height > 0) {
-        setImageRect({
-          left: imgBounds.left - containerBounds.left,
-          top: imgBounds.top - containerBounds.top,
-          width: imgBounds.width,
-          height: imgBounds.height,
-        });
-      }
-      if (imgRef.current.naturalWidth > 0 && imgRef.current.naturalHeight > 0) {
-        setNaturalSize({
-          width: imgRef.current.naturalWidth,
-          height: imgRef.current.naturalHeight,
-        });
-      }
+      if (imageMeasureFrameRef.current !== null) return;
+      imageMeasureFrameRef.current = requestAnimationFrame(() => {
+        imageMeasureFrameRef.current = null;
+        if (!imgRef.current || !containerRef.current) return;
+        const imgBounds = imgRef.current.getBoundingClientRect();
+        const containerBounds = containerRef.current.getBoundingClientRect();
+        if (imgBounds.width > 0 && imgBounds.height > 0) {
+          const nextRect = {
+            left: imgBounds.left - containerBounds.left,
+            top: imgBounds.top - containerBounds.top,
+            width: imgBounds.width,
+            height: imgBounds.height,
+          };
+          setImageRect((previous) => previous &&
+            Math.abs(previous.left - nextRect.left) < 0.5 &&
+            Math.abs(previous.top - nextRect.top) < 0.5 &&
+            Math.abs(previous.width - nextRect.width) < 0.5 &&
+            Math.abs(previous.height - nextRect.height) < 0.5
+              ? previous
+              : nextRect);
+        }
+        if (imgRef.current.naturalWidth > 0 && imgRef.current.naturalHeight > 0) {
+          const nextSize = { width: imgRef.current.naturalWidth, height: imgRef.current.naturalHeight };
+          setNaturalSize((previous) => previous?.width === nextSize.width && previous.height === nextSize.height
+            ? previous
+            : nextSize);
+        }
+      });
     }, []);
 
     useEffect(() => {
@@ -438,11 +490,19 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       return () => {
         ro.disconnect();
         window.removeEventListener("resize", updateImageRect);
+        if (imageMeasureFrameRef.current !== null) {
+          cancelAnimationFrame(imageMeasureFrameRef.current);
+          imageMeasureFrameRef.current = null;
+        }
       };
-    }, [updateImageRect, viewMode, originalUrl, effectiveResultUrl, inpaintedUrl]);
+    }, [updateImageRect, viewMode, isHoldingOriginal, originalUrl, effectiveResultUrl, inpaintedUrl]);
 
     const handleImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
       const target = e.currentTarget;
+      if (target.src === effectiveResultUrl || (effectiveResultUrl && target.src.includes(effectiveResultUrl))) {
+        setResultLoaded(true);
+      }
+      if (target !== imgRef.current) return;
       if (target.naturalWidth > 0 && target.naturalHeight > 0) {
         setNaturalSize({
           width: target.naturalWidth,
@@ -450,9 +510,6 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
         });
       }
       updateImageRect();
-      if (target.src === effectiveResultUrl || (effectiveResultUrl && target.src.includes(effectiveResultUrl))) {
-        setResultLoaded(true);
-      }
     };
 
     const handleCopy = async (text: string, kind: "original" | "translation") => {
@@ -523,6 +580,12 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     const effectiveShowOriginal = isHoldingOriginal || (viewMode === "original" && Boolean(originalUrl));
     const effectiveShowInpainted = !isHoldingOriginal && viewMode === "inpainted" && Boolean(inpaintedUrl);
     const effectiveShowTranslated = !isHoldingOriginal && !effectiveShowInpainted && (viewMode === "translated" || !originalUrl);
+    const isSplitView = !effectiveShowOriginal && !effectiveShowInpainted && !effectiveShowTranslated;
+    const activeImage = effectiveShowOriginal
+      ? "original"
+      : effectiveShowInpainted || (isSplitView && !effectiveResultUrl)
+      ? "inpainted"
+      : "translated";
 
     const selectedBlockIndex = selectedBlockId ? effectiveBlocks.findIndex((b) => b.id === selectedBlockId) : -1;
     const selectedBlock = selectedBlockIndex !== -1 ? effectiveBlocks[selectedBlockIndex] : null;
@@ -544,6 +607,17 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
         onClick={() => setSelectedBlockId(null)}
       >
         {!effectiveShowOriginal && !effectiveShowInpainted && resultFeedback}
+        {showBubbleRegions && bubbleRegionsStatus !== "idle" && (
+          <div role="status" className="absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-md border border-violet-300/20 bg-zinc-950/90 px-2.5 py-1 text-xs text-zinc-100 shadow-lg">
+            {bubbleRegionsStatus === "loading"
+              ? "Loading speech bubbles…"
+              : bubbleRegionsStatus === "error"
+              ? "Saved speech bubble regions unavailable"
+              : detectedBubbleRegions.length > 0
+              ? `${detectedBubbleRegions.length} speech bubbles`
+              : "No saved speech bubble regions"}
+          </div>
+        )}
         {effectiveBlocks.some(block => block.review_required) && (
           <div role="status" className="absolute bottom-3 left-3 z-30 rounded bg-amber-950 px-3 py-2 text-sm text-amber-100">
             Needs editing · {effectiveBlocks.filter(block => block.review_required).length} preserved bubble(s)
@@ -692,102 +766,87 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
           </div>
         )}
 
-        {/* Full Image Modes */}
-        {effectiveShowOriginal ? (
-          <div className="relative w-full h-full flex items-center justify-center">
+        {/* Persistent image layers keep decoded sources and geometry across view changes. */}
+        <div className="relative h-full w-full">
+          {originalUrl && (
             <img
-              ref={imgRef}
-              src={originalUrl ?? undefined}
+              ref={activeImage === "original" ? imgRef : undefined}
+              src={originalUrl}
               loading={loading}
               onLoad={handleImageLoad}
-              alt={`${fileName} (${originalLabel})`}
-              className="max-w-full max-h-full object-contain rounded-lg"
+              alt={effectiveShowOriginal ? `${fileName} (${originalLabel})` : ""}
+              aria-hidden={!effectiveShowOriginal}
+              className={`absolute inset-0 m-auto max-h-full max-w-full rounded-lg object-contain ${effectiveShowOriginal ? "visible" : "invisible"}`}
               draggable={false}
             />
-          </div>
-        ) : effectiveShowInpainted ? (
-          <div className="relative w-full h-full flex items-center justify-center">
+          )}
+          {inpaintedUrl && (
             <img
-              ref={imgRef}
-              src={inpaintedUrl ?? undefined}
+              ref={activeImage === "inpainted" ? imgRef : undefined}
+              src={inpaintedUrl}
               loading={loading}
               onLoad={handleImageLoad}
-              alt={`${fileName} (${inpaintedLabel})`}
-              className="max-w-full max-h-full object-contain rounded-lg"
+              alt={effectiveShowInpainted ? `${fileName} (${inpaintedLabel})` : ""}
+              aria-hidden={!effectiveShowInpainted}
+              className={`absolute inset-0 m-auto max-h-full max-w-full rounded-lg object-contain ${effectiveShowInpainted || (isSplitView && !effectiveResultUrl) ? "visible" : "invisible"}`}
               draggable={false}
             />
-          </div>
-        ) : effectiveShowTranslated ? (
-          <div className="relative w-full h-full flex items-center justify-center">
+          )}
+          {effectiveResultUrl && (
             <img
-              ref={imgRef}
+              ref={activeImage === "translated" ? imgRef : undefined}
               key={`${effectiveResultUrl}-${retryCount}`}
-              src={effectiveResultUrl ?? undefined}
+              src={effectiveResultUrl}
               loading={loading}
               onLoad={handleImageLoad}
-              alt={`${fileName} (${resultLabel})`}
-              className="max-w-full max-h-full object-contain rounded-lg"
+              alt={effectiveShowTranslated ? `${fileName} (${resultLabel})` : ""}
+              aria-hidden={!effectiveShowTranslated}
+              className={`absolute inset-0 m-auto max-h-full max-w-full rounded-lg object-contain ${effectiveShowTranslated || isSplitView ? "visible" : "invisible"}`}
               draggable={false}
               onError={() => { setResultLoaded(false); setResultLoadFailed(true); }}
             />
-          </div>
-        ) : (
-          /* Split View Slider Mode */
-          <div className="relative w-full h-full flex items-center justify-center">
-            {/* Base Image */}
-            <img
-              ref={imgRef}
-              key={`${effectiveResultUrl || inpaintedUrl}-${retryCount}`}
-              src={(effectiveResultUrl || inpaintedUrl) ?? undefined}
-              loading={loading}
-              onLoad={handleImageLoad}
-              alt={`${fileName} (${resultLabel})`}
-              className="max-w-full max-h-full object-contain rounded-lg select-none"
-              draggable={false}
-              onError={() => { setResultLoaded(false); setResultLoadFailed(true); }}
-            />
+          )}
 
-            {/* Overlaid Image: Original (Clipped to slider percentage) */}
-            <div
-              className="absolute inset-0 flex items-center justify-center pointer-events-none"
-              style={{
-                clipPath: "inset(0 calc(100% - var(--slider-pos)) 0 0)",
-              }}
-            >
-              <img
-                src={(originalUrl || inpaintedUrl) ?? undefined}
-                loading={loading}
-                alt={`${fileName} (${originalLabel})`}
-                className="max-w-full max-h-full object-contain rounded-lg select-none"
-                draggable={false}
-              />
-            </div>
-
-            {/* Vertical Divider Line & Slider Handle */}
-            <div
-              className="absolute top-0 bottom-0 z-10 cursor-ew-resize flex items-center justify-center -translate-x-1/2"
-              style={{ left: "var(--slider-pos)" }}
-              onPointerDown={handlePointerDown}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="w-0.5 h-full bg-white shadow-[0_0_8px_rgba(0,0,0,0.6)]"></div>
-              <div className="absolute top-1/2 -translate-y-1/2 flex items-center justify-center w-8 h-8 rounded-full bg-white dark:bg-zinc-900 border-2 border-indigo-600 text-indigo-600 dark:text-indigo-400 shadow-lg hover:scale-110 active:scale-95 transition-transform">
-                <Icon icon="carbon:arrows-horizontal" className="w-4 h-4" />
+          {isSplitView && (
+            <>
+              <div
+                className="pointer-events-none absolute inset-0 flex items-center justify-center"
+                style={{ clipPath: "inset(0 calc(100% - var(--slider-pos)) 0 0)" }}
+              >
+                {originalUrl && (
+                  <img
+                    src={originalUrl}
+                    loading={loading}
+                    alt=""
+                    aria-hidden="true"
+                    className="max-h-full max-w-full rounded-lg object-contain"
+                    draggable={false}
+                  />
+                )}
               </div>
-            </div>
-
-            {/* Side Badges */}
-            <div ref={sliderBadgeRef} className="absolute bottom-2 left-2 pointer-events-none bg-black/60 text-white text-[11px] px-2 py-0.5 rounded backdrop-blur-xs select-none">
-              {originalUrl ? originalLabel : inpaintedLabel} ({Math.round(sliderPos)}%)
-            </div>
-            <div className="absolute bottom-2 right-2 pointer-events-none bg-indigo-600/90 text-white text-[11px] px-2 py-0.5 rounded backdrop-blur-xs select-none">
-              {effectiveResultUrl ? resultLabel : inpaintedLabel}
-            </div>
-          </div>
-        )}
+              <div
+                className="absolute bottom-0 top-0 z-10 flex cursor-ew-resize items-center justify-center -translate-x-1/2"
+                style={{ left: "var(--slider-pos)" }}
+                onPointerDown={handlePointerDown}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="h-full w-0.5 bg-white shadow-[0_0_8px_rgba(0,0,0,0.6)]" />
+                <div className="absolute top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full border-2 border-indigo-600 bg-white text-indigo-600 shadow-lg transition-transform hover:scale-110 active:scale-95 dark:bg-zinc-900 dark:text-indigo-400">
+                  <Icon icon="carbon:arrows-horizontal" className="h-4 w-4" />
+                </div>
+              </div>
+              <div ref={sliderBadgeRef} className="pointer-events-none absolute bottom-2 left-2 rounded bg-black/60 px-2 py-0.5 text-[11px] text-white backdrop-blur-xs select-none">
+                {originalUrl ? originalLabel : inpaintedLabel} ({Math.round(sliderPos)}%)
+              </div>
+              <div className="pointer-events-none absolute bottom-2 right-2 rounded bg-indigo-600/90 px-2 py-0.5 text-[11px] text-white backdrop-blur-xs select-none">
+                {effectiveResultUrl ? resultLabel : inpaintedLabel}
+              </div>
+            </>
+          )}
+        </div>
 
         {/* Text Region Overlays & Interactive Bubble Inspector Layer */}
-        {(showBubbleBoxes || (showOriginalRegions && hasOriginalRegionData)) && imageRect && naturalSize && naturalSize.width > 0 && naturalSize.height > 0 && (
+        {(showBubbleRegions || showBubbleBoxes || (showOriginalRegions && hasOriginalRegionData)) && imageRect && naturalSize && naturalSize.width > 0 && naturalSize.height > 0 && (
           <div
             className="absolute pointer-events-none z-20"
             style={{
@@ -797,6 +856,31 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
               height: `${imageRect.height}px`,
             }}
           >
+            {showBubbleRegions && detectedBubbleRegions.length > 0 && (
+              <svg
+                role="img"
+                aria-label={`${detectedBubbleRegions.length} detected speech bubbles`}
+                className="absolute inset-0 h-full w-full pointer-events-none"
+                viewBox={`0 0 ${bubbleCoordinateSize?.width ?? naturalSize.width} ${bubbleCoordinateSize?.height ?? naturalSize.height}`}
+                preserveAspectRatio="none"
+              >
+                {detectedBubbleRegions.flatMap((region) => region.polygons.map((polygon, polygonIdx) => (
+                  <polygon
+                    key={`${region.id}-${polygonIdx}`}
+                    points={polygon.map(([x, y]) => `${x},${y}`).join(" ")}
+                    fill="#a78bfa"
+                    fillOpacity={0.08}
+                    stroke="#c084fc"
+                    strokeOpacity={0.95}
+                    strokeWidth={2.5}
+                    vectorEffect="non-scaling-stroke"
+                  >
+                    <title>{`Speech bubble #${Number(region.id) + 1}`}</title>
+                  </polygon>
+                )))}
+              </svg>
+            )}
+
             {showOriginalRegions && hasOriginalRegionData && (
               <>
                 <svg

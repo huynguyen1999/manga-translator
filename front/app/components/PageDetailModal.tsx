@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Icon } from "@iconify/react";
 import { PreviewImage } from "@/components/PreviewImage";
+import { AppOverlayPortal } from "@/components/AppOverlayPortal";
+import { RenderProfiler } from "@/utils/renderPerformance";
 import { apiUrl } from "@/utils/api";
 import { languageOptions } from "@/config";
 import { resultFolderFromUrl } from "@/utils/resultPaths";
 import { countOriginalTextRegions } from "@/utils/textRegions";
-import type { FinishedImage, PipelineRunManifest, PipelineRunStage, TranslationSettings } from "@/types";
+import type { EditableTextBlock, FinishedImage, PipelineRunManifest, PipelineRunStage, TranslationSettings } from "@/types";
 
 export const formatElapsedTime = (durationMs?: number | null): string => {
   if (durationMs == null || !Number.isFinite(durationMs) || durationMs < 0) return "—";
@@ -569,6 +571,74 @@ export const resolveImageUrls = (
   };
 };
 
+interface PageImageStageProps {
+  imageId: string;
+  zoomLevel: number;
+  isOriginal: boolean;
+  originalUrl: Blob | File | string | null;
+  resultUrl: Blob | string | null;
+  inpaintedUrl: string | null;
+  folder: string | null;
+  textRegionsUrl?: string | null;
+  viewMode: "split" | "translated" | "inpainted" | "original" | "speech-bubbles";
+  onViewModeChange: (mode: "split" | "translated" | "inpainted" | "original") => void;
+  showBubbleBoxes: boolean;
+  showBubbleRegions: boolean;
+  showOriginalRegions: boolean;
+  onToggleBubbleBoxes: (show: boolean) => void;
+  isHoldingOriginal: boolean;
+  onTextRegionsLoaded: (blocks: EditableTextBlock[]) => void;
+  showComparisonControls: boolean;
+}
+
+const PageImageStage = React.memo<PageImageStageProps>(({
+  imageId,
+  zoomLevel,
+  isOriginal,
+  originalUrl,
+  resultUrl,
+  inpaintedUrl,
+  folder,
+  textRegionsUrl,
+  viewMode,
+  onViewModeChange,
+  showBubbleBoxes,
+  showBubbleRegions,
+  showOriginalRegions,
+  onToggleBubbleBoxes,
+  isHoldingOriginal,
+  onTextRegionsLoaded,
+  showComparisonControls,
+}) => (
+  <RenderProfiler id="PageDetailImageStage">
+  <div
+    className="relative flex h-[calc(100vh-12rem)] w-full max-w-6xl items-center justify-center transition-transform duration-100 sm:h-[calc(100vh-13rem)]"
+    style={{ transform: `scale(${zoomLevel})` }}
+  >
+    <PreviewImage
+      key={imageId}
+      file={originalUrl}
+      result={isOriginal ? null : resultUrl}
+      inpainted={isOriginal ? null : inpaintedUrl}
+      folder={folder}
+      textRegionsUrl={textRegionsUrl}
+      viewMode={isOriginal ? "original" : viewMode === "speech-bubbles" ? "original" : viewMode}
+      onViewModeChange={isOriginal ? undefined : onViewModeChange}
+      showBubbleBoxes={showBubbleBoxes}
+      showBubbleRegions={showBubbleRegions}
+      showOriginalRegions={showOriginalRegions}
+      onToggleBubbleBoxes={onToggleBubbleBoxes}
+      isHoldingOriginal={isOriginal ? false : isHoldingOriginal}
+      showFloatingToolbar={false}
+      onTextRegionsLoaded={onTextRegionsLoaded}
+      showComparisonControls={showComparisonControls}
+      preloadImages={false}
+      className="max-h-full max-w-full rounded-lg shadow-2xl"
+    />
+  </div>
+  </RenderProfiler>
+));
+
 export interface PageDetailModalProps {
   image: FinishedImage;
   onClose: () => void;
@@ -627,15 +697,28 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("timing");
   const [sidebarWidth, setSidebarWidth] = useState(480); // 1.5x of original 320px
   const sidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const sidebarWidthRef = useRef(sidebarWidth);
+  const sidebarResizeFrameRef = useRef<number | null>(null);
+  const pendingSidebarWidthRef = useRef<number | null>(null);
+  const sidebarResizeCleanupRef = useRef<(() => void) | null>(null);
   const isOriginal = image.sourceType === "original";
 
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const modalContainerRef = useRef<HTMLDivElement>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const attachCloseButton = useCallback((element: HTMLButtonElement | null) => {
+    closeButtonRef.current = element;
+    element?.focus();
+  }, []);
 
   // Focus close button on mount
   useEffect(() => {
+    restoreFocusRef.current = document.activeElement as HTMLElement | null;
     closeButtonRef.current?.focus();
+    return () => restoreFocusRef.current?.focus();
   }, []);
+
+  useEffect(() => () => sidebarResizeCleanupRef.current?.(), []);
 
   // Reset stage-specific details when the active image changes
   useEffect(() => {
@@ -747,21 +830,44 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   // Sidebar resize handlers
   const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
-    sidebarResizeRef.current = { startX: e.clientX, startWidth: sidebarWidth };
+    sidebarResizeRef.current = { startX: e.clientX, startWidth: sidebarWidthRef.current };
     const onMouseMove = (moveEvent: MouseEvent) => {
       if (!sidebarResizeRef.current) return;
-      const delta = sidebarResizeRef.current.startX - moveEvent.clientX;
-      const next = Math.max(280, Math.min(700, sidebarResizeRef.current.startWidth + delta));
-      setSidebarWidth(next);
+      pendingSidebarWidthRef.current = Math.max(
+        280,
+        Math.min(700, sidebarResizeRef.current.startWidth + sidebarResizeRef.current.startX - moveEvent.clientX),
+      );
+      if (sidebarResizeFrameRef.current !== null) return;
+      sidebarResizeFrameRef.current = requestAnimationFrame(() => {
+        sidebarResizeFrameRef.current = null;
+        const nextWidth = pendingSidebarWidthRef.current;
+        if (nextWidth !== null) modalContainerRef.current?.style.setProperty("--details-sidebar-width", `${nextWidth}px`);
+      });
     };
-    const onMouseUp = () => {
-      sidebarResizeRef.current = null;
+    const cleanup = () => {
       document.removeEventListener("mousemove", onMouseMove);
       document.removeEventListener("mouseup", onMouseUp);
+      if (sidebarResizeFrameRef.current !== null) {
+        cancelAnimationFrame(sidebarResizeFrameRef.current);
+        sidebarResizeFrameRef.current = null;
+      }
+      sidebarResizeRef.current = null;
+      pendingSidebarWidthRef.current = null;
+      sidebarResizeCleanupRef.current = null;
     };
+    const onMouseUp = () => {
+      const finalWidth = pendingSidebarWidthRef.current;
+      if (finalWidth !== null) {
+        sidebarWidthRef.current = finalWidth;
+        setSidebarWidth(finalWidth);
+        modalContainerRef.current?.style.setProperty("--details-sidebar-width", `${finalWidth}px`);
+      }
+      cleanup();
+    };
+    sidebarResizeCleanupRef.current = cleanup;
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
-  }, [sidebarWidth]);
+  }, []);
 
   // Download handler
   const handleDownload = useCallback(() => {
@@ -910,11 +1016,18 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   const originalTextAvailable = Boolean(
     image.hasTextRegions || image.textRegionsUrl || (bubbleCount !== null && bubbleCount > 0),
   );
+  const handleTextRegionsLoaded = useCallback((blocks: EditableTextBlock[]) => {
+    setBubbleCount(blocks.length);
+    setOriginalRegionCount(countOriginalTextRegions(blocks));
+  }, []);
 
   return (
+    <AppOverlayPortal>
     <div
       ref={modalContainerRef}
-      className="fixed inset-0 z-50 flex flex-col bg-black/90 p-2 backdrop-blur-md sm:p-4"
+      data-app-overlay="page-detail"
+      style={{ "--details-sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}
+      className="fixed inset-0 z-50 flex flex-col bg-black/90 p-2 sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="page-detail-viewer-title"
@@ -1042,7 +1155,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                       ? "bg-violet-600 text-white shadow-xs"
                       : "text-zinc-300 hover:bg-white/10 hover:text-white"
                   }`}
-                  title="Show detected speech bubbles over the original page"
+                  title="Show saved speech bubble regions over the original page"
                 >
                   Speech bubbles
                 </button>
@@ -1230,7 +1343,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
 
             {/* Close Button */}
             <button
-              ref={closeButtonRef}
+              ref={attachCloseButton}
               type="button"
               onClick={onClose}
               className="flex min-h-8 min-w-8 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-300 cursor-pointer"
@@ -1284,44 +1397,30 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
               className="flex min-h-full min-w-full items-center justify-center"
               onClick={(event) => event.stopPropagation()}
             >
-              <div
-                className="relative flex h-[calc(100vh-12rem)] w-full max-w-6xl items-center justify-center transition-transform duration-100 sm:h-[calc(100vh-13rem)]"
-                style={{ transform: `scale(${zoomLevel})` }}
-              >
-                <PreviewImage
-                  key={image.id}
-                  file={resolvedOriginalUrl}
-                  result={isOriginal ? null : resolvedResultUrl}
-                  inpainted={isOriginal ? null : resolvedInpaintedUrl}
-                  folder={resolvedFolder}
-                  textRegionsUrl={image.textRegionsUrl}
-                  viewMode={isOriginal ? "original" : viewMode === "speech-bubbles" ? "original" : viewMode}
-                  onViewModeChange={isOriginal ? undefined : setViewMode}
-                  showBubbleBoxes={showBubbleBoxes}
-                  showOriginalRegions={showOriginalRegions}
-                  onToggleBubbleBoxes={setShowBubbleBoxes}
-                  isHoldingOriginal={isOriginal ? false : isHoldingOriginal}
-                  showFloatingToolbar={false}
-                  onTextRegionsLoaded={(blocks) => {
-                    setBubbleCount(blocks.length);
-                    setOriginalRegionCount(countOriginalTextRegions(blocks));
-                  }}
-                  showComparisonControls={isOriginal ? originalTextAvailable : true}
-                  className="max-h-full max-w-full rounded-lg shadow-2xl"
-                />
-                {viewMode === "speech-bubbles" && resolvedBubbleMaskUrl && (
-                  <img
-                    src={resolvedBubbleMaskUrl}
-                    alt="Detected speech bubbles highlighted over the original page"
-                    className="pointer-events-none absolute inset-0 z-10 h-full w-full rounded-lg object-contain opacity-40 mix-blend-screen"
-                  />
-                )}
-              </div>
+              <PageImageStage
+                imageId={image.id}
+                zoomLevel={zoomLevel}
+                isOriginal={isOriginal}
+                originalUrl={resolvedOriginalUrl}
+                resultUrl={resolvedResultUrl}
+                inpaintedUrl={resolvedInpaintedUrl}
+                folder={resolvedFolder}
+                textRegionsUrl={image.textRegionsUrl}
+                viewMode={viewMode}
+                onViewModeChange={setViewMode}
+                showBubbleBoxes={showBubbleBoxes}
+                showBubbleRegions={viewMode === "speech-bubbles"}
+                showOriginalRegions={showOriginalRegions}
+                onToggleBubbleBoxes={setShowBubbleBoxes}
+                isHoldingOriginal={isHoldingOriginal}
+                onTextRegionsLoaded={handleTextRegionsLoaded}
+                showComparisonControls={isOriginal ? originalTextAvailable : true}
+              />
             </div>
               </div>
 
               {!isOriginal && (
-                <div className="relative hidden lg:flex shrink-0 flex-col" style={{ width: sidebarWidth }}>
+                <div className="relative hidden lg:flex shrink-0 flex-col" style={{ width: "var(--details-sidebar-width)" }}>
                   {/* Drag-to-resize handle */}
                   <div
                     className="absolute left-0 top-0 h-full w-1 cursor-col-resize z-10 group"
@@ -1894,6 +1993,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
         </div>
       </div>
     </div>
+    </AppOverlayPortal>
   );
 };
 

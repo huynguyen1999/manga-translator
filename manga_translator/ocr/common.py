@@ -36,7 +36,14 @@ class CommonOCR(InfererModule):
                         nodes = sorted(nodes, key = lambda x: -(bboxes[x].aabb.x + bboxes[x].aabb.w))
                     # yield overall bbox and sorted indices
                     for node in nodes:
-                        yield bboxes[node], majority_dir
+                        box = bboxes[node]
+                        if getattr(box, "aspect_ratio", 1.0) > 1.2:
+                            line_dir = 'h'
+                        elif getattr(box, "aspect_ratio", 1.0) < 0.8:
+                            line_dir = 'v'
+                        else:
+                            line_dir = majority_dir
+                        yield box, line_dir
 
     async def recognize(self, image: np.ndarray, textlines: List[Quadrilateral], config: OcrConfig, verbose: bool = False) -> List[Quadrilateral]:
         '''

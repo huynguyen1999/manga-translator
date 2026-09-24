@@ -1,6 +1,9 @@
 import os
 import sys
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
@@ -10,7 +13,10 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from manga_translator.utils.generic import dump_image, load_image
-from manga_translator.rendering.text_render import set_font, put_text_horizontal, get_char_glyph, CURRENT_FONT_PATH
+from manga_translator import Context
+from manga_translator.rendering.text_render import set_font, put_text_horizontal, get_char_glyph
+from manga_translator.rendering import get_default_eng_font, text_render
+from manga_translator.rendering.layout import solver
 from manga_translator.manga_translator import MangaTranslator
 from server.sent_data_internal import get_client_session, close_client_session
 from server.instance import ExecutorInstance
@@ -53,6 +59,36 @@ class TestPerformanceImprovements(unittest.TestCase):
         set_font('')
         info2 = get_char_glyph.cache_info()
         self.assertEqual(info1.currsize, info2.currsize)
+
+    def test_layout_pages_run_concurrently_with_isolated_fonts(self):
+        barrier = threading.Barrier(2, timeout=10)
+        font_path = get_default_eng_font()
+
+        def resize_face(size):
+            set_font(font_path)
+            face = text_render.FONT_SELECTION[0]
+            barrier.wait()
+            face.set_pixel_sizes(0, size)
+            return face
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first, second = executor.map(resize_face, (24, 48))
+
+        self.assertIsNot(first, second)
+
+        layout_barrier = threading.Barrier(2, timeout=10)
+        contexts = [
+            Context(img_rgb=np.zeros((16, 16, 3), dtype=np.uint8), text_regions=[])
+            for _ in range(2)
+        ]
+        with patch.object(solver, "_record_content_trace", lambda *_: layout_barrier.wait()):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(solver.apply_shape_aware_bubble_layout, ctx, Config())
+                    for ctx in contexts
+                ]
+                for future in futures:
+                    future.result(timeout=15)
 
     def test_put_text_horizontal(self):
         set_font('')

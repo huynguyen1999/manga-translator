@@ -94,17 +94,13 @@ def infer_mocr_batch(mocr: MangaOcr, images: List[Image.Image], batch_size: int 
     results = []
     for i in range(0, len(images), batch_size):
         chunk = images[i:i + batch_size]
-        try:
-            converted = [img.convert("L").convert("RGB") for img in chunk]
-            pixel_values = mocr.processor(converted, return_tensors="pt").pixel_values
-            device = getattr(mocr.model, 'device', 'cpu')
-            generated = mocr.model.generate(pixel_values.to(device), max_length=300).cpu()
-            decoded = mocr.tokenizer.batch_decode(generated, skip_special_tokens=True)
-            from manga_ocr.ocr import post_process
-            results.extend([post_process(t) for t in decoded])
-        except Exception:
-            for img in chunk:
-                results.append(mocr(img))
+        converted = [img.convert("L").convert("RGB") for img in chunk]
+        pixel_values = mocr.processor(converted, return_tensors="pt").pixel_values
+        device = getattr(mocr.model, 'device', 'cpu')
+        generated = mocr.model.generate(pixel_values.to(device), max_length=300).cpu()
+        decoded = mocr.tokenizer.batch_decode(generated, skip_special_tokens=True)
+        from manga_ocr.ocr import post_process
+        results.extend([post_process(t) for t in decoded])
     return results
 
 class ModelMangaOCR(OfflineOCR):
@@ -194,72 +190,104 @@ class ModelMangaOCR(OfflineOCR):
         del self.mocr
     
     async def _infer(self, image: np.ndarray, textlines: List[Quadrilateral], config: OcrConfig, verbose: bool = False, ignore_bubble: int = 0) -> List[TextBlock]:
-        text_height = 48
-        max_chunk_size = 16
-        threshold = 0.2 if config.prob is None else config.prob
+        return (await self._infer_batch([(image, textlines, config)], verbose))[0]
 
-        quadrilaterals = list(self._generate_text_direction(textlines))
-        region_imgs = [q.get_transformed_region(image, d, text_height) for q, d in quadrilaterals]
-
-        perm = range(len(region_imgs))
-        is_quadrilaterals = False
-        if len(quadrilaterals) > 0 and isinstance(quadrilaterals[0][0], Quadrilateral):
-            perm = sorted(range(len(region_imgs)), key = lambda x: region_imgs[x].shape[1])
-            is_quadrilaterals = True
-        
-        texts = {}
+    async def _prepare_mocr_regions(self, image, textlines, config, quadrilaterals):
         if config.use_mocr_merge:
             merged_textlines, merged_idx = await merge_bboxes(textlines, image.shape[1], image.shape[0])
             merged_quadrilaterals = list(self._generate_text_direction(merged_textlines))
         else:
-            merged_idx = [[i] for i in range(len(region_imgs))]
+            merged_idx = [[i] for i in range(len(quadrilaterals))]
             merged_quadrilaterals = quadrilaterals
-        merged_region_imgs = []
-        for q, d in merged_quadrilaterals:
-            if d == 'h':
-                merged_text_height = q.aabb.w
-                merged_d = 'h'
-            elif d == 'v':
-                merged_text_height = q.aabb.h
-                merged_d = 'h'
-            merged_region_imgs.append(q.get_transformed_region(image, merged_d, merged_text_height))
-        merged_pil_imgs = [Image.fromarray(img) for img in merged_region_imgs]
-        if merged_pil_imgs:
-            self.logger.info(
-                f'MangaOCR inference: requested_device={self.device} '
-                f'runtime_device={getattr(self.mocr.model, "device", "unknown")} backend=manga-ocr'
+
+        crops = []
+        for region, direction in merged_quadrilaterals:
+            crop_height = region.aabb.w if direction == 'h' else region.aabb.h
+            crop = region.get_transformed_region(image, 'h', crop_height)
+            crops.append(Image.fromarray(crop))
+        return merged_idx, merged_quadrilaterals, crops
+
+    async def _infer_batch(
+        self,
+        pages: List[Tuple[np.ndarray, List[Quadrilateral], OcrConfig]],
+        verbose: bool = False,
+    ) -> List[List[TextBlock]]:
+        if not pages:
+            return []
+
+        text_height = 48
+        prepared = []
+        for page_index, (image, textlines, config) in enumerate(pages):
+            quadrilaterals = list(self._generate_text_direction(textlines))
+            region_imgs = [q.get_transformed_region(image, direction, text_height) for q, direction in quadrilaterals]
+            perm = list(range(len(region_imgs)))
+            is_quadrilaterals = bool(quadrilaterals) and isinstance(quadrilaterals[0][0], Quadrilateral)
+            if is_quadrilaterals:
+                perm.sort(key=lambda index: region_imgs[index].shape[1])
+            merged_idx, merged_quadrilaterals, crops = await self._prepare_mocr_regions(
+                image, textlines, config, quadrilaterals
             )
-            mocr_texts = infer_mocr_batch(self.mocr, merged_pil_imgs, batch_size = 8)
-            for idx, text in enumerate(mocr_texts):
-                texts[idx] = text
-            
-        ix = 0
-        out_regions = {}
-        for indices in chunks(perm, max_chunk_size):
-            N = len(indices)
-            widths = [region_imgs[i].shape[1] for i in indices]
+            prepared.append({
+                'image': image,
+                'textlines': textlines,
+                'config': config,
+                'quadrilaterals': quadrilaterals,
+                'region_imgs': region_imgs,
+                'perm': perm,
+                'is_quadrilaterals': is_quadrilaterals,
+                'merged_idx': merged_idx,
+                'merged_quadrilaterals': merged_quadrilaterals,
+                'mocr_crops': crops,
+                'texts': {},
+                'out_regions': {},
+            })
+
+        mocr_image_refs = [
+            (page_index, rank)
+            for rank in range(max((len(page['mocr_crops']) for page in prepared), default=0))
+            for page_index, page in enumerate(prepared)
+            if rank < len(page['mocr_crops'])
+        ]
+        mocr_images = [prepared[page_index]['mocr_crops'][rank] for page_index, rank in mocr_image_refs]
+
+        if mocr_images:
+            self.logger.info(
+                f'MangaOCR batch: pages={len(pages)} crops={len(mocr_images)} device={self.device}'
+            )
+            mocr_texts = infer_mocr_batch(self.mocr, mocr_images, batch_size=max(8, len(pages)))
+            for (page_index, crop_index), text in zip(mocr_image_refs, mocr_texts):
+                prepared[page_index]['texts'][crop_index] = text
+
+        region_order = [
+            (page_index, page['perm'][rank])
+            for rank in range(max((len(page['perm']) for page in prepared), default=0))
+            for page_index, page in enumerate(prepared)
+            if rank < len(page['perm'])
+        ]
+        debug_index = 0
+        for crop_refs in chunks(region_order, max(16, len(pages))):
+            widths = [prepared[page_index]['region_imgs'][region_index].shape[1]
+                      for page_index, region_index in crop_refs]
             max_width = 4 * (max(widths) + 7) // 4
-            region = np.zeros((N, text_height, max_width, 3), dtype = np.uint8)
-            idx_keys = []
-            for i, idx in enumerate(indices):
-                idx_keys.append(idx)
-                W = region_imgs[idx].shape[1]
-                tmp = region_imgs[idx]
-                region[i, :, : W, :]=tmp
+            region = np.zeros((len(crop_refs), text_height, max_width, 3), dtype=np.uint8)
+            for row, (page_index, region_index) in enumerate(crop_refs):
+                page = prepared[page_index]
+                crop = page['region_imgs'][region_index]
+                region[row, :, :crop.shape[1], :] = crop
                 if verbose:
                     os.makedirs('result/ocrs/', exist_ok=True)
-                    if quadrilaterals[idx][1] == 'v':
-                        cv2.imwrite(f'result/ocrs/{ix}.png', cv2.rotate(cv2.cvtColor(region[i, :, :, :], cv2.COLOR_RGB2BGR), cv2.ROTATE_90_CLOCKWISE))
+                    if page['quadrilaterals'][region_index][1] == 'v':
+                        cv2.imwrite(f'result/ocrs/{debug_index}.png', cv2.rotate(cv2.cvtColor(region[row], cv2.COLOR_RGB2BGR), cv2.ROTATE_90_CLOCKWISE))
                     else:
-                        cv2.imwrite(f'result/ocrs/{ix}.png', cv2.cvtColor(region[i, :, :, :], cv2.COLOR_RGB2BGR))
-                ix += 1
+                        cv2.imwrite(f'result/ocrs/{debug_index}.png', cv2.cvtColor(region[row], cv2.COLOR_RGB2BGR))
+                debug_index += 1
             image_tensor = (torch.from_numpy(region).float() - 127.5) / 127.5
             image_tensor = einops.rearrange(image_tensor, 'N H W C -> N C H W')
             if self.use_gpu:
                 image_tensor = image_tensor.to(self.device)
-            with torch.no_grad():
-                ret = self.model.infer_beam_batch(image_tensor, widths, beams_k = 1, max_seq_length = 32)
-            for i, (pred_chars_index, prob, fg_pred, bg_pred, fg_ind_pred, bg_ind_pred) in enumerate(ret):
+            with torch.inference_mode():
+                results = self.model.infer_beam_batch(image_tensor, widths, beams_k=1, max_seq_length=32)
+            for row, (pred_chars_index, prob, fg_pred, bg_pred, fg_ind_pred, bg_ind_pred) in enumerate(results):
                 has_fg = (fg_ind_pred[:, 1] > fg_ind_pred[:, 0])
                 has_bg = (bg_ind_pred[:, 1] > bg_ind_pred[:, 0])
                 fr = AvgMeter()
@@ -292,7 +320,8 @@ class ModelMangaOCR(OfflineOCR):
                 br = min(max(int(br()), 0), 255)
                 bg = min(max(int(bg()), 0), 255)
                 bb = min(max(int(bb()), 0), 255)
-                cur_region = quadrilaterals[indices[i]][0]
+                page_index, region_index = crop_refs[row]
+                cur_region = prepared[page_index]['quadrilaterals'][region_index][0]
                 if isinstance(cur_region, Quadrilateral):
                     cur_region.prob = prob
                     cur_region.fg_r = fr
@@ -304,8 +333,17 @@ class ModelMangaOCR(OfflineOCR):
                 else:
                     cur_region.update_font_colors(np.array([fr, fg, fb]), np.array([br, bg, bb]))
 
-                out_regions[idx_keys[i]] = cur_region
-                
+                prepared[page_index]['out_regions'][region_index] = cur_region
+
+        return [self._finish_page(page) for page in prepared]
+
+    def _finish_page(self, page) -> List[TextBlock]:
+        config = page['config']
+        threshold = 0.2 if config.prob is None else config.prob
+        merged_idx = page['merged_idx']
+        merged_quadrilaterals = page['merged_quadrilaterals']
+        texts = page['texts']
+        out_regions = page['out_regions']
         output_regions = []
         for i, nodes in enumerate(merged_idx):
             total_logprobs = 0
@@ -344,8 +382,8 @@ class ModelMangaOCR(OfflineOCR):
             br = round(np.mean(bg_r)) if bg_r else 0
             bg = round(np.mean(bg_g)) if bg_g else 0
             bb = round(np.mean(bg_b)) if bg_b else 0
-            
-            txt = texts[i]
+
+            txt = texts.get(i, '')
             self.logger.info(f'prob: {prob} {txt} fg: ({fr}, {fg}, {fb}) bg: ({br}, {bg}, {bb})')
             cur_region = merged_quadrilaterals[i][0]
             if isinstance(cur_region, Quadrilateral):
@@ -362,6 +400,6 @@ class ModelMangaOCR(OfflineOCR):
                 cur_region.update_font_colors(np.array([fr, fg, fb]), np.array([br, bg, bb]))
             output_regions.append(cur_region)
 
-        if is_quadrilaterals:
+        if page['is_quadrilaterals']:
             return output_regions
-        return textlines
+        return page['textlines']

@@ -2,6 +2,62 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-24 — Layout pages were serialized by the render lock
+
+- Symptom: Batch pages reached the layout stage but only one page used CPU at a time.
+- Root cause: The page solver held a process-wide render lock while mutating shared FreeType font selection and face state.
+- Fix: Give each thread its own font faces and selection, key layout caches by font selection, and remove the broad lock from page layout.
+- Prevention: Keep layout state page-local and only lock genuinely shared render operations.
+
+## 2026-09-24 — MangaOCR pages were dispatched serially
+
+- Symptom: MangaOCR pages in one batch entered separate OCR inference calls.
+- Root cause: The scheduler grouped only the 48px backends, and `dispatch_batch()` looped through MangaOCR pages; its existing crop batching covered only one page per call.
+- Fix: Group compatible MangaOCR pages up to `--workers`, interleave their crops, and batch both MangaOCR generation and auxiliary confidence/color inference across pages.
+- Prevention: Keep scheduler eligibility and backend dispatch batching in sync; verify every GPU OCR backend maps crop outputs back to their source pages.
+
+## 2026-09-24 — Completed batch pages were detached from their manga
+
+- Symptom: A completed translation batch had saved result pages, but the manga detail showed only the page already assigned to its group.
+- Root cause: The gallery lists pages by manga-group membership; batch records keep result folders for finished items, but there was no detail-page action to reassign saved results when their group metadata differed.
+- Fix: Restore finished result folders from terminal translation batches matching the manga title or group ID into the open manga group.
+- Prevention: Keep batch completion and manga membership as separate states, and provide a recovery action that relinks existing results without rerunning translation.
+
+## 2026-09-24 — Manga detail kept a stale page list after batch completion
+
+- Symptom: A completed translation batch could leave an already-open manga detail showing its previously cached pages.
+- Root cause: Batch completion refreshed manga counts, but only rerender completion invalidated the gallery's cached per-manga page lists.
+- Fix: Invalidate and reload gallery pages when either a translation batch or rerender reaches completion.
+- Prevention: Refresh both group summaries and page lists after jobs that create or replace result pages.
+
+## 2026-09-24 — GPU stages were rerouted to CPU under contention
+
+- Symptom: A GPU-capable page stage ran on CPU when another page held the GPU slot.
+- Root cause: The scheduler treated GPU-slot contention as a reason to bypass the shared model executor and load a separate CPU model.
+- Fix: Keep the stage on its configured device and wait for the shared GPU slot; remove the CPU-only cache bypass.
+- Prevention: Accelerator contention must queue model work, not change its device. CPU fallback remains limited to an explicit backend unsupported-operation path.
+
+## 2026-09-24 — Recommended 48px OCR stayed page-serial
+
+- Symptom: Studio's recommended 48px OCR pages ran in separate model calls even though the scheduler grouped only CTC OCR.
+- Root cause: `_find_ocr_group()` excluded the UI-default recognizer, and `dispatch_batch()` serialized every backend except CTC.
+- Fix: Pool compatible 48px OCR crops from as many ready pages as `--workers` into shared model calls, while retaining each page's probability threshold and output regions.
+- Prevention: Keep page batch size wired to startup worker count and verify scheduler grouping and model dispatch for the UI-default backend.
+
+## 2026-09-24 — Bubble and inpainting stages stayed page-serial
+
+- Symptom: Speech-bubble detection and inpainting called their GPU model once per page even though their model paths can accept multiple pages.
+- Root cause: A single GPU concurrency slot disabled all scheduler page groups, and LaMa/AOT inpainting only built batch-size-one tensors. Reloaded inpainting checkpoints also dropped the saved protected bubble edge and translated regions from runtime context.
+- Fix: Keep safe bubble batches enabled at one GPU slot; add two-page default AOT tensors with padding capped at 25%, checkpoint-group AOT inpainting, and reload persisted translations and protected edges. LaMa Large starts at batch size one for memory, while LaMa MPE remains single-page because its positional encoding reads only the first batch item.
+- Prevention: Treat active GPU calls and items per model call as separate limits; checkpointed batched stages must restore all artifacts consumed by their model and postprocessing.
+
+## 2026-09-24 — Professional batches stalled behind completed pages
+
+- Symptom: Prepared pages stayed at “Waiting for batch translation” when another page in the same professional story segment had completed.
+- Root cause: Professional story scheduling rejected a whole segment if any page was terminal, including textless pages that correctly completed before translation.
+- Fix: Exclude completed pages from the selected story group and remap story/archive ranges across skipped pages; failed pages continue to block the batch.
+- Prevention: Cover professional story barriers with completed textless pages both inside and at the edge of a segment.
+
 ## 2026-09-23 — Recent titles appeared as existing manga groups
 
 - Symptom: A title with no manga in the library, such as `6`, was labeled as an existing group in the assignment dialog.
@@ -20,8 +76,11 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 
 - Symptom: Two-page text detection reached 5.86 GB of MPS driver memory in the second repeated batch, compared with 2.51 GB for fresh single-page detection; batch cleanup returned live tensor memory near its prior level.
 - Root cause: The default detector pads paired pages into one 2048px model tensor, increasing the MPS working set. The shared in-process executor also allowed two local model calls, which could compound peaks, though the recorded repeated nine-page runs themselves had one GPU slot.
-- Fix: On MPS, cap shared model calls and scheduler GPU work at one, and route default/DBNet detection through the single-page checkpoint path.
-- Prevention: Keep scheduler and executor limits aligned with the selected device, and compare sampled process footprint with live and driver MPS metrics across repeated batches.
+- Earlier fix: On MPS, cap shared model calls and scheduler GPU work at one, and route default/DBNet detection through the single-page checkpoint path.
+- Symptom (2026-09-24): `python server/main.py --workers 2` aborted with macOS malloc heap-corruption detection after enabling two MPS model calls and paired detection.
+- Updated policy (2026-09-24): Keep concurrent accelerator calls serialized, but batch compatible default/DBNet detection pages into one MPS call up to `--workers`. This supersedes the earlier single-page scheduler gate; the recorded crash and memory spike remain relevant when assessing future failures.
+- Fix (2026-09-24): Run default and DBConvNeXt MPS detector batches with FP16 autocast and inference mode to reduce feature-map activation memory while preserving one call for all pages. Keep output maps in FP32 for detection postprocessing, and restrict CPU fallback to explicit unsupported-operation errors so MPS memory failures remain visible on the selected device.
+- Prevention: Keep scheduler and executor concurrency limits separate from per-call page batch size; use lower-precision inference to control MPS activation peaks and never interpret out-of-memory as a missing GPU kernel.
 
 ## 2026-09-23 — Concurrent offline translation mixed per-request settings
 
@@ -673,3 +732,38 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 - Root cause: The timing resolver preferred the page-level duration or started-to-finished interval over the stage durations.
 - Fix: Sum available stage durations first, retaining existing metadata and timestamp fallbacks when stage timing is absent.
 - Prevention: Keep timing resolution based on recorded processing stages when they are available.
+
+## 2026-09-24 — Speech bubble preview was invisible on white balloons
+
+- Symptom: Selecting Speech bubbles showed no visible regions on manga pages with white balloon interiors.
+- Root cause: The viewer screen-blended a filled white cleanup mask over the original page and never loaded the saved detection polygons.
+- Fix: Load `bubble_detections.json` and draw its saved polygons in an image-aligned SVG overlay, with visible loading and missing-data states.
+- Prevention: Render saved detection geometry against the source image so white regions remain visible as outlines.
+
+## 2026-09-24 — PreviewImage changed hook order when image controls appeared
+
+- Symptom: Switching a preview from its single-image fallback to the comparison viewer could trigger React's hook-order error.
+- Root cause: The newly added active-image measurement effect was declared after the single-image early return.
+- Fix: Reuse the existing unconditional resize effect and track Hold Peek changes there.
+- Prevention: Keep all hooks above conditional returns; test previews when result or region data appears after mount.
+
+## 2026-09-24 — Job thumbnail nested an image retry button
+
+- Symptom: Jobs rendered a nested `<button>` and emitted a React hydration warning when a result thumbnail was loading or failed.
+- Root cause: `PreviewImage` always showed its retry control, including when embedded inside the thumbnail's own button.
+- Fix: Show the retry control only in comparison previews; the thumbnail still opens the full viewer, where retry is available.
+- Prevention: Keep preview thumbnails non-interactive and check the server-rendered Jobs list for nested controls.
+
+## 2026-09-24 — Text at an image edge produced an empty mask crop
+
+- Symptom: Mask generation failed with `'NoneType' object is not subscriptable` inside `refine_mask`.
+- Root cause: `extend_rect` treated image dimensions as inclusive coordinates and subtracted one, making a crop zero-sized for small components on the last row or column; OpenCV returns `None` for `bitwise_not` on an empty array.
+- Fix: Cap crop width and height by the remaining image dimensions without subtracting one.
+- Prevention: Cover mask crops that touch each image edge, including one-pixel components.
+
+## 2026-09-24 — Terminal failed batches skipped memory reclamation
+
+- Symptom: Removing a failed page did not reduce retained translation/device memory.
+- Root cause: Several checkpointed and grouped failure paths marked a batch terminal but skipped the history cleanup and device-cache reclaim used by successful batch completion.
+- Fix: Run the same cleanup when processing, translation, or rerun paths finish in an error state.
+- Prevention: Every terminal batch transition must release page context and reclaim unused device cache while its worker is still owned.

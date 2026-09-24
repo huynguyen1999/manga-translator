@@ -154,12 +154,13 @@ def _summary_log(
 postgres_store: PostgresStore | None = None
 search_service: SearchService | None = None
 batch_resource_limits = stage_resource_limits(3, 1)
-mps_memory_mode = False
+inference_page_batch_size = 3
 model_executor_concurrency = MODEL_EXECUTOR_CONCURRENCY
 batch_store = BatchStore(BATCH_ROOT, SERVER_RESULT_ROOT)
 batch_scheduler = BatchScheduler(
-    batch_store, executor_instances, SERVER_RESULT_ROOT, resource_limits=batch_resource_limits,
-    mps_memory_mode=mps_memory_mode,
+    batch_store, executor_instances, SERVER_RESULT_ROOT,
+    resource_limits=batch_resource_limits,
+    inference_page_batch_size=inference_page_batch_size,
 )
 summary_scheduler: SummaryScheduler | None = None
 
@@ -195,8 +196,9 @@ async def lifespan(_app: FastAPI):
         set_document_saver(save_documents)
         batch_store = PostgresBatchStore(postgres_store, BATCH_ROOT, SERVER_RESULT_ROOT)
         batch_scheduler = BatchScheduler(
-            batch_store, executor_instances, SERVER_RESULT_ROOT, resource_limits=batch_resource_limits,
-            mps_memory_mode=mps_memory_mode,
+            batch_store, executor_instances, SERVER_RESULT_ROOT,
+            resource_limits=batch_resource_limits,
+            inference_page_batch_size=inference_page_batch_size,
         )
         set_result_indexer(postgres_store.sync_result_folder)
         set_request_lookup(postgres_store.find_request)
@@ -205,8 +207,9 @@ async def lifespan(_app: FastAPI):
         postgres_store = None
         batch_store = BatchStore(BATCH_ROOT, SERVER_RESULT_ROOT)
         batch_scheduler = BatchScheduler(
-            batch_store, executor_instances, SERVER_RESULT_ROOT, resource_limits=batch_resource_limits,
-            mps_memory_mode=mps_memory_mode,
+            batch_store, executor_instances, SERVER_RESULT_ROOT,
+            resource_limits=batch_resource_limits,
+            inference_page_batch_size=inference_page_batch_size,
         )
         set_document_saver(None)
         set_result_indexer(None)
@@ -1983,7 +1986,8 @@ def _cpu_stage_worker_count(
     workers = max(1, num_workers)
     if configured is not None:
         return min(workers, max(1, configured))
-    cpu_budget = max(1, (cpu_count or os.cpu_count() or 4) - 1)
+    # ponytail: keep two page-stage slots when two pipelines are requested; the API shares those cores.
+    cpu_budget = max(2, (cpu_count or os.cpu_count() or 4) - 1)
     return min(workers, 3, cpu_budget)
 
 
@@ -2096,32 +2100,34 @@ def _setup_subprocess_workers(args, num_workers: int):
     return [w["proc"] for w in worker_procs]
 
 def prepare(args):
-    global worker_procs, shutting_down, batch_resource_limits
-    global mps_memory_mode, model_executor_concurrency
+    global worker_procs, shutting_down, batch_resource_limits, inference_page_batch_size
+    global model_executor_concurrency
     _init_server_environment(args)
 
     executor_mode = getattr(args, 'executor_mode', EXECUTOR_MODE_INPROCESS)
     num_workers = max(1, getattr(args, 'workers', 3))
+    inference_page_batch_size = num_workers
     cpu_workers = _cpu_stage_worker_count(
         num_workers, getattr(args, 'cpu_stage_workers', None)
     )
-    mps_memory_mode = False
+    gpu_available = False
     if getattr(args, 'start_instance', False):
         import torch
         requested_gpu = bool(getattr(args, 'use_gpu', False) or getattr(args, 'use_gpu_limited', False))
-        mps_memory_mode = (
-            requested_gpu
-            and not torch.xpu.is_available()
-            and torch.backends.mps.is_available()
+        gpu_available = requested_gpu and (
+            torch.xpu.is_available()
+            or torch.backends.mps.is_available()
+            or torch.cuda.is_available()
         )
-    model_executor_concurrency = 1 if mps_memory_mode else MODEL_EXECUTOR_CONCURRENCY
+    model_executor_concurrency = 1 if gpu_available else MODEL_EXECUTOR_CONCURRENCY
     configure_cpu_stage_workers(cpu_workers)
     batch_resource_limits = stage_resource_limits(
         num_workers, cpu_workers, gpu_concurrency=model_executor_concurrency
     )
     logger.info(
-        "Pipeline resources: workers=%d CPU-heavy=%d CPU-light=%d GPU=%d network=%d I/O=%d local-model/process=%d",
+        "Pipeline resources: workers=%d inference-page-batch=%d CPU-heavy=%d CPU-light=%d GPU=%d network=%d I/O=%d local-model/process=%d",
         num_workers,
+        inference_page_batch_size,
         batch_resource_limits[ResourceClass.CPU_HEAVY],
         batch_resource_limits[ResourceClass.CPU_LIGHT],
         batch_resource_limits[ResourceClass.GPU],
@@ -3122,6 +3128,9 @@ async def import_original_manga(request: Request, background_tasks: BackgroundTa
         resolved_group_id = await store.resolve_group_id(clean_group_id, create=False)
         if resolved_group_id is None:
             resolved_group_id = await store.resolve_group_id(clean_title, create=False)
+
+    if store is not None and resolved_group_id is None:
+        resolved_group_id = await store.resolve_group_id(clean_title, create=False)
 
     if is_new_group is True or (clean_group_id is None and is_new_group is None):
         duplicate = (

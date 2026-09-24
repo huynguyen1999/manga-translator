@@ -50,6 +50,7 @@ interface ResultGalleryProps {
   onDeleteManga?: (images: FinishedImage[], mangaTitle?: string) => void | Promise<void>;
   onDeleteMangas?: (mangaList: Array<{ title: string; images: FinishedImage[] }>) => void | Promise<void>;
   onReorderMangaPages?: (groupId: string, pageIds: string[]) => Promise<void>;
+  onRestoreBatchPages?: (groupId: string, title: string) => Promise<number>;
   onUpdateImage?: (image: FinishedImage) => void;
   onUpdateMangaTitle?: (pageIds: string[], newMangaTitle: string, oldMangaTitle?: string, groupId?: string, folders?: string[]) => void;
   onOpenPageView?: (folder: string) => void;
@@ -1254,6 +1255,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
   onDeleteManga,
   onDeleteMangas,
   onReorderMangaPages,
+  onRestoreBatchPages,
   onUpdateImage,
   onUpdateMangaTitle,
   onOpenPageView,
@@ -1370,6 +1372,8 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
 
   // Detailed images loaded per manga on-demand when uncollapsed
   const [mangaImages, setMangaImages] = useState<Record<string, FinishedImage[]>>({});
+  const [restoringBatchPages, setRestoringBatchPages] = useState<string | null>(null);
+  const [restoreBatchMessage, setRestoreBatchMessage] = useState<string | null>(null);
   const [loadingManga, setLoadingManga] = useState<Record<string, boolean>>({});
   const [draggedPageId, setDraggedPageId] = useState<string | null>(null);
   const [dragOverPageId, setDragOverPageId] = useState<string | null>(null);
@@ -1608,11 +1612,11 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
   }, [mangaSummaries, fallbackSummaries]);
 
   // On-demand loader for a manga's images when uncollapsed
-  const loadMangaImagesIfNeeded = async (title: string, detail?: string, requestedGroupId?: string): Promise<FinishedImage[]> => {
-    if (mangaImages[title]) {
+  const loadMangaImagesIfNeeded = async (title: string, detail?: string, requestedGroupId?: string, force = false): Promise<FinishedImage[]> => {
+    if (mangaImages[title] && !force) {
       return mangaImages[title];
     }
-    if (mangaImageLoadsRef.current[title]) return mangaImageLoadsRef.current[title];
+    if (mangaImageLoadsRef.current[title] && !force) return mangaImageLoadsRef.current[title];
 
     setLoadingManga((prev) => ({ ...prev, [title]: true }));
     const request = (async () => {
@@ -1810,9 +1814,9 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
   // Automatically load images for active manga or when only 1 manga group exists
   useEffect(() => {
     if (activeMangaFilter !== 'all') {
-      loadMangaImagesIfNeeded(activeMangaFilter);
+      loadMangaImagesIfNeeded(activeMangaFilter, undefined, undefined, galleryRevision > 0);
     }
-  }, [activeMangaFilter]);
+  }, [activeMangaFilter, galleryRevision]);
 
   useEffect(() => {
     if (mangaGroups.length === 1 && !mangaImages[mangaGroups[0].title]) {
@@ -2718,6 +2722,20 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
   const currentSingleGroup = effectiveSingleMangaTitle
     ? mangaGroups.find((g) => g.title === effectiveSingleMangaTitle) || null
     : null;
+
+  const handleRestoreBatchPages = async () => {
+    if (!currentSingleGroup || !onRestoreBatchPages) return;
+    setRestoringBatchPages(currentSingleGroup.id);
+    setRestoreBatchMessage(null);
+    try {
+      const count = await onRestoreBatchPages(currentSingleGroup.id, currentSingleGroup.title);
+      setRestoreBatchMessage(`Restored ${count} existing batch ${count === 1 ? 'page' : 'pages'}.`);
+    } catch (error) {
+      setRestoreBatchMessage(error instanceof Error ? error.message : 'Could not restore batch pages.');
+    } finally {
+      setRestoringBatchPages(null);
+    }
+  };
 
   useEffect(() => {
     setPageSort('order');
@@ -3971,6 +3989,19 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
             {/* Actions: Select All, Read, Download CBZ, Delete */}
             <div className="mt-4 flex flex-col gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-800 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex flex-wrap items-center gap-2">
+                {onRestoreBatchPages && (
+                  <button
+                    type="button"
+                    onClick={() => void handleRestoreBatchPages()}
+                    disabled={restoringBatchPages === currentSingleGroup.id}
+                    className="inline-flex h-10 items-center gap-2 rounded-lg border border-indigo-200 bg-white px-3 text-xs font-semibold text-indigo-700 transition-colors hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-indigo-800 dark:bg-zinc-800 dark:text-indigo-300 dark:hover:bg-indigo-950/50 cursor-pointer"
+                    title="Attach completed translation results to this manga"
+                    aria-label={`Restore completed batch pages to ${currentSingleGroup.title}`}
+                  >
+                    <Icon icon={restoringBatchPages === currentSingleGroup.id ? 'carbon:renew' : 'carbon:folder-move-to'} className={`h-4 w-4 ${restoringBatchPages === currentSingleGroup.id ? 'animate-spin' : ''}`} />
+                    <span>{restoringBatchPages === currentSingleGroup.id ? 'Restoring…' : 'Restore batch pages'}</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => handleToggleSelectAll(currentSingleGroup.title, currentSingleGroup.images)}
@@ -4098,6 +4129,10 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
                 )}
               </div>
             </div>
+
+            {restoreBatchMessage && (
+              <p className={`mt-2 text-xs ${restoreBatchMessage.startsWith('Restored ') ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`} role="status">{restoreBatchMessage}</p>
+            )}
 
             {readerLoadError === currentSingleGroup.title && (
               <div className="mt-3 flex items-center justify-end gap-2 text-xs text-red-400" role="status">

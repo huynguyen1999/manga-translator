@@ -20,7 +20,6 @@ import cv2
 import numpy as np
 
 from .. import (
-    _RENDER_LOCK,
     _points_for_rect,
     fg_bg_compare,
     get_default_eng_font,
@@ -3797,313 +3796,312 @@ def apply_shape_aware_bubble_layout(
     page_geometry: Optional[PageGeometry] = None,
 ) -> None:
     """Execute shape-aware 2D free-space text fitting and layout on ctx.text_regions."""
-    with _RENDER_LOCK:
-        layout_timing = {
-            "mask_prep_ms": 0.0,
-            "mode_classification_ms": 0.0,
-            "bubble_solver_ms": 0.0,
-            "free_text_solver_ms": 0.0,
-            "fallback_ms": 0.0,
-        }
-        if timing is not None:
-            timing.update(layout_timing)
+    layout_timing = {
+        "mask_prep_ms": 0.0,
+        "mode_classification_ms": 0.0,
+        "bubble_solver_ms": 0.0,
+        "free_text_solver_ms": 0.0,
+        "fallback_ms": 0.0,
+    }
+    if timing is not None:
+        timing.update(layout_timing)
 
-        active_font = font_path or getattr(config.render, "font_path", None) or get_default_eng_font()
-        text_render.set_font(active_font)
+    active_font = font_path or getattr(config.render, "font_path", None) or get_default_eng_font()
+    text_render.set_font(active_font)
 
-        regions = ctx.text_regions or []
-        img = getattr(ctx, "img_rgb", None)
-        if img is None:
-            return
-        _ensure_region_identities(regions)
-        transform_text_case = getattr(config.render, "transform_text_case", None)
-        for region in regions:
-            region.review_required = bool(getattr(region, "review_required", False))
-            if (
-                transform_text_case
-                and getattr(region, "translation", None)
-                and isinstance(region.translation, str)
-            ):
-                region.translation = transform_text_case(region.translation)
-
-        # Saved editor/rerender payloads carry the safe bubble interior instead
-        # of the detector mask. Rehydrate it before classifying placement.
-        for region in regions:
-            if getattr(region, "_bubble_interior", None) is not None:
-                continue
-            safe_shape = getattr(region, "bubble_safe_shape", None)
-            interior = decode_safe_shape(safe_shape, img.shape[0], img.shape[1])
-            if interior is not None and np.any(interior):
-                region._bubble_interior = interior
-
-        # When detection is disabled, reuse the existing enclosed-bubble
-        # inference as the geometry seed; the shape-aware solver owns layout.
-        if infer_bubbles and not any(
-            getattr(region, "_bubble_mask", None) is not None
-            or getattr(region, "_bubble_interior", None) is not None
-            for region in regions
+    regions = ctx.text_regions or []
+    img = getattr(ctx, "img_rgb", None)
+    if img is None:
+        return
+    _ensure_region_identities(regions)
+    transform_text_case = getattr(config.render, "transform_text_case", None)
+    for region in regions:
+        region.review_required = bool(getattr(region, "review_required", False))
+        if (
+            transform_text_case
+            and getattr(region, "translation", None)
+            and isinstance(region.translation, str)
         ):
-            seed_regions = [
-                region for region in regions
-                if getattr(region, "translation", None)
-                and str(region.translation).strip()
-            ]
-            if seed_regions:
-                group_regions = bool(
-                    getattr(getattr(config, "bubble_detection", None), "group_regions", False)
-                )
-                prepared = prepare_bubbles(
-                    image=img,
-                    regions=seed_regions,
-                    font_path=active_font,
-                    render_config=config.render,
-                    group=group_regions,
-                )
-                by_id = {
-                    str(getattr(region, "region_id", "")): region
-                    for region in prepared
-                    if getattr(region, "region_id", None)
-                }
-                ctx.text_regions = [
-                    by_id.get(str(getattr(region, "region_id", "")), region)
-                    for region in regions
-                ]
-                regions = ctx.text_regions
+            region.translation = transform_text_case(region.translation)
 
-        # Reuse the geometry produced during mask construction when available.
-        phase_start = perf_counter()
-        bubble_padding = int(getattr(getattr(config, "bubble_detection", None), "padding", 9))
-        if page_geometry is None or not page_geometry.matches(img, regions, bubble_padding):
-            page_geometry, _ = prepare_page_geometry(
-                img, regions, bubble_padding, return_cleanup=False,
-            )
-        ctx.page_geometry = page_geometry
-        layout_timing["mask_prep_ms"] = (perf_counter() - phase_start) * 1000.0
-        phase_start = perf_counter()
-        classify_placement_modes(regions)
-        layout_timing["mode_classification_ms"] = (perf_counter() - phase_start) * 1000.0
+    # Saved editor/rerender payloads carry the safe bubble interior instead
+    # of the detector mask. Rehydrate it before classifying placement.
+    for region in regions:
+        if getattr(region, "_bubble_interior", None) is not None:
+            continue
+        safe_shape = getattr(region, "bubble_safe_shape", None)
+        interior = decode_safe_shape(safe_shape, img.shape[0], img.shape[1])
+        if interior is not None and np.any(interior):
+            region._bubble_interior = interior
 
-        render_cfg = config.render
-        unplaced_regions: List[Any] = []
-        bubble_regions = [
+    # When detection is disabled, reuse the existing enclosed-bubble
+    # inference as the geometry seed; the shape-aware solver owns layout.
+    if infer_bubbles and not any(
+        getattr(region, "_bubble_mask", None) is not None
+        or getattr(region, "_bubble_interior", None) is not None
+        for region in regions
+    ):
+        seed_regions = [
             region for region in regions
-            if getattr(region, "placement_mode", None) is PlacementMode.BUBBLE
+            if getattr(region, "translation", None)
+            and str(region.translation).strip()
         ]
-        free_regions = [
-            region for region in regions
-            if getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
-        ]
-        bubble_groups = _shared_bubble_groups(bubble_regions)
-
-        if legacy_only:
-            unplaced_regions.extend(regions)
-
-        phase_start = perf_counter()
-        for group in bubble_groups if not legacy_only else []:
-            active = [
-                region for region in group.regions
-                if not legacy_only
-                and getattr(region, "_bubble_interior", None) is not None
-                and np.any(getattr(region, "_bubble_interior", None))
-                and (
-                    region.get_translation_for_rendering()
-                    if hasattr(region, "get_translation_for_rendering")
-                    else (getattr(region, "translation", "") or getattr(region, "text", ""))
-                ).strip()
-            ]
-            if not active:
-                unplaced_regions.extend(group.regions)
-                continue
-
-            interior = getattr(active[0], "_bubble_interior", None)
-            lobe_graph = build_lobe_graph(group.bubble_mask) if np.any(group.bubble_mask) else None
-            group.lobe_graph = lobe_graph
-
-            # Partition the bubble into geometry-aware placement zones
-            zones = partition_bubble_zones(active, interior, lobe_graph=lobe_graph, apply_boundary_gap=(len(active) > 1))
-            group.zones = zones
-
-            plans = []
-            for index, region in enumerate(active):
-                zone_mask = zones[index] if index < len(zones) else interior
-                plan = _build_region_layout_plan(
-                    region=region,
-                    interior=interior,
-                    config=config,
-                    image_shape=img.shape[:2],
-                    solver_margin=solver_margin,
-                    solver_max_y_trials=solver_max_y_trials,
-                    preferred_mask=zone_mask if len(active) > 1 else None,
-                    top_k=_JOINT_CANDIDATE_COUNT if len(active) > 1 else 1,
-                    zone_geometry_mask=zone_mask if len(active) > 1 else None,
-                )
-                if plan is not None:
-                    plans.append(plan)
-
-            chosen = _choose_joint_layout(plans, img.shape[:2]) if len(active) > 1 else None
-            if len(active) == 1 and plans and plans[0].candidates:
-                chosen = (plans[0].candidates[0],)
-
-            if chosen is not None and len(chosen) == len(plans) == len(active):
-                for plan, candidate in zip(plans, chosen):
-                    if not _apply_layout_candidate(
-                        plan, candidate, img.shape[:2], layout_debug=layout_debug
-                    ):
-                        unplaced_regions.append(plan.region)
-                active_ids = {id(region) for region in active}
-                unplaced_regions.extend(region for region in group.regions if id(region) not in active_ids)
-                continue
-
-            active_ids = {id(region) for region in active}
-            for region in group.regions:
-                if id(region) in active_ids:
-                    region._solver_status = "requires_compression"
-                    unplaced_regions.append(region)
-        layout_timing["bubble_solver_ms"] = (perf_counter() - phase_start) * 1000.0
-        if not legacy_only and free_regions:
-            phase_start = perf_counter()
-            bubble_halo = max(2, int(round((render_cfg.font_size or 12) * 0.20)))
-            obstacles = build_page_obstacle_map(regions, img.shape[:2], bubble_halo=bubble_halo)
-            inpaint_mask = getattr(ctx, "inpaint_mask", None)
-            if inpaint_mask is None:
-                inpaint_mask = getattr(ctx, "text_mask", None)
-            if inpaint_mask is None:
-                inpaint_mask = getattr(ctx, "mask_raw", None)
-            if inpaint_mask is None:
-                inpaint_mask = getattr(ctx, "mask", None)
-            free_zones = build_free_text_ownership_zones(free_regions, obstacles, inpaint_mask=inpaint_mask)
-            free_plans: Dict[int, List[LayoutCandidate]] = {}
-            free_profiles: Dict[int, OriginalLayoutProfile] = {}
-            for region in free_regions:
-                ft_zone = free_zones.get(id(region))
-                if ft_zone is None:
-                    continue
-                result = _solve_free_text_region(
-                    region=region,
-                    zone=ft_zone,
-                    obstacles=obstacles,
-                    config=config,
-                    image_shape=img.shape[:2],
-                    solver_margin=solver_margin,
-                    solver_max_y_trials=solver_max_y_trials,
-                )
-                if result is None:
-                    region._solver_path = "free_text"
-                    region._solver_status = "no_valid_layout"
-                    region._solver_qa = {
-                        "placement_mode": PlacementMode.FREE_TEXT.value,
-                        "hard_constraints": ["bubble_mask", "ownership_zone", "page_bounds", "other_text"],
-                    }
-                    region._render_suppressed = True
-                    continue
-                candidate, profile, _qa = result
-                free_plans[id(region)] = getattr(region, "_free_text_candidate_pool", [candidate])
-                free_profiles[id(region)] = profile
-
-            chosen_free = _select_free_text_joint_candidates(
-                free_regions, free_plans, img.shape[:2], free_profiles=free_profiles
+        if seed_regions:
+            group_regions = bool(
+                getattr(getattr(config, "bubble_detection", None), "group_regions", False)
             )
-            for region in free_regions:
-                candidate = chosen_free.get(id(region))
-                profile = free_profiles.get(id(region))
-                if candidate is None or profile is None:
-                    if id(region) in free_plans:
-                        region._solver_path = "free_text"
-                        region._solver_status = "no_joint_layout"
-                        region._render_suppressed = True
-                    continue
-                if not _apply_free_text_candidate(
-                    region, candidate, profile, config, img.shape[:2], layout_debug=layout_debug
-                ):
-                    region._solver_path = "free_text"
-                    region._solver_status = "rasterization_failed"
-                    region._render_suppressed = True
+            prepared = prepare_bubbles(
+                image=img,
+                regions=seed_regions,
+                font_path=active_font,
+                render_config=config.render,
+                group=group_regions,
+            )
+            by_id = {
+                str(getattr(region, "region_id", "")): region
+                for region in prepared
+                if getattr(region, "region_id", None)
+            }
+            ctx.text_regions = [
+                by_id.get(str(getattr(region, "region_id", "")), region)
+                for region in regions
+            ]
+            regions = ctx.text_regions
 
-            for region in free_regions:
-                logger.info(
-                    f"FREE_TEXT SOLVER RESULT id={getattr(region, 'region_id', id(region))} "
-                    f"placement_mode={getattr(region, 'placement_mode', None)} "
-                    f"solver_applied={getattr(region, '_free_text_solver_applied', False)} "
-                    f"layout_input_text={getattr(region, '_layout_input_text', None)!r} "
-                    f"solver_path={getattr(region, '_solver_path', None)} "
-                    f"solver_status={getattr(region, '_solver_status', None)} "
-                    f"has_bubble_box={getattr(region, '_bubble_box', None) is not None} "
-                    f"has_bubble_points={getattr(region, '_bubble_points', None) is not None} "
-                    f"has_zone={getattr(region, '_free_text_zone', None) is not None}"
-                )
-
-            if layout_debug:
-                ctx._free_text_obstacle_map = obstacles
-                ctx._free_text_zones = free_zones
-                from .debug import create_free_text_layout_debug
-
-                ctx._free_text_layout_debug = create_free_text_layout_debug(
-                    img, free_regions, obstacles, free_zones
-                )
-            else:
-                ctx._free_text_layout_debug = None
-            layout_timing["free_text_solver_ms"] = (perf_counter() - phase_start) * 1000.0
-
-        # Store layout groups on ctx for diagnostic overlay generation
-        ctx._bubble_layout_groups = bubble_groups
-
-        # If any regions were not placed by the shape-aware solver, run fallback
-        group_regions = bool(
-            getattr(getattr(config, "bubble_detection", None), "group_regions", False)
+    # Reuse the geometry produced during mask construction when available.
+    phase_start = perf_counter()
+    bubble_padding = int(getattr(getattr(config, "bubble_detection", None), "padding", 9))
+    if page_geometry is None or not page_geometry.matches(img, regions, bubble_padding):
+        page_geometry, _ = prepare_page_geometry(
+            img, regions, bubble_padding, return_cleanup=False,
         )
-        if unplaced_regions and not legacy_only:
-            phase_start = perf_counter()
-            prepared = prepare_bubbles(
-                image=img,
-                regions=unplaced_regions,
-                font_path=active_font,
-                render_config=render_cfg,
-                group=group_regions,
-            )
-            by_id = {
-                str(getattr(r, "region_id", "")): r
-                for r in prepared
-                if getattr(r, "region_id", None)
-            }
-            for idx, r in enumerate(unplaced_regions):
-                prep = by_id.get(str(getattr(r, "region_id", ""))) or (prepared[idx] if idx < len(prepared) else None)
-                if prep is not None:
-                    r.review_required = getattr(prep, "review_required", False)
-                    r.review_reason = getattr(prep, "review_reason", None)
-                    r._render_suppressed = getattr(prep, "_render_suppressed", False)
-                    r._bubble_box = getattr(prep, "_bubble_box", None)
-                    r._bubble_points = getattr(prep, "_bubble_points", None)
-                    r.font_size = getattr(prep, "font_size", r.font_size)
-                    r.layout_bounds = getattr(prep, "layout_bounds", getattr(r, "layout_bounds", None))
-            layout_timing["fallback_ms"] += (perf_counter() - phase_start) * 1000.0
-        elif unplaced_regions and legacy_only:
-            phase_start = perf_counter()
-            prepared = prepare_bubbles(
-                image=img,
-                regions=regions,
-                font_path=active_font,
-                render_config=render_cfg,
-                group=group_regions,
-            )
-            by_id = {
-                str(getattr(r, "region_id", "")): r
-                for r in prepared
-                if getattr(r, "region_id", None)
-            }
-            for idx, r in enumerate(regions):
-                prep = by_id.get(str(getattr(r, "region_id", ""))) or (prepared[idx] if idx < len(prepared) else None)
-                if prep is not None:
-                    r.review_required = getattr(prep, "review_required", False)
-                    r.review_reason = getattr(prep, "review_reason", None)
-                    r._render_suppressed = getattr(prep, "_render_suppressed", False)
-                    r._bubble_box = getattr(prep, "_bubble_box", None)
-                    r._bubble_points = getattr(prep, "_bubble_points", None)
-                    r.font_size = getattr(prep, "font_size", r.font_size)
-                    r.layout_bounds = getattr(prep, "layout_bounds", getattr(r, "layout_bounds", None))
-            layout_timing["fallback_ms"] += (perf_counter() - phase_start) * 1000.0
+    ctx.page_geometry = page_geometry
+    layout_timing["mask_prep_ms"] = (perf_counter() - phase_start) * 1000.0
+    phase_start = perf_counter()
+    classify_placement_modes(regions)
+    layout_timing["mode_classification_ms"] = (perf_counter() - phase_start) * 1000.0
 
-        ctx._bubble_detection_done = True
-        ctx._bubble_layout_ready = True
-        _record_content_trace(regions, "layout")
-        if timing is not None:
-            timing.update(layout_timing)
+    render_cfg = config.render
+    unplaced_regions: List[Any] = []
+    bubble_regions = [
+        region for region in regions
+        if getattr(region, "placement_mode", None) is PlacementMode.BUBBLE
+    ]
+    free_regions = [
+        region for region in regions
+        if getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
+    ]
+    bubble_groups = _shared_bubble_groups(bubble_regions)
+
+    if legacy_only:
+        unplaced_regions.extend(regions)
+
+    phase_start = perf_counter()
+    for group in bubble_groups if not legacy_only else []:
+        active = [
+            region for region in group.regions
+            if not legacy_only
+            and getattr(region, "_bubble_interior", None) is not None
+            and np.any(getattr(region, "_bubble_interior", None))
+            and (
+                region.get_translation_for_rendering()
+                if hasattr(region, "get_translation_for_rendering")
+                else (getattr(region, "translation", "") or getattr(region, "text", ""))
+            ).strip()
+        ]
+        if not active:
+            unplaced_regions.extend(group.regions)
+            continue
+
+        interior = getattr(active[0], "_bubble_interior", None)
+        lobe_graph = build_lobe_graph(group.bubble_mask) if np.any(group.bubble_mask) else None
+        group.lobe_graph = lobe_graph
+
+        # Partition the bubble into geometry-aware placement zones
+        zones = partition_bubble_zones(active, interior, lobe_graph=lobe_graph, apply_boundary_gap=(len(active) > 1))
+        group.zones = zones
+
+        plans = []
+        for index, region in enumerate(active):
+            zone_mask = zones[index] if index < len(zones) else interior
+            plan = _build_region_layout_plan(
+                region=region,
+                interior=interior,
+                config=config,
+                image_shape=img.shape[:2],
+                solver_margin=solver_margin,
+                solver_max_y_trials=solver_max_y_trials,
+                preferred_mask=zone_mask if len(active) > 1 else None,
+                top_k=_JOINT_CANDIDATE_COUNT if len(active) > 1 else 1,
+                zone_geometry_mask=zone_mask if len(active) > 1 else None,
+            )
+            if plan is not None:
+                plans.append(plan)
+
+        chosen = _choose_joint_layout(plans, img.shape[:2]) if len(active) > 1 else None
+        if len(active) == 1 and plans and plans[0].candidates:
+            chosen = (plans[0].candidates[0],)
+
+        if chosen is not None and len(chosen) == len(plans) == len(active):
+            for plan, candidate in zip(plans, chosen):
+                if not _apply_layout_candidate(
+                    plan, candidate, img.shape[:2], layout_debug=layout_debug
+                ):
+                    unplaced_regions.append(plan.region)
+            active_ids = {id(region) for region in active}
+            unplaced_regions.extend(region for region in group.regions if id(region) not in active_ids)
+            continue
+
+        active_ids = {id(region) for region in active}
+        for region in group.regions:
+            if id(region) in active_ids:
+                region._solver_status = "requires_compression"
+                unplaced_regions.append(region)
+    layout_timing["bubble_solver_ms"] = (perf_counter() - phase_start) * 1000.0
+    if not legacy_only and free_regions:
+        phase_start = perf_counter()
+        bubble_halo = max(2, int(round((render_cfg.font_size or 12) * 0.20)))
+        obstacles = build_page_obstacle_map(regions, img.shape[:2], bubble_halo=bubble_halo)
+        inpaint_mask = getattr(ctx, "inpaint_mask", None)
+        if inpaint_mask is None:
+            inpaint_mask = getattr(ctx, "text_mask", None)
+        if inpaint_mask is None:
+            inpaint_mask = getattr(ctx, "mask_raw", None)
+        if inpaint_mask is None:
+            inpaint_mask = getattr(ctx, "mask", None)
+        free_zones = build_free_text_ownership_zones(free_regions, obstacles, inpaint_mask=inpaint_mask)
+        free_plans: Dict[int, List[LayoutCandidate]] = {}
+        free_profiles: Dict[int, OriginalLayoutProfile] = {}
+        for region in free_regions:
+            ft_zone = free_zones.get(id(region))
+            if ft_zone is None:
+                continue
+            result = _solve_free_text_region(
+                region=region,
+                zone=ft_zone,
+                obstacles=obstacles,
+                config=config,
+                image_shape=img.shape[:2],
+                solver_margin=solver_margin,
+                solver_max_y_trials=solver_max_y_trials,
+            )
+            if result is None:
+                region._solver_path = "free_text"
+                region._solver_status = "no_valid_layout"
+                region._solver_qa = {
+                    "placement_mode": PlacementMode.FREE_TEXT.value,
+                    "hard_constraints": ["bubble_mask", "ownership_zone", "page_bounds", "other_text"],
+                }
+                region._render_suppressed = True
+                continue
+            candidate, profile, _qa = result
+            free_plans[id(region)] = getattr(region, "_free_text_candidate_pool", [candidate])
+            free_profiles[id(region)] = profile
+
+        chosen_free = _select_free_text_joint_candidates(
+            free_regions, free_plans, img.shape[:2], free_profiles=free_profiles
+        )
+        for region in free_regions:
+            candidate = chosen_free.get(id(region))
+            profile = free_profiles.get(id(region))
+            if candidate is None or profile is None:
+                if id(region) in free_plans:
+                    region._solver_path = "free_text"
+                    region._solver_status = "no_joint_layout"
+                    region._render_suppressed = True
+                continue
+            if not _apply_free_text_candidate(
+                region, candidate, profile, config, img.shape[:2], layout_debug=layout_debug
+            ):
+                region._solver_path = "free_text"
+                region._solver_status = "rasterization_failed"
+                region._render_suppressed = True
+
+        for region in free_regions:
+            logger.info(
+                f"FREE_TEXT SOLVER RESULT id={getattr(region, 'region_id', id(region))} "
+                f"placement_mode={getattr(region, 'placement_mode', None)} "
+                f"solver_applied={getattr(region, '_free_text_solver_applied', False)} "
+                f"layout_input_text={getattr(region, '_layout_input_text', None)!r} "
+                f"solver_path={getattr(region, '_solver_path', None)} "
+                f"solver_status={getattr(region, '_solver_status', None)} "
+                f"has_bubble_box={getattr(region, '_bubble_box', None) is not None} "
+                f"has_bubble_points={getattr(region, '_bubble_points', None) is not None} "
+                f"has_zone={getattr(region, '_free_text_zone', None) is not None}"
+            )
+
+        if layout_debug:
+            ctx._free_text_obstacle_map = obstacles
+            ctx._free_text_zones = free_zones
+            from .debug import create_free_text_layout_debug
+
+            ctx._free_text_layout_debug = create_free_text_layout_debug(
+                img, free_regions, obstacles, free_zones
+            )
+        else:
+            ctx._free_text_layout_debug = None
+        layout_timing["free_text_solver_ms"] = (perf_counter() - phase_start) * 1000.0
+
+    # Store layout groups on ctx for diagnostic overlay generation
+    ctx._bubble_layout_groups = bubble_groups
+
+    # If any regions were not placed by the shape-aware solver, run fallback
+    group_regions = bool(
+        getattr(getattr(config, "bubble_detection", None), "group_regions", False)
+    )
+    if unplaced_regions and not legacy_only:
+        phase_start = perf_counter()
+        prepared = prepare_bubbles(
+            image=img,
+            regions=unplaced_regions,
+            font_path=active_font,
+            render_config=render_cfg,
+            group=group_regions,
+        )
+        by_id = {
+            str(getattr(r, "region_id", "")): r
+            for r in prepared
+            if getattr(r, "region_id", None)
+        }
+        for idx, r in enumerate(unplaced_regions):
+            prep = by_id.get(str(getattr(r, "region_id", ""))) or (prepared[idx] if idx < len(prepared) else None)
+            if prep is not None:
+                r.review_required = getattr(prep, "review_required", False)
+                r.review_reason = getattr(prep, "review_reason", None)
+                r._render_suppressed = getattr(prep, "_render_suppressed", False)
+                r._bubble_box = getattr(prep, "_bubble_box", None)
+                r._bubble_points = getattr(prep, "_bubble_points", None)
+                r.font_size = getattr(prep, "font_size", r.font_size)
+                r.layout_bounds = getattr(prep, "layout_bounds", getattr(r, "layout_bounds", None))
+        layout_timing["fallback_ms"] += (perf_counter() - phase_start) * 1000.0
+    elif unplaced_regions and legacy_only:
+        phase_start = perf_counter()
+        prepared = prepare_bubbles(
+            image=img,
+            regions=regions,
+            font_path=active_font,
+            render_config=render_cfg,
+            group=group_regions,
+        )
+        by_id = {
+            str(getattr(r, "region_id", "")): r
+            for r in prepared
+            if getattr(r, "region_id", None)
+        }
+        for idx, r in enumerate(regions):
+            prep = by_id.get(str(getattr(r, "region_id", ""))) or (prepared[idx] if idx < len(prepared) else None)
+            if prep is not None:
+                r.review_required = getattr(prep, "review_required", False)
+                r.review_reason = getattr(prep, "review_reason", None)
+                r._render_suppressed = getattr(prep, "_render_suppressed", False)
+                r._bubble_box = getattr(prep, "_bubble_box", None)
+                r._bubble_points = getattr(prep, "_bubble_points", None)
+                r.font_size = getattr(prep, "font_size", r.font_size)
+                r.layout_bounds = getattr(prep, "layout_bounds", getattr(r, "layout_bounds", None))
+        layout_timing["fallback_ms"] += (perf_counter() - phase_start) * 1000.0
+
+    ctx._bubble_detection_done = True
+    ctx._bubble_layout_ready = True
+    _record_content_trace(regions, "layout")
+    if timing is not None:
+        timing.update(layout_timing)

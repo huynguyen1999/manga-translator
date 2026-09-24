@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Icon } from "@iconify/react";
 import { Link } from "react-router";
 import type { QueuedImage, TranslationBatch, TranslationSettings, TranslatorKey } from "@/types";
@@ -9,6 +9,7 @@ import PreviewImage from "./PreviewImage";
 import { apiUrl } from "@/utils/api";
 import { MANGA_TITLE_MAX_LENGTH } from "@/config";
 import { buildMangaDetailIdUrl, mangaIdForTitle } from "@/utils/routeState";
+import { RenderProfiler } from "@/utils/renderPerformance";
 
 type AsyncAction = () => void | Promise<void>;
 type ImageSourceType = "original" | "translated";
@@ -65,8 +66,8 @@ const ItemRow: React.FC<{
   now: number;
   batchSettings?: Partial<TranslationSettings>;
   batchMangaTitle?: string;
-  onRetryItem: (keepFailedPagesForEditing?: boolean) => void | Promise<void>;
-  onRemoveItem: () => void;
+  onRetryItem: (itemId: string, keepFailedPagesForEditing?: boolean) => void | Promise<void>;
+  onRemoveItem: (itemId: string) => void;
   retryActionKey: string;
   isActionPending: (key: string) => boolean;
   runAction: (key: string, label: string, action: AsyncAction) => void;
@@ -86,9 +87,9 @@ const ItemRow: React.FC<{
   ) => void;
   onOpenPageEdit?: (folder: string) => void;
   isColorizerActive?: boolean;
-  onToggleExcludeColor?: () => void;
+  onToggleExcludeColor?: (itemId: string) => void;
   sourceType?: ImageSourceType;
-}> = ({
+}> = React.memo(({
   item,
   now,
   batchSettings,
@@ -137,7 +138,8 @@ const ItemRow: React.FC<{
   }, [result]);
 
   return (
-    <div className={`flex flex-wrap items-start gap-3 rounded-xl border bg-white p-3 shadow-2xs dark:bg-zinc-900 ${
+  <RenderProfiler id={`JobItem:${item.id}`}>
+  <div className={`job-card job-offscreen-row flex flex-wrap items-start gap-3 rounded-xl border bg-white p-3 shadow-2xs dark:bg-zinc-900 ${
       isError
         ? "border-rose-200 dark:border-rose-900/70"
         : isAwaitingTranslation
@@ -152,7 +154,7 @@ const ItemRow: React.FC<{
           onOpenLightbox?.(
             previewFile,
             isFinished ? result : previewSource,
-            isFinished ? () => onRetryItem() : undefined,
+            isFinished ? () => onRetryItem(item.id) : undefined,
             isFinished ? sourceType : "original",
             {
               folder: item.folder,
@@ -230,7 +232,7 @@ const ItemRow: React.FC<{
           {isColorizerActive && !isFinished && !isProcessing && onToggleExcludeColor && (
             <button
               type="button"
-              onClick={onToggleExcludeColor}
+              onClick={() => onToggleExcludeColor(item.id)}
               className={`rounded-full px-2 py-0.5 text-xs font-medium ${
                 item.excludeColor
                   ? "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
@@ -256,7 +258,7 @@ const ItemRow: React.FC<{
           <>
             <button
               type="button"
-              onClick={() => runAction(retryActionKey, "Retrying…", () => onRetryItem())}
+              onClick={() => runAction(retryActionKey, "Retrying…", () => onRetryItem(item.id))}
               disabled={isActionPending(retryActionKey)}
               aria-busy={isActionPending(retryActionKey)}
               className="order-1 inline-flex min-h-11 items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-70"
@@ -266,7 +268,7 @@ const ItemRow: React.FC<{
             </button>
             <button
               type="button"
-              onClick={() => runAction(retryActionKey, "Retrying…", () => onRetryItem(true))}
+              onClick={() => runAction(retryActionKey, "Retrying…", () => onRetryItem(item.id, true))}
               disabled={isActionPending(retryActionKey)}
               aria-busy={isActionPending(retryActionKey)}
               className="order-2 inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2 text-xs font-semibold text-amber-900 transition-colors hover:bg-amber-100 disabled:cursor-wait disabled:opacity-70 dark:border-amber-700/70 dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-950/70"
@@ -277,7 +279,7 @@ const ItemRow: React.FC<{
             </button>
             <button
               type="button"
-              onClick={onRemoveItem}
+              onClick={() => onRemoveItem(item.id)}
               className="order-3 inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg p-2 text-rose-600/80 transition-colors hover:bg-rose-50 hover:text-rose-700 dark:text-rose-400/80 dark:hover:bg-rose-950/40 dark:hover:text-rose-300"
               title="Remove failed page"
             >
@@ -322,20 +324,21 @@ const ItemRow: React.FC<{
         )}
       </div>
     </div>
+    </RenderProfiler>
   );
-};
+});
 
 export const BatchCard: React.FC<{
   batch: TranslationBatch;
-  onLoadDetails: () => Promise<void>;
-  onDismiss: () => void;
-  onRemove: () => void | Promise<void>;
-  onRetryItem: (itemId: string, keepFailedPagesForEditing?: boolean) => void | Promise<void>;
-  onRemoveItem: (itemId: string) => void;
-  onTranslatorChange: (translator: TranslatorKey) => void;
-  onManualReviewChange: (enabled: boolean) => void;
-  onPriorityChange: (priority: boolean) => void | Promise<void>;
-  onMangaTitleChange?: (title: string) => void;
+  onLoadDetails: (batchId: string) => Promise<void>;
+  onDismiss: (batchId: string) => void;
+  onRemove: (batchId: string) => void | Promise<void>;
+  onRetryItem: (batchId: string, itemId: string, keepFailedPagesForEditing?: boolean) => void | Promise<void>;
+  onRemoveItem: (batchId: string, itemId: string) => void;
+  onTranslatorChange: (batchId: string, translator: TranslatorKey) => void;
+  onManualReviewChange: (batchId: string, enabled: boolean) => void;
+  onPriorityChange: (batchId: string, priority: boolean) => void | Promise<void>;
+  onMangaTitleChange?: (batchId: string, title: string) => void;
   onOpenLightbox?: (
     file: File | string,
     result: Blob | File | string | null,
@@ -352,11 +355,11 @@ export const BatchCard: React.FC<{
   ) => void;
   onOpenPageEdit?: (folder: string) => void;
   isColorizerActive?: boolean;
-  onToggleExcludeColor?: (itemId: string) => void;
+  onToggleExcludeColor?: (batchId: string, itemId: string) => void;
   isActionPending: (key: string) => boolean;
   runAction: (key: string, label: string, action: AsyncAction) => void;
   onNavigate?: () => void;
-}> = ({
+}> = React.memo(({
   batch,
   onLoadDetails,
   onDismiss,
@@ -382,6 +385,9 @@ export const BatchCard: React.FC<{
   const hasDetails = Boolean(batch.detailsLoaded || batch.items.length > 0);
   const onLoadDetailsRef = React.useRef(onLoadDetails);
   onLoadDetailsRef.current = onLoadDetails;
+  const handleRetryItem = useCallback((itemId: string, keep?: boolean) => onRetryItem(batch.id, itemId, keep), [batch.id, onRetryItem]);
+  const handleRemoveItem = useCallback((itemId: string) => onRemoveItem(batch.id, itemId), [batch.id, onRemoveItem]);
+  const handleToggleExcludeColor = useCallback((itemId: string) => onToggleExcludeColor?.(batch.id, itemId), [batch.id, onToggleExcludeColor]);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState(batch.mangaTitle);
   const isPendingStage = (step?: string) => step === "awaiting_translation" || step === "reserved";
@@ -421,7 +427,7 @@ export const BatchCard: React.FC<{
     setIsEditingTitle(false);
     const clean = titleInput.trim() || "Ungrouped";
     if (clean !== batch.mangaTitle) {
-      onMangaTitleChange?.(clean);
+      onMangaTitleChange?.(batch.id, clean);
     }
   };
 
@@ -434,17 +440,18 @@ export const BatchCard: React.FC<{
     if (!expanded || hasDetails) return;
     setDetailsLoading(true);
     setDetailsError(false);
-    void onLoadDetailsRef.current()
+    void onLoadDetailsRef.current(batch.id)
       .catch(() => setDetailsError(true))
       .finally(() => setDetailsLoading(false));
   }, [expanded, hasDetails]);
 
   return (
-    <div className="relative overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-xs dark:border-zinc-800 dark:bg-zinc-900">
+    <RenderProfiler id={`BatchCard:${batch.id}`}>
+    <div className="job-card job-offscreen-row relative overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-xs dark:border-zinc-800 dark:bg-zinc-900">
       {(batch.status === "completed" || isUploading || batch.status === "error" || batch.status === "waiting") && (
         <button
           type="button"
-          onClick={batch.status === "completed" ? onDismiss : onRemove}
+          onClick={() => batch.status === "completed" ? onDismiss(batch.id) : onRemove(batch.id)}
           className="absolute right-3 top-3 z-10 inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg p-2 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
           title={
             batch.status === "completed"
@@ -590,7 +597,7 @@ export const BatchCard: React.FC<{
               <span className="text-zinc-500 dark:text-zinc-400">Service</span>
               <select
                 value={batch.settings.translator}
-                onChange={(event) => onTranslatorChange(event.target.value as TranslatorKey)}
+                onChange={(event) => onTranslatorChange(batch.id, event.target.value as TranslatorKey)}
                 className="min-w-0 max-w-40 bg-transparent text-xs font-medium text-zinc-800 outline-none dark:text-zinc-200"
                 aria-label={`Translator service for ${batch.mangaTitle}`}
                 title="Applies to pages that have not started yet"
@@ -609,7 +616,7 @@ export const BatchCard: React.FC<{
               <input
                 type="checkbox"
                 checked={Boolean(batch.settings.keepFailedPagesForEditing)}
-                onChange={(event) => onManualReviewChange(event.target.checked)}
+                onChange={(event) => onManualReviewChange(batch.id, event.target.checked)}
                 className="accent-amber-500"
               />
               <span>Keep failed pages for editing</span>
@@ -663,7 +670,7 @@ export const BatchCard: React.FC<{
               type="button"
               onClick={() => runAction(retryAllActionKey, "Retrying failed pages…", async () => {
                 for (const item of failedItems) {
-                  await onRetryItem(item.id);
+                  await onRetryItem(batch.id, item.id);
                 }
               })}
               disabled={isActionPending(retryAllActionKey)}
@@ -679,7 +686,7 @@ export const BatchCard: React.FC<{
           {(batch.status === "processing" || batch.status === "paused" || batch.status === "stopping") && (
             <button
               type="button"
-              onClick={() => runAction(stopActionKey, "Stopping…", onRemove)}
+              onClick={() => runAction(stopActionKey, "Stopping…", () => onRemove(batch.id))}
               disabled={batch.status === "stopping" || isActionPending(stopActionKey)}
               aria-busy={isActionPending(stopActionKey)}
               className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-100 disabled:cursor-wait disabled:opacity-70 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300 dark:hover:bg-rose-950/70 transition-colors"
@@ -692,7 +699,7 @@ export const BatchCard: React.FC<{
           {isUploading && (
             <button
               type="button"
-              onClick={() => runAction(`cancel:${batch.id}`, "Cancelling…", onRemove)}
+              onClick={() => runAction(`cancel:${batch.id}`, "Cancelling…", () => onRemove(batch.id))}
               disabled={isActionPending(`cancel:${batch.id}`)}
               aria-busy={isActionPending(`cancel:${batch.id}`)}
               className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-100 disabled:cursor-wait disabled:opacity-70 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300 dark:hover:bg-rose-950/70 transition-colors"
@@ -705,7 +712,7 @@ export const BatchCard: React.FC<{
           {batch.status === "waiting" && (
             <button
               type="button"
-              onClick={() => runAction(`priority:${batch.id}`, batch.priority ? "Removing priority…" : "Prioritizing…", () => onPriorityChange(!batch.priority))}
+              onClick={() => runAction(`priority:${batch.id}`, batch.priority ? "Removing priority…" : "Prioritizing…", () => onPriorityChange(batch.id, !batch.priority))}
               disabled={isActionPending(`priority:${batch.id}`)}
               aria-busy={isActionPending(`priority:${batch.id}`)}
               className={`inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors disabled:cursor-wait disabled:opacity-70 ${batch.priority
@@ -722,7 +729,7 @@ export const BatchCard: React.FC<{
           {(batch.status === "waiting" || batch.status === "error") && (
             <button
               type="button"
-              onClick={() => runAction(`remove:${batch.id}`, "Removing…", onRemove)}
+              onClick={() => runAction(`remove:${batch.id}`, "Removing…", () => onRemove(batch.id))}
               disabled={isActionPending(`remove:${batch.id}`)}
               aria-busy={isActionPending(`remove:${batch.id}`)}
               className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg p-2 text-zinc-400 hover:bg-zinc-100 hover:text-rose-600 disabled:cursor-wait disabled:opacity-70 dark:hover:bg-zinc-800 transition-colors"
@@ -768,7 +775,7 @@ export const BatchCard: React.FC<{
               onClick={() => {
                 setDetailsError(false);
                 setDetailsLoading(true);
-                void onLoadDetails()
+                void onLoadDetails(batch.id)
                   .catch(() => setDetailsError(true))
                   .finally(() => setDetailsLoading(false));
               }}
@@ -786,26 +793,27 @@ export const BatchCard: React.FC<{
             <ItemRow
               key={item.id}
               item={item}
-              now={clock}
+              now={item.status === "processing" && item.stepStartedAt ? clock : 0}
               batchSettings={batch.settings}
               batchMangaTitle={batch.mangaTitle}
-              onRetryItem={(keepFailedPagesForEditing) => onRetryItem(item.id, keepFailedPagesForEditing)}
-              onRemoveItem={() => onRemoveItem(item.id)}
+              onRetryItem={handleRetryItem}
+              onRemoveItem={handleRemoveItem}
               retryActionKey={`retry:${batch.id}:${item.id}`}
               isActionPending={isActionPending}
               runAction={runAction}
               onOpenLightbox={onOpenLightbox}
               onOpenPageEdit={onOpenPageEdit}
               isColorizerActive={isUploading ? false : isColorizerActive}
-              onToggleExcludeColor={() => onToggleExcludeColor?.(item.id)}
+              onToggleExcludeColor={handleToggleExcludeColor}
               sourceType={sourceType}
             />
           ))}
         </div>
       )}
     </div>
+    </RenderProfiler>
   );
-};
+});
 
 const getBatchTimestamp = (batch: TranslationBatch): number => {
   const t = batch.addedAt instanceof Date ? batch.addedAt.getTime() : typeof batch.addedAt === "number" ? batch.addedAt : 0;
@@ -1014,21 +1022,19 @@ export const TranslatingSection: React.FC<TranslatingSectionProps> = ({
             <BatchCard
               key={batch.id}
               batch={batch}
-              onLoadDetails={() => onLoadBatchDetails(batch.id)}
-              onDismiss={() => onDismissBatch(batch.id)}
-              onRemove={() => onRemoveBatch(batch.id)}
-              onRetryItem={(itemId, keepFailedPagesForEditing) =>
-                onRetryItem(batch.id, itemId, keepFailedPagesForEditing)
-              }
-              onRemoveItem={(itemId) => onRemoveItem(batch.id, itemId)}
-              onTranslatorChange={(translator) => onTranslatorChange(batch.id, translator)}
-              onManualReviewChange={(enabled) => onManualReviewChange(batch.id, enabled)}
-              onPriorityChange={(priority) => onPriorityChange(batch.id, priority)}
-              onMangaTitleChange={(title) => onMangaTitleChange?.(batch.id, title)}
+              onLoadDetails={onLoadBatchDetails}
+              onDismiss={onDismissBatch}
+              onRemove={onRemoveBatch}
+              onRetryItem={onRetryItem}
+              onRemoveItem={onRemoveItem}
+              onTranslatorChange={onTranslatorChange}
+              onManualReviewChange={onManualReviewChange}
+              onPriorityChange={onPriorityChange}
+              onMangaTitleChange={onMangaTitleChange}
               onOpenLightbox={onOpenLightbox}
               onOpenPageEdit={onOpenPageEdit}
               isColorizerActive={isColorizerActive}
-              onToggleExcludeColor={(itemId) => onToggleExcludeColor?.(batch.id, itemId)}
+              onToggleExcludeColor={onToggleExcludeColor}
               isActionPending={isActionPending}
               runAction={runAction}
               onNavigate={onNavigate}

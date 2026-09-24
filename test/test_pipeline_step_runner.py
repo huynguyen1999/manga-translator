@@ -99,14 +99,17 @@ class PipelineStepRunnerTests(unittest.TestCase):
         candidate_data.assert_not_called()
         product.assert_not_called()
 
-    def test_switching_fonts_invalidates_cached_glyphs(self):
+    def test_glyph_cache_is_keyed_by_font_selection(self):
+        text_render.get_char_glyph.cache_clear()
         text_render.set_font("fonts/comic shanns 2.ttf")
-        text_render.get_char_glyph("A", 24, 0)
-        self.assertEqual(text_render.get_char_glyph.cache_info().currsize, 1)
+        comic_glyph = text_render.get_char_glyph("A", 24, 0)
 
         text_render.set_font("fonts/anime_ace.ttf")
         text_render.get_char_glyph("A", 24, 0)
-        self.assertEqual(text_render.get_char_glyph.cache_info().currsize, 1)
+        self.assertEqual(text_render.get_char_glyph.cache_info().currsize, 2)
+
+        text_render.set_font("fonts/comic shanns 2.ttf")
+        self.assertIs(text_render.get_char_glyph("A", 24, 0), comic_glyph)
 
     def test_free_text_isolated_from_bubble_geometry(self):
         ctx = Context()

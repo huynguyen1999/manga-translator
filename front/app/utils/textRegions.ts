@@ -133,6 +133,13 @@ export interface DetectedRegionLine {
   confidence?: number | null;
 }
 
+export interface DetectedBubbleRegion {
+  id: string;
+  polygons: Array<Array<[number, number]>>;
+  imageSize?: { width: number; height: number };
+  confidence?: number | null;
+}
+
 export const parseDetectionRegions = (data: unknown): DetectedRegionLine[] => {
   const records = Array.isArray(data)
     ? data
@@ -150,5 +157,41 @@ export const parseDetectionRegions = (data: unknown): DetectedRegionLine[] => {
       points: pts,
       confidence: confidence != null ? confidence : null,
     }));
+  });
+};
+
+export const parseBubbleDetections = (data: unknown): DetectedBubbleRegion[] => {
+  const records = Array.isArray(data)
+    ? data
+    : data && typeof data === "object"
+    ? ((data as RawRegion).detections ?? (data as RawRegion).regions)
+    : null;
+  if (!Array.isArray(records)) return [];
+
+  return records.flatMap((raw, idx) => {
+    if (!raw || typeof raw !== "object") return [];
+    const item = raw as RawRegion;
+    let polygons = linesFrom(item.polygons);
+    if (polygons.length === 0) polygons = linesFrom(item.polygon);
+    if (polygons.length === 0 && Array.isArray(item.xyxy) && item.xyxy.length >= 4) {
+      const x1 = numberValue(item.xyxy[0]);
+      const y1 = numberValue(item.xyxy[1]);
+      const x2 = numberValue(item.xyxy[2]);
+      const y2 = numberValue(item.xyxy[3]);
+      if (x1 !== null && y1 !== null && x2 !== null && y2 !== null && x2 > x1 && y2 > y1) {
+        polygons = [[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]];
+      }
+    }
+    if (polygons.length === 0) return [];
+    const imageWidth = Array.isArray(item.image_size) ? numberValue(item.image_size[0]) : null;
+    const imageHeight = Array.isArray(item.image_size) ? numberValue(item.image_size[1]) : null;
+    return [{
+      id: String(item.index ?? idx),
+      polygons,
+      ...(imageWidth !== null && imageHeight !== null && imageWidth > 0 && imageHeight > 0
+        ? { imageSize: { width: imageWidth, height: imageHeight } }
+        : {}),
+      confidence: numberValue(item.confidence ?? item.prob),
+    }];
   });
 };

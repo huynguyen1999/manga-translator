@@ -289,54 +289,50 @@ class SharedModelExecutorTest(unittest.IsolatedAsyncioTestCase):
             await bubble.unload()
             self.assertEqual(len(self.executor._cache['bubble_detector']), 0)
 
-    def test_macos_multiworker_does_not_switch_to_subprocesses(self):
+    def test_mps_uses_one_gpu_lane_and_two_cpu_stage_slots(self):
         from server import main
         from manga_translator.pipeline.stages import ResourceClass
         import torch
 
-        args = SimpleNamespace(start_instance=True, workers=4, executor_mode='inprocess', use_gpu=True)
-        original_mode = main.mps_memory_mode
+        args = SimpleNamespace(start_instance=True, workers=2, executor_mode='inprocess', use_gpu=True)
         original_concurrency = main.model_executor_concurrency
         original_limits = main.batch_resource_limits
-        with patch.object(main, '_init_server_environment'), patch.object(main.sys, 'platform', 'darwin'), \
+        with patch.object(main, '_init_server_environment'), \
                 patch.object(torch.xpu, 'is_available', return_value=False), \
                 patch.object(torch.backends.mps, 'is_available', return_value=True), \
                 patch.object(main, '_setup_inprocess_workers', return_value=[]) as inprocess, \
                 patch.object(main, '_setup_subprocess_workers') as subprocess:
             try:
                 self.assertEqual(main.prepare(args), [])
-                inprocess.assert_called_once_with(args, 4, 1)
+                inprocess.assert_called_once_with(args, 2, 1)
                 subprocess.assert_not_called()
-                self.assertTrue(main.mps_memory_mode)
                 self.assertEqual(main.batch_resource_limits[ResourceClass.GPU], 1)
+                self.assertEqual(main.batch_resource_limits[ResourceClass.CPU_HEAVY], 2)
             finally:
-                main.mps_memory_mode = original_mode
                 main.model_executor_concurrency = original_concurrency
                 main.batch_resource_limits = original_limits
 
-    def test_non_mps_setup_retains_two_model_calls(self):
+    def test_accelerator_setup_keeps_model_execution_serial(self):
         from server import main
         from manga_translator.pipeline.stages import ResourceClass
         import torch
 
         args = SimpleNamespace(start_instance=True, workers=2, executor_mode='inprocess', use_gpu=True)
-        original_mode = main.mps_memory_mode
         original_concurrency = main.model_executor_concurrency
         original_limits = main.batch_resource_limits
         with patch.object(main, '_init_server_environment'), \
                 patch.object(torch.xpu, 'is_available', return_value=False), \
                 patch.object(torch.backends.mps, 'is_available', return_value=False), \
+                patch.object(torch.cuda, 'is_available', return_value=True), \
                 patch.object(main, '_setup_inprocess_workers', return_value=[]) as inprocess:
             try:
                 self.assertEqual(main.prepare(args), [])
-                inprocess.assert_called_once_with(args, 2, 2)
-                self.assertFalse(main.mps_memory_mode)
-                self.assertEqual(main.batch_resource_limits[ResourceClass.GPU], 2)
+                inprocess.assert_called_once_with(args, 2, 1)
+                self.assertEqual(main.batch_resource_limits[ResourceClass.GPU], 1)
+                self.assertEqual(main.batch_resource_limits[ResourceClass.CPU_HEAVY], 2)
             finally:
-                main.mps_memory_mode = original_mode
                 main.model_executor_concurrency = original_concurrency
                 main.batch_resource_limits = original_limits
-
 
 if __name__ == '__main__':
     unittest.main()

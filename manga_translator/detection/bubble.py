@@ -75,6 +75,7 @@ class BubbleDetector:
         self.model = YOLO(str(_resolve_checkpoint(model)))
 
     def __call__(self, image: np.ndarray) -> list[BubbleDetection]:
+        logger.info("Bubble detector inference batch pages=1 device=%s", self.device)
         return self._read_result(
             self.model.predict(
                 source=cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
@@ -90,6 +91,7 @@ class BubbleDetector:
     def detect_batch(self, images: list[np.ndarray]) -> list[list[BubbleDetection]]:
         if not images:
             return []
+        logger.info("Bubble detector inference batch pages=%d device=%s", len(images), self.device)
         results = self.model.predict(
             source=[cv2.cvtColor(image, cv2.COLOR_RGB2BGR) for image in images],
             device=self.device,
@@ -181,10 +183,11 @@ def serialize_bubble_detections(
             "polygon": [],
             "polygons": [],
         }
-        if mask is not None and np.any(mask):
+        if mask is not None:
             mask_arr = np.asarray(mask, dtype=np.uint8)
-            ys, xs = np.where(mask_arr > 0)
-            if len(xs) > 0 and len(ys) > 0:
+            entry["image_size"] = [int(mask_arr.shape[1]), int(mask_arr.shape[0])]
+            if np.any(mask_arr):
+                ys, xs = np.where(mask_arr > 0)
                 x1, x2 = int(xs.min()), int(xs.max())
                 y1, y2 = int(ys.min()), int(ys.max())
                 entry["xyxy"] = [x1, y1, x2, y2]

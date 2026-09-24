@@ -162,7 +162,8 @@ def _rects_overlap(left, right):
 
 
 @functools.lru_cache(maxsize=4096)
-def _horizontal_layout(font_size, text, width, height, language, hyphenate, line_spacing):
+def _horizontal_layout(font_key, font_size, text, width, height, language, hyphenate, line_spacing):
+    """Cache wrapping separately for each selected font chain."""
     lines, widths = text_render.calc_horizontal(
         font_size,
         text,
@@ -310,6 +311,7 @@ def _find_horizontal_placement(
                 if candidate_width <= 0 or candidate_width > max_w_bound:
                     continue
                 needed_width, needed_height = _horizontal_layout(
+                    text_render.FONT_SELECTION_KEY,
                     candidate_font,
                     text,
                     candidate_width,
@@ -368,6 +370,7 @@ def _find_horizontal_placement(
                     if candidate_width <= 0:
                         continue
                     needed_width, needed_height = _horizontal_layout(
+                        text_render.FONT_SELECTION_KEY,
                         candidate_font,
                         text,
                         min(candidate_width, image_width),
@@ -757,7 +760,6 @@ async def dispatch(
 
     with _RENDER_LOCK:
         text_render.set_font(font_path)
-        _horizontal_layout.cache_clear()
         text_regions = list(filter(lambda region: region.translation, text_regions))
 
         # Resize regions that are too small

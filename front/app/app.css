@@ -29,6 +29,28 @@ html.dark body {
   color-scheme: dark;
 }
 
+#app-root {
+  min-height: 100vh;
+  transition: filter 120ms ease;
+}
+
+body:has(#overlay-root [data-app-overlay="jobs"]) #app-root {
+  filter: blur(2px);
+}
+
+body:has(#overlay-root [data-app-overlay="page-detail"]) #app-root {
+  filter: blur(12px);
+}
+
+.job-card {
+  contain: layout paint style;
+}
+
+.job-offscreen-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 12rem;
+}
+
 html:has(.manga-reader),
 body:has(.manga-reader) {
   background-color: #09090b;

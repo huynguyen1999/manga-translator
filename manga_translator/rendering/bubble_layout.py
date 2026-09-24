@@ -1114,6 +1114,7 @@ def _fit_lobe_text(region, rects, text, target_font, minimum_font, hyphenate, li
 
             # 2. Fallback to standard put_text_horizontal inside inscribed rect
             nw, nh = _horizontal_layout(
+                text_render.FONT_SELECTION_KEY,
                 s, candidate, w, h, lang, hyphenate, line_spacing,
             )
             if nw <= w and nh <= h:
@@ -1360,7 +1361,7 @@ def prepare_bubble_masks(image, regions, padding: int = 9, profile=None, return_
     return cleanup
 
 def prepare_bubbles(image, regions, font_path, render_config, group: bool = True):
-    from . import _RENDER_LOCK, text_render, _horizontal_layout, _find_horizontal_placement, _points_for_rect, fg_bg_compare
+    from . import text_render, _horizontal_layout, _find_horizontal_placement, _points_for_rect, fg_bg_compare
 
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     custom_mode = any(getattr(region, "_bubble_mask", None) is not None for region in regions)
@@ -1447,221 +1448,219 @@ def prepare_bubbles(image, regions, font_path, render_config, group: bool = True
                         del prepared_region.group_members
                     result.append(prepared_region)
         return sorted(result, key=lambda item: getattr(item, "_bubble_source_order", 0))
-    with _RENDER_LOCK:
-        text_render.set_font(font_path)
-        _horizontal_layout.cache_clear()
+    text_render.set_font(font_path)
 
-        # Pre-calculate page-level baseline target font size across all bubble groups
-        page_target_estimates = []
-        for (u_b, lbl), mems in groups.items():
-            comp = custom_masks[lbl] if custom_mode else ((closed_labels if u_b else labels) == lbl).astype(np.uint8)
-            cnts, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            inter = np.zeros_like(comp)
-            cv2.drawContours(inter, cnts, -1, 1, cv2.FILLED)
-            inter = cv2.erode(inter, np.ones((7, 7), np.uint8))
-            t = "\n".join(r.translation for _, r in mems)
-            min_f = render_config.font_size_minimum
-            if min_f == -1:
-                min_f = round(sum(gray.shape) / 200)
-            min_f = max(1, min_f)
-            est = _estimate_adaptive_font_size(inter, t, min_f)
-            if est > min_f:
-                page_target_estimates.append(est)
-        page_target_font = int(round(np.percentile(page_target_estimates, 70))) if page_target_estimates else None
+    # Pre-calculate page-level baseline target font size across all bubble groups
+    page_target_estimates = []
+    for (u_b, lbl), mems in groups.items():
+        comp = custom_masks[lbl] if custom_mode else ((closed_labels if u_b else labels) == lbl).astype(np.uint8)
+        cnts, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        inter = np.zeros_like(comp)
+        cv2.drawContours(inter, cnts, -1, 1, cv2.FILLED)
+        inter = cv2.erode(inter, np.ones((7, 7), np.uint8))
+        t = "\n".join(r.translation for _, r in mems)
+        min_f = render_config.font_size_minimum
+        if min_f == -1:
+            min_f = round(sum(gray.shape) / 200)
+        min_f = max(1, min_f)
+        est = _estimate_adaptive_font_size(inter, t, min_f)
+        if est > min_f:
+            page_target_estimates.append(est)
+    page_target_font = int(round(np.percentile(page_target_estimates, 70))) if page_target_estimates else None
 
-        for (uncertain_boundary, label), members in groups.items():
-            # Existing pipeline region order is already the source reading order.
-            members.sort(key=lambda pair: pair[0])
-            region = copy.copy(members[0][1])
-            for name, descriptor in vars(type(region)).items():
-                if isinstance(descriptor, cached_property):
-                    region.__dict__.pop(name, None)
-            region._bounding_rect = None
-            region.angle = 0
-            region.lines = np.concatenate([r.lines for _, r in members])
-            region.texts = [r.text for _, r in members]
-            region.text = "\n".join(region.texts)
-            region.translation = "\n".join(r.translation for _, r in members)
-            region.group_id = f"bubble_{members[0][0]}"
-            region.region_id = region.group_id
-            region.source_region_ids = [
-                source_id
-                for source_index, item in members
-                for source_id in (
-                    getattr(item, "source_region_ids", None)
-                    or [str(getattr(item, "region_id", f"source_{source_index}"))]
-                )
-            ]
-            region.group_members = list(region.source_region_ids)
-            source_regions = []
-            for source_index, item in members:
-                records = getattr(item, "source_regions", None) or [_source_region_snapshot(item, source_index)]
-                for source in records:
-                    record = copy.deepcopy(source)
-                    record["reading_order"] = len(source_regions)
-                    source_regions.append(record)
-            region.source_regions = source_regions
-            region.review_required = any(getattr(r, "review_required", False) for _, r in members)
-            region.review_reason = next(
-                (getattr(r, "review_reason", None) for _, r in members if getattr(r, "review_required", False)),
-                None,
+    for (uncertain_boundary, label), members in groups.items():
+        # Existing pipeline region order is already the source reading order.
+        members.sort(key=lambda pair: pair[0])
+        region = copy.copy(members[0][1])
+        for name, descriptor in vars(type(region)).items():
+            if isinstance(descriptor, cached_property):
+                region.__dict__.pop(name, None)
+        region._bounding_rect = None
+        region.angle = 0
+        region.lines = np.concatenate([r.lines for _, r in members])
+        region.texts = [r.text for _, r in members]
+        region.text = "\n".join(region.texts)
+        region.translation = "\n".join(r.translation for _, r in members)
+        region.group_id = f"bubble_{members[0][0]}"
+        region.region_id = region.group_id
+        region.source_region_ids = [
+            source_id
+            for source_index, item in members
+            for source_id in (
+                getattr(item, "source_region_ids", None)
+                or [str(getattr(item, "region_id", f"source_{source_index}"))]
             )
-            component = custom_masks[label] if custom_mode else ((closed_labels if uncertain_boundary else labels) == label).astype(np.uint8)
-            contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            interior = np.zeros_like(component)
-            cv2.drawContours(interior, contours, -1, 1, cv2.FILLED)
-            region._bubble_restore = interior.copy()
-            interior = cv2.erode(interior, np.ones((7, 7), np.uint8))
-            x, y, w, h = cv2.boundingRect(interior)
-            region.bubble_bounds = [x, y, x+w, y+h]
-            region.layout_bounds = list(region.bubble_bounds)
-            region._bubble_interior = interior
-            dist = cv2.distanceTransform(interior.astype(np.uint8), cv2.DIST_L2, 5)
-            if np.any(dist):
-                flat = int(np.argmax(dist))
-                cy, cx = np.unravel_index(flat, dist.shape)
-                region._bubble_center = (int(cx), int(cy))
-            else:
-                region._bubble_center = ((x + x + w) // 2, (y + y + h) // 2)
+        ]
+        region.group_members = list(region.source_region_ids)
+        source_regions = []
+        for source_index, item in members:
+            records = getattr(item, "source_regions", None) or [_source_region_snapshot(item, source_index)]
+            for source in records:
+                record = copy.deepcopy(source)
+                record["reading_order"] = len(source_regions)
+                source_regions.append(record)
+        region.source_regions = source_regions
+        region.review_required = any(getattr(r, "review_required", False) for _, r in members)
+        region.review_reason = next(
+            (getattr(r, "review_reason", None) for _, r in members if getattr(r, "review_required", False)),
+            None,
+        )
+        component = custom_masks[label] if custom_mode else ((closed_labels if uncertain_boundary else labels) == label).astype(np.uint8)
+        contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        interior = np.zeros_like(component)
+        cv2.drawContours(interior, contours, -1, 1, cv2.FILLED)
+        region._bubble_restore = interior.copy()
+        interior = cv2.erode(interior, np.ones((7, 7), np.uint8))
+        x, y, w, h = cv2.boundingRect(interior)
+        region.bubble_bounds = [x, y, x+w, y+h]
+        region.layout_bounds = list(region.bubble_bounds)
+        region._bubble_interior = interior
+        dist = cv2.distanceTransform(interior.astype(np.uint8), cv2.DIST_L2, 5)
+        if np.any(dist):
+            flat = int(np.argmax(dist))
+            cy, cx = np.unravel_index(flat, dist.shape)
+            region._bubble_center = (int(cx), int(cy))
+        else:
+            region._bubble_center = ((x + x + w) // 2, (y + y + h) // 2)
 
-            selected = np.zeros_like(component)
-            cv2.fillPoly(selected, [np.asarray(line, np.int32) for line in region.lines], 1)
-            region._bubble_restore = cv2.bitwise_or(region._bubble_restore, selected)
-            nearby = cv2.dilate(selected, np.ones((7, 7), np.uint8))
-            ink = ((gray < 200) & (interior > 0)).astype(np.uint8)
-            n, ink_labels, ink_stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
-            cleanup = np.zeros_like(component)
-            uncertain = False
-            if custom_mode:
-                cleanup = interior * 255
-            else:
-                for ink_id in range(1, n):
-                    pixels = ink_labels == ink_id
-                    if np.any(nearby[pixels]):
-                        cleanup[pixels] = 255
-                    elif ink_stats[ink_id, cv2.CC_STAT_AREA] >= 3:
-                        uncertain = True
-                for _, member in members:
-                    member_selected = np.zeros_like(component)
-                    cv2.fillPoly(member_selected, [np.asarray(line, np.int32) for line in member.lines], 1)
-                    if not np.any(ink & member_selected):
-                        uncertain = True
-                cleanup = cv2.dilate(cleanup, np.ones((3, 3), np.uint8)) * interior
-            region._bubble_cleanup = cleanup
-            if not custom_mode and (uncertain_boundary or not interior.any() or np.count_nonzero(selected & interior) < .95 * np.count_nonzero(selected)):
-                region.review_reason = "uncertain_boundary"
-            elif not custom_mode and (uncertain or not cleanup.any()):
-                region.review_reason = "uncertain_cleanup"
-            elif not custom_mode and not region.horizontal:
-                region.review_reason = "text_does_not_fit"
+        selected = np.zeros_like(component)
+        cv2.fillPoly(selected, [np.asarray(line, np.int32) for line in region.lines], 1)
+        region._bubble_restore = cv2.bitwise_or(region._bubble_restore, selected)
+        nearby = cv2.dilate(selected, np.ones((7, 7), np.uint8))
+        ink = ((gray < 200) & (interior > 0)).astype(np.uint8)
+        n, ink_labels, ink_stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
+        cleanup = np.zeros_like(component)
+        uncertain = False
+        if custom_mode:
+            cleanup = interior * 255
+        else:
+            for ink_id in range(1, n):
+                pixels = ink_labels == ink_id
+                if np.any(nearby[pixels]):
+                    cleanup[pixels] = 255
+                elif ink_stats[ink_id, cv2.CC_STAT_AREA] >= 3:
+                    uncertain = True
+            for _, member in members:
+                member_selected = np.zeros_like(component)
+                cv2.fillPoly(member_selected, [np.asarray(line, np.int32) for line in member.lines], 1)
+                if not np.any(ink & member_selected):
+                    uncertain = True
+            cleanup = cv2.dilate(cleanup, np.ones((3, 3), np.uint8)) * interior
+        region._bubble_cleanup = cleanup
+        if not custom_mode and (uncertain_boundary or not interior.any() or np.count_nonzero(selected & interior) < .95 * np.count_nonzero(selected)):
+            region.review_reason = "uncertain_boundary"
+        elif not custom_mode and (uncertain or not cleanup.any()):
+            region.review_reason = "uncertain_cleanup"
+        elif not custom_mode and not region.horizontal:
+            region.review_reason = "text_does_not_fit"
 
-            minimum = render_config.font_size_minimum
-            if minimum == -1:
-                minimum = round(sum(gray.shape) / 200)
-            minimum = max(1, minimum)
+        minimum = render_config.font_size_minimum
+        if minimum == -1:
+            minimum = round(sum(gray.shape) / 200)
+        minimum = max(1, minimum)
+        target = max(minimum, render_config.font_size or region.font_size + render_config.font_size_offset)
+        text = region.get_translation_for_rendering()
+        if render_config.font_size is None:
+            adaptive_target = _estimate_adaptive_font_size(interior, text, minimum)
+            target = max(target, adaptive_target)
+            if page_target_font is not None:
+                target = max(target, int(round(page_target_font * 0.90)))
+
+        preferred_minimum = max(int(np.ceil(target * 0.85)), target - 3, minimum)
+
+        lobe_rects = _lobe_rects(
+            interior, region.lines, max(8, minimum), getattr(region, "target_lang", None)
+        )
+        if len(lobe_rects) > 1:
             target = max(minimum, render_config.font_size or region.font_size + render_config.font_size_offset)
-            text = region.get_translation_for_rendering()
-            if render_config.font_size is None:
-                adaptive_target = _estimate_adaptive_font_size(interior, text, minimum)
-                target = max(target, adaptive_target)
-                if page_target_font is not None:
-                    target = max(target, int(round(page_target_font * 0.90)))
-
-            preferred_minimum = max(int(np.ceil(target * 0.85)), target - 3, minimum)
-
-            lobe_rects = _lobe_rects(
-                interior, region.lines, max(8, minimum), getattr(region, "target_lang", None)
+        lobe_layout = None
+        bubble_center = getattr(region, '_bubble_center', None) or (
+            (region.bubble_bounds[0] + region.bubble_bounds[2]) / 2,
+            (region.bubble_bounds[1] + region.bubble_bounds[3]) / 2,
+        )
+        off_center_lobe = bool(lobe_rects) and (
+            abs((lobe_rects[0][0] + lobe_rects[0][2]) / 2 - bubble_center[0]) > minimum
+            or abs((lobe_rects[0][1] + lobe_rects[0][3]) / 2 - bubble_center[1]) > minimum
+        )
+        if len(lobe_rects) > 1 or off_center_lobe:
+            lobe_layout = _fit_lobe_text(
+                region, lobe_rects, text, target, minimum,
+                False, render_config.line_spacing or 0,
             )
-            if len(lobe_rects) > 1:
-                target = max(minimum, render_config.font_size or region.font_size + render_config.font_size_offset)
-            lobe_layout = None
-            bubble_center = getattr(region, '_bubble_center', None) or (
-                (region.bubble_bounds[0] + region.bubble_bounds[2]) / 2,
-                (region.bubble_bounds[1] + region.bubble_bounds[3]) / 2,
-            )
-            off_center_lobe = bool(lobe_rects) and (
-                abs((lobe_rects[0][0] + lobe_rects[0][2]) / 2 - bubble_center[0]) > minimum
-                or abs((lobe_rects[0][1] + lobe_rects[0][3]) / 2 - bubble_center[1]) > minimum
-            )
-            if len(lobe_rects) > 1 or off_center_lobe:
-                lobe_layout = _fit_lobe_text(
-                    region, lobe_rects, text, target, minimum,
-                    False, render_config.line_spacing or 0,
-                )
-                if lobe_layout is None:
-                    region.review_reason = region.review_reason or "text_does_not_fit"
-                    region.review_required = True
-                    region._render_suppressed = False
-            if lobe_layout is not None:
-                region.font_size, segments = lobe_layout
-                region.layout_segments = [
-                    {
-                        "x": segment["bounds"][0],
-                        "y": segment["bounds"][1],
-                        "width": segment["bounds"][2] - segment["bounds"][0],
-                        "height": segment["bounds"][3] - segment["bounds"][1],
-                        "text": segment["text"],
-                        "font_size": segment.get("font_size", region.font_size),
-                        "lines": segment.get("lines", []),
-                    }
-                    for segment in segments
-                ]
-                region._bubble_segments = segments
-                if len(segments) == 1 and "box" in segments[0]:
-                    region._bubble_box = segments[0]["box"]
-                region.layout_bounds = [
-                    min(segment["bounds"][0] for segment in segments),
-                    min(segment["bounds"][1] for segment in segments),
-                    max(segment["bounds"][2] for segment in segments),
-                    max(segment["bounds"][3] for segment in segments),
-                ]
-                region._bubble_points = _points_for_rect(
-                    region, region.layout_bounds, image.shape[1], image.shape[0])
-                region._bubble_cleanup = interior * 255
-            else:
-                # Single-lobe bubbles fallback to centered rectangular placement path.
+            if lobe_layout is None:
+                region.review_reason = region.review_reason or "text_does_not_fit"
+                region.review_required = True
+                region._render_suppressed = False
+        if lobe_layout is not None:
+            region.font_size, segments = lobe_layout
+            region.layout_segments = [
+                {
+                    "x": segment["bounds"][0],
+                    "y": segment["bounds"][1],
+                    "width": segment["bounds"][2] - segment["bounds"][0],
+                    "height": segment["bounds"][3] - segment["bounds"][1],
+                    "text": segment["text"],
+                    "font_size": segment.get("font_size", region.font_size),
+                    "lines": segment.get("lines", []),
+                }
+                for segment in segments
+            ]
+            region._bubble_segments = segments
+            if len(segments) == 1 and "box" in segments[0]:
+                region._bubble_box = segments[0]["box"]
+            region.layout_bounds = [
+                min(segment["bounds"][0] for segment in segments),
+                min(segment["bounds"][1] for segment in segments),
+                max(segment["bounds"][2] for segment in segments),
+                max(segment["bounds"][3] for segment in segments),
+            ]
+            region._bubble_points = _points_for_rect(
+                region, region.layout_bounds, image.shape[1], image.shape[0])
+            region._bubble_cleanup = interior * 255
+        else:
+            # Single-lobe bubbles fallback to centered rectangular placement path.
+            placement = _find_horizontal_placement(
+                region, region.bubble_bounds, image.shape, target, preferred_minimum,
+                text, False,
+                render_config.line_spacing or 0, [], is_bubble=True)
+            if placement is None:
+                # Try relaxed placement in consistent range before emergency fallback
                 placement = _find_horizontal_placement(
                     region, region.bubble_bounds, image.shape, target, preferred_minimum,
                     text, False,
-                    render_config.line_spacing or 0, [], is_bubble=True)
+                    render_config.line_spacing or 0, [], is_bubble=False)
                 if placement is None:
-                    # Try relaxed placement in consistent range before emergency fallback
                     placement = _find_horizontal_placement(
-                        region, region.bubble_bounds, image.shape, target, preferred_minimum,
+                        region, region.bubble_bounds, image.shape, minimum, 1,
                         text, False,
                         render_config.line_spacing or 0, [], is_bubble=False)
-                    if placement is None:
-                        placement = _find_horizontal_placement(
-                            region, region.bubble_bounds, image.shape, minimum, 1,
-                            text, False,
-                            render_config.line_spacing or 0, [], is_bubble=False)
-                    if placement is None:
-                        placement = (preferred_minimum, region.bubble_bounds)
-                    region.review_reason = region.review_reason or "text_does_not_fit"
-            if lobe_layout is None and placement is not None:
-                region.font_size, rect = placement
-                region.layout_bounds = list(rect)
-                region._bubble_points = _points_for_rect(region, rect, image.shape[1], image.shape[0])
-                fg, bg = fg_bg_compare(*region.get_font_colors())
+                if placement is None:
+                    placement = (preferred_minimum, region.bubble_bounds)
+                region.review_reason = region.review_reason or "text_does_not_fit"
+        if lobe_layout is None and placement is not None:
+            region.font_size, rect = placement
+            region.layout_bounds = list(rect)
+            region._bubble_points = _points_for_rect(region, rect, image.shape[1], image.shape[0])
+            fg, bg = fg_bg_compare(*region.get_font_colors())
+            box = text_render.put_text_horizontal(
+                region.font_size, region.get_translation_for_rendering(),
+                max(1, rect[2] - rect[0]), max(1, rect[3] - rect[1]), region.alignment,
+                region.direction == 'hr', fg, bg, region.target_lang,
+                False, render_config.line_spacing,
+                font_size_minimum=1)
+            if box is None or not np.any(box[:, :, 3]):
                 box = text_render.put_text_horizontal(
-                    region.font_size, region.get_translation_for_rendering(),
+                    max(1, region.font_size), region.get_translation_for_rendering(),
                     max(1, rect[2] - rect[0]), max(1, rect[3] - rect[1]), region.alignment,
                     region.direction == 'hr', fg, bg, region.target_lang,
-                    False, render_config.line_spacing,
-                    font_size_minimum=1)
-                if box is None or not np.any(box[:, :, 3]):
-                    box = text_render.put_text_horizontal(
-                        max(1, region.font_size), region.get_translation_for_rendering(),
-                        max(1, rect[2] - rect[0]), max(1, rect[3] - rect[1]), region.alignment,
-                        region.direction == 'hr', fg, bg, region.target_lang,
-                        False, render_config.line_spacing)
-                if box is not None and np.any(box[:, :, 3]):
-                    region._bubble_box = box
-                    region._bubble_cleanup = interior * 255
-                if box is None or not np.any(box[:, :, 3]) or box.shape[1] > (rect[2] - rect[0] + 3) or box.shape[0] > (rect[3] - rect[1] + 3):
-                    region.review_reason = region.review_reason or "text_does_not_fit"
-            region.review_required = bool(region.review_reason)
-            result.append(region)
+                    False, render_config.line_spacing)
+            if box is not None and np.any(box[:, :, 3]):
+                region._bubble_box = box
+                region._bubble_cleanup = interior * 255
+            if box is None or not np.any(box[:, :, 3]) or box.shape[1] > (rect[2] - rect[0] + 3) or box.shape[0] > (rect[3] - rect[1] + 3):
+                region.review_reason = region.review_reason or "text_does_not_fit"
+        region.review_required = bool(region.review_reason)
+        result.append(region)
     return sorted(result, key=lambda r: r._bubble_source_order)
 
 

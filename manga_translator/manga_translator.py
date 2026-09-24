@@ -34,6 +34,9 @@ from .utils import (
     contains_linguistic_ocr_text,
     is_meaningful_ocr_text,
     is_preserved_region,
+    classify_numeric_ocr_region,
+    NumericClassification,
+    rect_distance,
     sort_regions,
 )
 
@@ -56,7 +59,7 @@ from .ocr import dispatch as dispatch_ocr, dispatch_batch as dispatch_ocr_batch,
 from .textline_merge import dispatch as dispatch_textline_merge
 from .typography import analyze_source_typography
 from .mask_refinement import dispatch as dispatch_mask_refinement
-from .inpainting import dispatch as dispatch_inpainting, prepare as prepare_inpainting, unload as unload_inpainting
+from .inpainting import dispatch_batch as dispatch_inpainting_batch, prepare as prepare_inpainting, unload as unload_inpainting
 from .translators import (
     GPT_TRANSLATORS,
     dispatch as dispatch_translation,
@@ -1183,8 +1186,8 @@ class MangaTranslator:
     async def _mps_call(self, coro_fn, *args, **kwargs):
         """
         Call an async model-dispatch function, automatically falling back to CPU
-        if the MPS backend raises a not-implemented or device error. Standalone
-        MPS calls are serialized; in-process calls use the shared executor's limit.
+        if the MPS backend reports an unsupported operation. Standalone MPS calls
+        are serialized; in-process calls use the shared executor's limit.
 
         Usage:
             result = await self._mps_call(dispatch_detection, arg1, arg2, ..., self.device, verbose)
@@ -1197,9 +1200,11 @@ class MangaTranslator:
                 return await coro_fn(*args, **kwargs)
             except (RuntimeError, NotImplementedError) as exc:
                 err_str = str(exc)
-                mps_keywords = ('mps', 'metal', 'not implemented for', 'not supported on mps',
-                                'operator does not have a metal kernel')
-                if self.device == 'mps' and any(kw in err_str.lower() for kw in mps_keywords):
+                unsupported_mps_keywords = (
+                    'not implemented for', 'not supported on mps',
+                    'operator does not have a metal kernel',
+                )
+                if self.device == 'mps' and any(kw in err_str.lower() for kw in unsupported_mps_keywords):
                     logger.warning(
                         f'MPS not supported for this model ({type(exc).__name__}: {exc!s}). '
                         'Falling back to CPU for this model call.'
@@ -1287,6 +1292,7 @@ class MangaTranslator:
         images = [context.img_rgb for context in contexts]
         if any(image is None for image in images):
             raise RuntimeError("No image canvas available for detection")
+        logger.info("Detection model batch pages=%d device=%s", len(images), self.device)
         self._model_usage_timestamps[("detection", detector.detector)] = time.time()
         output = await self._mps_call(
             dispatch_detection_batch,
@@ -1387,8 +1393,12 @@ class MangaTranslator:
     async def _run_ocr_batch(self, pages: list[tuple[Context, Config]]):
         if not pages:
             return []
-        if self.verbose or len({config.ocr.ocr for _, config in pages}) != 1:
+        if len({config.ocr.ocr for _, config in pages}) != 1:
             return [await self._run_ocr(config, ctx) for ctx, config in pages]
+        logger.info(
+            "OCR model batch pages=%d backend=%s device=%s",
+            len(pages), pages[0][1].ocr.ocr, self.device,
+        )
         for _, config in pages:
             self._model_usage_timestamps[("ocr", config.ocr.ocr)] = time.time()
         outputs = await self._mps_call(
@@ -1541,32 +1551,112 @@ class MangaTranslator:
               
             region.text = stripped_text.strip()     
 
-            has_linguistic_text = contains_linguistic_ocr_text(region.text)
-            meaningful_ocr_text = is_meaningful_ocr_text(region.text)
+        # Precompute bounds and linguistic properties for all candidate regions to enable spatial context heuristics
+        def _get_region_bounds(reg):
+            pts = []
+            for line in getattr(reg, "lines", []):
+                for pt in line:
+                    pts.append(pt)
+            if pts:
+                arr = np.asarray(pts)
+                return float(arr[:, 0].min()), float(arr[:, 1].min()), float(arr[:, 0].max()), float(arr[:, 1].max())
+            return 0.0, 0.0, 0.0, 0.0
+
+        def _is_region_in_bubbles(reg, bubble_detections):
+            if not bubble_detections:
+                return False
+            if getattr(reg, "_bubble_mask", None) is not None:
+                return True
+            rx1, ry1, rx2, ry2 = _get_region_bounds(reg)
+            cx, cy = int((rx1 + rx2) / 2), int((ry1 + ry2) / 2)
+            for bd in bubble_detections:
+                mask = getattr(bd, "mask", None)
+                if mask is not None and 0 <= cy < mask.shape[0] and 0 <= cx < mask.shape[1]:
+                    if mask[cy, cx] > 0:
+                        return True
+            return False
+
+        region_bounds_list = [_get_region_bounds(r) for r in text_regions]
+        has_linguistic_list = [contains_linguistic_ocr_text(r.text) for r in text_regions]
+        bubble_dets = getattr(ctx, "bubble_detections", None) or []
+
+        new_text_regions = []
+        for idx, region in enumerate(text_regions):
+            if not region.text:
+                continue
+
+            # Compute spatial proximity to neighboring linguistic text
+            r_bounds = region_bounds_list[idx]
+            r_fs = getattr(region, "font_size", 14) or 14
+            max_dist = max(3.0 * r_fs, 80.0)
+            is_near_text = False
+            for other_idx, other_region in enumerate(text_regions):
+                if other_idx != idx and has_linguistic_list[other_idx]:
+                    o_bounds = region_bounds_list[other_idx]
+                    d = rect_distance(
+                        r_bounds[0], r_bounds[1], r_bounds[2], r_bounds[3],
+                        o_bounds[0], o_bounds[1], o_bounds[2], o_bounds[3]
+                    )
+                    if d <= max_dist:
+                        is_near_text = True
+                        break
+
+            is_in_bubble = _is_region_in_bubbles(region, bubble_dets)
+            ocr_prob = float(getattr(region, "prob", 1.0) or 1.0)
+            min_conf = float(getattr(config.ocr, "prob", 0.40) or 0.40)
+
+            classification = classify_numeric_ocr_region(
+                region.text,
+                prob=ocr_prob,
+                is_in_bubble=is_in_bubble,
+                is_near_text=is_near_text,
+                min_confidence=min_conf,
+            )
+
+            is_kept_numeric = classification in (
+                NumericClassification.MEANINGFUL_NUMERIC,
+                NumericClassification.POSSIBLE_NUMERIC,
+            )
+            has_linguistic_text = classification == NumericClassification.LINGUISTIC
+
             same_as_target_language = (
                 has_linguistic_text
                 and not config.translator.no_text_lang_skip
                 and langcodes is not None
                 and langcodes.tag_distance(region.source_lang, config.translator.target_lang) == 0
             )
-            if meaningful_ocr_text:
-                region.retention = "kept"
-                region.retention_reason = "linguistic_content" if has_linguistic_text else "numeric_content"
-                region.translation_policy = "translate" if has_linguistic_text else "preserve"
-                if is_preserved_region(region):
-                    region.translation = region.text
 
-            if len(region.text) < config.ocr.min_text_length \
-                    or not meaningful_ocr_text \
-                    or same_as_target_language:
+            if is_kept_numeric:
+                region.retention = "kept"
+                region.retention_reason = "numeric_content"
+                region.translation_policy = "preserve"
+                region.translation = region.text
+                if classification == NumericClassification.POSSIBLE_NUMERIC:
+                    region.review_required = True
+                    region.review_reasons = getattr(region, "review_reasons", []) or []
+                    if "possible_numeric_content" not in region.review_reasons:
+                        region.review_reasons.append("possible_numeric_content")
+            elif has_linguistic_text:
+                region.retention = "kept"
+                region.retention_reason = "linguistic_content"
+                region.translation_policy = "translate"
+
+            should_filter = False
+            filter_reason = None
+            if not is_kept_numeric and not has_linguistic_text:
+                should_filter = True
+                filter_reason = "Text contains no letters or meaningful numbers."
+            elif has_linguistic_text and len(region.text) < config.ocr.min_text_length:
+                should_filter = True
+                filter_reason = "Text length is less than the minimum required length."
+            elif has_linguistic_text and same_as_target_language:
+                should_filter = True
+                filter_reason = "Text language matches the target language and no_text_lang_skip is False."
+
+            if should_filter:
                 if region.text.strip():
                     logger.info(f'Filtered out: {region.text}')
-                    if len(region.text) < config.ocr.min_text_length:
-                        logger.info('Reason: Text length is less than the minimum required length.')
-                    elif not meaningful_ocr_text:
-                        logger.info('Reason: Text contains no letters or numbers.')
-                    elif same_as_target_language:
-                        logger.info('Reason: Text language matches the target language and no_text_lang_skip is False.')
+                    logger.info(f'Reason: {filter_reason}')
             else:
                 if config.render.font_color_fg or config.render.font_color_bg:
                     if config.render.font_color_bg:
@@ -2273,51 +2363,79 @@ class MangaTranslator:
         )
 
     async def _run_inpainting(self, config: Config, ctx: Context):
-        if ctx.text_regions and all(getattr(region, 'review_required', False) and not (getattr(region, 'translation', None) and region.translation.strip()) for region in ctx.text_regions):
-            return ctx.img_rgb.copy()
-        if config.inpainter.inpainter != Inpainter.none:
-            for region in ctx.text_regions:
-                if getattr(region, 'review_required', False) and not (getattr(region, 'translation', None) and region.translation.strip()):
-                    continue
-                for line in region.lines:
-                    x, y, w, h = cv2.boundingRect(np.asarray(line, dtype=np.int32))
-                    x1, y1 = max(0, x), max(0, y)
-                    x2, y2 = min(ctx.img_rgb.shape[1], x + w), min(ctx.img_rgb.shape[0], y + h)
-                    if ctx.mask is None or x2 <= x1 or y2 <= y1:
-                        raise TranslationFailure('No erasing mask for detected text; page needs retry')
-                    polygon = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
-                    cv2.fillPoly(polygon, [np.asarray(line, dtype=np.int32) - (x1, y1)], 255)
-                    if not np.any(ctx.mask[y1:y2, x1:x2][polygon > 0]):
-                        raise TranslationFailure('No erasing mask for detected text; page needs retry')
+        return (await self._run_inpainting_batch([config], [ctx]))[0]
+
+    async def _run_inpainting_batch(self, configs: list[Config], contexts: list[Context]):
+        if len(configs) != len(contexts):
+            raise ValueError('Inpainting config/context count mismatch')
+        if not configs:
+            return []
+        inpainter_config = configs[0].inpainter
+        if any(config.inpainter.dict() != inpainter_config.dict() for config in configs[1:]):
+            raise ValueError('Inpainting batch settings must match')
+        outputs = [None] * len(contexts)
+        active = []
+        for index, ctx in enumerate(contexts):
+            if ctx.img_rgb is None:
+                raise RuntimeError('No image canvas available for inpainting')
+            if ctx.text_regions and all(
+                getattr(region, 'review_required', False)
+                and not (getattr(region, 'translation', None) and region.translation.strip())
+                for region in ctx.text_regions
+            ):
+                outputs[index] = ctx.img_rgb.copy()
+                continue
+            if inpainter_config.inpainter != Inpainter.none:
+                for region in ctx.text_regions or []:
+                    if getattr(region, 'review_required', False) and not (getattr(region, 'translation', None) and region.translation.strip()):
+                        continue
+                    for line in region.lines:
+                        x, y, w, h = cv2.boundingRect(np.asarray(line, dtype=np.int32))
+                        x1, y1 = max(0, x), max(0, y)
+                        x2, y2 = min(ctx.img_rgb.shape[1], x + w), min(ctx.img_rgb.shape[0], y + h)
+                        if ctx.mask is None or x2 <= x1 or y2 <= y1:
+                            raise TranslationFailure('No erasing mask for detected text; page needs retry')
+                        polygon = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+                        cv2.fillPoly(polygon, [np.asarray(line, dtype=np.int32) - (x1, y1)], 255)
+                        if not np.any(ctx.mask[y1:y2, x1:x2][polygon > 0]):
+                            raise TranslationFailure('No erasing mask for detected text; page needs retry')
+            active.append((index, ctx))
+
         current_time = time.time()
         if not hasattr(self, '_model_usage_timestamps'):
             self._model_usage_timestamps = {}
-        self._model_usage_timestamps[("inpainting", config.inpainter.inpainter)] = current_time
+        self._model_usage_timestamps[("inpainting", inpainter_config.inpainter)] = current_time
         device = getattr(self, 'device', None)
-        inpainting_size = config.inpainter.inpainting_size
+        inpainting_size = inpainter_config.inpainting_size
         if device == 'mps' and inpainting_size > 1024:
             logger.info(
                 'Capping MPS inpainting size from %d to 1024 to limit peak memory',
                 inpainting_size,
             )
             inpainting_size = 1024
-        result = await self._mps_call(
-            dispatch_inpainting,
-            config.inpainter.inpainter, ctx.img_rgb, ctx.mask,
-            config.inpainter, inpainting_size, device,
-            self.verbose
-        )
-        protected = getattr(ctx, 'protected_edge_mask', None)
-        if protected is not None and np.any(protected) and result is not None:
-            result = result.copy()
-            protected_pixels = protected > 0
-            result[protected_pixels] = ctx.img_rgb[protected_pixels]
-            bundle = getattr(ctx, 'mask_bundle', None)
-            if bundle is not None and getattr(bundle, 'metrics', None) is not None:
-                bundle.metrics.protected_edge_retention = float(
-                    np.array_equal(result[protected_pixels], ctx.img_rgb[protected_pixels])
-                )
-        return result
+        if active:
+            results = await self._mps_call(
+                dispatch_inpainting_batch,
+                inpainter_config.inpainter,
+                [ctx.img_rgb for _, ctx in active],
+                [ctx.mask for _, ctx in active],
+                inpainter_config, inpainting_size, device, self.verbose,
+            )
+            if len(results) != len(active):
+                raise RuntimeError(f'Inpainter returned {len(results)} pages for {len(active)} inputs')
+            for (index, ctx), result in zip(active, results):
+                protected = getattr(ctx, 'protected_edge_mask', None)
+                if protected is not None and np.any(protected) and result is not None:
+                    result = result.copy()
+                    protected_pixels = protected > 0
+                    result[protected_pixels] = ctx.img_rgb[protected_pixels]
+                    bundle = getattr(ctx, 'mask_bundle', None)
+                    if bundle is not None and getattr(bundle, 'metrics', None) is not None:
+                        bundle.metrics.protected_edge_retention = float(
+                            np.array_equal(result[protected_pixels], ctx.img_rgb[protected_pixels])
+                        )
+                outputs[index] = result
+        return outputs
 
     async def _run_text_rendering(self, config: Config, ctx: Context):
         current_time = time.time()

@@ -65,19 +65,37 @@ class Model48pxOCR(OfflineOCR):
         del self.model
     
     async def _infer(self, image: np.ndarray, textlines: List[Quadrilateral], config: OcrConfig, verbose: bool = False, ignore_bubble: int = 0) -> List[TextBlock]:
+        return (await self._infer_batch([(image, textlines, config)], verbose))[0]
+
+    async def _infer_batch(self, pages: List[Tuple[np.ndarray, List[Quadrilateral], OcrConfig]], verbose: bool = False) -> List[List[TextBlock]]:
         text_height = 48
-        max_chunk_size = 16
-        threshold = 0.2 if config.prob is None else config.prob
+        max_chunk_size = max(16, len(pages))
+        outputs = []
+        quadrilaterals = []
+        region_imgs = []
+        page_indices = []
+        page_region_indices = [[] for _ in pages]
+        is_quadrilateral_pages = []
+        for page_index, (image, textlines, _) in enumerate(pages):
+            page_quadrilaterals = list(self._generate_text_direction(textlines))
+            is_quadrilaterals = bool(page_quadrilaterals) and isinstance(page_quadrilaterals[0][0], Quadrilateral)
+            is_quadrilateral_pages.append(is_quadrilaterals)
+            outputs.append([] if is_quadrilaterals else textlines)
+            for region, direction in page_quadrilaterals:
+                quadrilaterals.append((region, direction))
+                region_imgs.append(region.get_transformed_region(image, direction, text_height))
+                page_indices.append(page_index)
+                page_region_indices[page_index].append(len(region_imgs) - 1)
 
-        quadrilaterals = list(self._generate_text_direction(textlines))
-        region_imgs = [q.get_transformed_region(image, d, text_height) for q, d in quadrilaterals]
-        out_regions = []
-
-        perm = range(len(region_imgs))
-        is_quadrilaterals = False
-        if len(quadrilaterals) > 0 and isinstance(quadrilaterals[0][0], Quadrilateral):
-            perm = sorted(range(len(region_imgs)), key = lambda x: region_imgs[x].shape[1])
-            is_quadrilaterals = True
+        for page_index, indices in enumerate(page_region_indices):
+            if is_quadrilateral_pages[page_index]:
+                indices.sort(key=lambda index: region_imgs[index].shape[1])
+        perm = [
+            indices[rank]
+            for rank in range(max(map(len, page_region_indices), default=0))
+            for indices in page_region_indices
+            if rank < len(indices)
+        ]
 
         ix = 0
         for indices in chunks(perm, max_chunk_size):
@@ -119,6 +137,9 @@ class Model48pxOCR(OfflineOCR):
             with torch.no_grad():
                 ret = self.model.infer_beam_batch_tensor(image_tensor, widths, beams_k = 5, max_seq_length = 255)
             for i, (pred_chars_index, prob, fg_pred, bg_pred, fg_ind_pred, bg_ind_pred) in enumerate(ret):
+                page_index = page_indices[indices[i]]
+                config = pages[page_index][2]
+                threshold = 0.2 if config.prob is None else config.prob
                 if prob < threshold:
                     continue
                 has_fg = (fg_ind_pred[:, 1] > fg_ind_pred[:, 0])
@@ -173,11 +194,10 @@ class Model48pxOCR(OfflineOCR):
                     cur_region.text.append(txt)
                     cur_region.update_font_colors(np.array([fr, fg, fb]), np.array([br, bg, bb]))
 
-                out_regions.append(cur_region)
+                if is_quadrilateral_pages[page_index]:
+                    outputs[page_index].append(cur_region)
 
-        if is_quadrilaterals:
-            return out_regions
-        return textlines
+        return outputs
 
 class ConvNeXtBlock(nn.Module):
     r""" ConvNeXt Block. There are two equivalent implementations:

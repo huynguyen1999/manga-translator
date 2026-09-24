@@ -11,11 +11,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 from PIL import Image
 
 from manga_translator import Config, Context
-from manga_translator.config import Detector, Ocr
+from manga_translator.config import Detector, Inpainter, Ocr
 from manga_translator.pipeline.run import (
     CHECKPOINT_STAGE_IDS,
     PipelineRun,
@@ -76,18 +77,15 @@ _BATCH_STAGE_ALIASES = {
 
 _STAGE_RESOURCE_LIMITS = {
     ResourceClass.IO: 4,
-    ResourceClass.GPU: MODEL_EXECUTOR_CONCURRENCY,
+    ResourceClass.GPU: 1,
     ResourceClass.CPU_HEAVY: 2,
     ResourceClass.CPU_LIGHT: 2,
     ResourceClass.NETWORK: 4,
 }
-_INFERENCE_PAGE_BATCH_SIZE = 2
-
-
 def stage_resource_limits(
     pipeline_workers: int,
     cpu_heavy_workers: int,
-    gpu_concurrency: int = MODEL_EXECUTOR_CONCURRENCY,
+    gpu_concurrency: int = 1,
 ) -> dict[ResourceClass, int]:
     workers = max(1, pipeline_workers)
     cpu_heavy = min(workers, max(1, cpu_heavy_workers))
@@ -126,7 +124,7 @@ class BatchScheduler:
         executors: Any,
         result_root: str | Path,
         resource_limits: dict[ResourceClass, int] | None = None,
-        mps_memory_mode: bool = False,
+        inference_page_batch_size: int = 2,
     ):
         self.store = store
         self.executors = executors
@@ -139,7 +137,7 @@ class BatchScheduler:
         self._stopping_batches: set[str] = set()
         self._translation_locks: dict[str, asyncio.Lock] = {}
         self._reserved_items: set[tuple[str, str]] = set()
-        self.mps_memory_mode = mps_memory_mode
+        self.inference_page_batch_size = max(1, inference_page_batch_size)
         self.resource_limits = {**_STAGE_RESOURCE_LIMITS, **(resource_limits or {})}
         self.resource_limits[ResourceClass.GPU] = min(
             self.resource_limits[ResourceClass.GPU], MODEL_EXECUTOR_CONCURRENCY
@@ -153,8 +151,20 @@ class BatchScheduler:
     def wake(self) -> None:
         self._wake.set()
 
-    async def _acquire_stage_resource(self, stage_id: str) -> asyncio.Semaphore:
-        resource = _stage_resource(stage_id)
+    async def _reclaim_batch_memory(self, batch_id: str, instance: Any) -> None:
+        translator = getattr(instance, "translator", None)
+        if translator is not None and hasattr(translator, "clear_batch_state"):
+            translator.clear_batch_state(batch_id)
+        reclaim_memory = getattr(instance, "reclaim_memory", None)
+        if reclaim_memory is not None:
+            try:
+                await reclaim_memory()
+            except Exception as exc:
+                logger.warning("Failed to reclaim memory after batch %s: %s", batch_id, exc)
+
+    async def _acquire_resource(
+        self, stage_id: str, resource: ResourceClass
+    ) -> asyncio.Semaphore:
         slot = self._resource_slots[resource]
         if slot.locked():
             logger.debug(
@@ -168,9 +178,14 @@ class BatchScheduler:
         )
         return slot
 
-    def _release_stage_resource(self, stage_id: str, slot: asyncio.Semaphore) -> None:
+    async def _acquire_stage_resource(self, stage_id: str) -> asyncio.Semaphore:
+        return await self._acquire_resource(stage_id, _stage_resource(stage_id))
+
+    def _release_stage_resource(
+        self, stage_id: str, slot: asyncio.Semaphore, resource: ResourceClass | None = None
+    ) -> None:
         slot.release()
-        resource = _stage_resource(stage_id)
+        resource = resource or _stage_resource(stage_id)
         logger.debug(
             "stage_resource event=released stage=%s resource=%s capacity=%d request=%s",
             stage_id, resource.value, self.resource_limits[resource], correlation_id_ctx.get(),
@@ -237,14 +252,13 @@ class BatchScheduler:
                 story_items = items[start - 1:end]
                 if len(story_items) != end - start + 1:
                     continue
-                if any(item.get("status") in {"completed", "error"} for item in story_items):
-                    continue
+                active_story_items = [item for item in story_items if item.get("status") != "completed"]
                 if all(
                     item.get("stage") == "awaiting_translation"
                     and (batch_id, item.get("id")) not in self._running_items
-                    for item in story_items
-                ):
-                    return story_items
+                    for item in active_story_items
+                ) and active_story_items:
+                    return active_story_items
             return None
 
         uncompleted = [
@@ -280,9 +294,7 @@ class BatchScheduler:
         selected = [positions.get(item_id) for item_id in item_ids]
         if not selected or any(position is None for position in selected):
             return story_plan
-        start, end = min(selected), max(selected)
-        if len(selected) != end - start + 1:
-            return story_plan
+        local_positions = {position: index + 1 for index, position in enumerate(selected)}
 
         def local_ranges(ranges: Any) -> list[dict[str, Any]]:
             result = []
@@ -292,15 +304,18 @@ class BatchScheduler:
                 range_start, range_end = value.get("startPage"), value.get("endPage")
                 if not isinstance(range_start, int) or not isinstance(range_end, int):
                     continue
-                overlap_start, overlap_end = max(start, range_start), min(end, range_end)
-                if overlap_start <= overlap_end:
+                overlap = [
+                    local for original, local in local_positions.items()
+                    if range_start <= original <= range_end
+                ]
+                if overlap:
                     local_range = {
                         **value,
-                        "startPage": overlap_start - start + 1,
-                        "endPage": overlap_end - start + 1,
+                        "startPage": min(overlap),
+                        "endPage": max(overlap),
                     }
                     if "pageCount" in value:
-                        local_range["pageCount"] = overlap_end - overlap_start + 1
+                        local_range["pageCount"] = len(overlap)
                     result.append(local_range)
             return result
 
@@ -356,19 +371,17 @@ class BatchScheduler:
             ):
                 continue
             config = self._config_for(batch, item)
-            if config.ocr.ocr != Ocr.ocr48px_ctc:
+            if config.ocr.ocr not in {Ocr.ocr48px, Ocr.ocr48px_ctc, Ocr.mocr}:
                 continue
             key = fingerprint(config.ocr.dict())
             compatible.setdefault(key, []).append(item)
         group = next((pages for pages in compatible.values() if len(pages) > 1), [])
-        return group[:2]
+        return group[:self.inference_page_batch_size]
 
     def _find_page_inference_group(
         self, batch: dict[str, Any], items: list[dict[str, Any]]
     ) -> tuple[str, list[dict[str, Any]]] | None:
-        for stage_id in ("upscaling", "detection", "bubble_detection"):
-            if stage_id == "detection" and self.mps_memory_mode:
-                continue
+        for stage_id in ("upscaling", "detection", "bubble_detection", "inpainting"):
             compatible: dict[str, list[dict[str, Any]]] = {}
             for item in items:
                 item_id = item.get("id")
@@ -384,6 +397,10 @@ class BatchScheduler:
                     if not config.bubble_detection.enabled:
                         continue
                     settings = config.bubble_detection.dict()
+                elif stage_id == "inpainting":
+                    if config.inpainter.inpainter != Inpainter.default:
+                        continue
+                    settings = config.inpainter.dict()
                 elif stage_id == "detection":
                     if config.detector.detector not in {Detector.default, Detector.dbconvnext}:
                         continue
@@ -393,7 +410,7 @@ class BatchScheduler:
                 compatible.setdefault(fingerprint(settings), []).append(item)
             group = next((pages for pages in compatible.values() if len(pages) > 1), [])
             if group:
-                return stage_id, group[:_INFERENCE_PAGE_BATCH_SIZE]
+                return stage_id, group[:self.inference_page_batch_size]
         return None
 
     async def _claim_prepare_items(
@@ -915,7 +932,9 @@ class BatchScheduler:
                 manifest["status"] = "error" if any(entry.get("status") == "error" for entry in manifest.get("items", [])) else "completed"
             return True
 
-        await self.store.mutate(batch_id, complete)
+        result = await self.store.mutate(batch_id, complete)
+        if not any(entry.get("status") in {"queued", "processing"} for entry in result.get("items", [])):
+            await self._reclaim_batch_memory(batch_id, instance)
         (await self.store.input_path(batch_id, item["id"])).unlink(missing_ok=True)
 
     async def _process_checkpointed_ocr_group(
@@ -924,12 +943,13 @@ class BatchScheduler:
         item_ids = [item["id"] for item in claimed]
         pages = []
         completed_textless_ids = set()
+        batch_finished = False
         slot = None
         token = correlation_id_ctx.set(f"batch-{_log_token(batch_id)}/ocr-{_log_token(item_ids[0])}")
         try:
+            translator = instance.translator
             slot = await self._acquire_stage_resource("ocr")
             batch = await self.store.get_batch(batch_id)
-            translator = instance.translator
             for item in claimed:
                 folder = item.get("resultFolder")
                 if not isinstance(folder, str):
@@ -1006,11 +1026,13 @@ class BatchScheduler:
             failed_item_ids = set(item_ids) - completed_textless_ids
 
             def fail(manifest: dict[str, Any]):
+                nonlocal batch_finished
                 for entry in manifest.get("items", []):
                     if entry.get("id") in failed_item_ids:
                         entry.update(status="error", stage="ocr", error=str(exc))
                 if not any(entry.get("status") in {"queued", "processing"} for entry in manifest.get("items", [])):
                     manifest["status"] = "error"
+                    batch_finished = True
                 return True
 
             await self.store.mutate(batch_id, fail)
@@ -1027,6 +1049,8 @@ class BatchScheduler:
                     translator._pipeline_run = None
             if slot is not None:
                 self._release_stage_resource("ocr", slot)
+            if batch_finished:
+                await self._reclaim_batch_memory(batch_id, instance)
             await self.executors.free_executor(instance)
             self._wake.set()
             correlation_id_ctx.reset(token)
@@ -1038,10 +1062,11 @@ class BatchScheduler:
         instance: Any,
         stage_id: str,
     ) -> None:
-        if stage_id not in {"upscaling", "detection", "bubble_detection"}:
+        if stage_id not in {"upscaling", "detection", "bubble_detection", "inpainting"}:
             raise ValueError(f"Unsupported batched model stage: {stage_id}")
         item_ids = [item["id"] for item in claimed]
         pages = []
+        batch_finished = False
         slot = None
         translator = getattr(instance, "translator", None)
         token = correlation_id_ctx.set(f"batch-{_log_token(batch_id)}/{stage_id}-{_log_token(item_ids[0])}")
@@ -1064,6 +1089,21 @@ class BatchScheduler:
                         ctx.img_colorized = ctx.input
                     if ctx.img_colorized is None:
                         raise RuntimeError(f"No image available for upscaling {item['id']}")
+                elif stage_id == "inpainting":
+                    if ctx.img_rgb is None:
+                        raise RuntimeError(f"No image available for inpainting {item['id']}")
+                    if ctx.mask is None:
+                        mask_path = run.path / "mask_final.png"
+                        if mask_path.is_file():
+                            ctx.mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                    if ctx.protected_edge_mask is None:
+                        protected_path = run.path / "protected_bubble_edge.png"
+                        if protected_path.is_file():
+                            ctx.protected_edge_mask = cv2.imread(str(protected_path), cv2.IMREAD_GRAYSCALE)
+                    if not getattr(ctx, "text_regions", None):
+                        regions = run._document("translations.json") or run._document("text_regions_merged.json")
+                        if regions is not None:
+                            ctx.text_regions = deserialize_textblocks(regions)
                 elif ctx.img_rgb is None:
                     activity = "detection" if stage_id == "detection" else "bubble detection"
                     raise RuntimeError(f"No image canvas available for {activity} {item['id']}")
@@ -1081,7 +1121,9 @@ class BatchScheduler:
                     return await translator._run_upscaling_batch(configs, contexts)
                 if stage_id == "detection":
                     return await translator._run_detection_batch(configs, contexts)
-                return await translator._run_bubble_detection_batch(configs, contexts)
+                if stage_id == "bubble_detection":
+                    return await translator._run_bubble_detection_batch(configs, contexts)
+                return await translator._run_inpainting_batch(configs, contexts)
 
             outputs = await instance._run_translation(infer_batch)
             if len(outputs) != len(pages):
@@ -1100,6 +1142,8 @@ class BatchScheduler:
                     else {"precomputed_detection": output}
                     if stage_id == "detection"
                     else {"precomputed_bubbles": output}
+                    if stage_id == "bubble_detection"
+                    else {"precomputed_inpainting": output}
                 )
                 await run.retry_stage(
                     stage_id,
@@ -1140,11 +1184,13 @@ class BatchScheduler:
                         logger.exception("Could not persist failed %s stage", stage_id)
 
             def fail(manifest: dict[str, Any]):
+                nonlocal batch_finished
                 for entry in manifest.get("items", []):
                     if entry.get("id") in item_ids:
                         entry.update(status="error", stage=stage_id, error=str(exc))
                 if not any(entry.get("status") in {"queued", "processing"} for entry in manifest.get("items", [])):
                     manifest["status"] = "error"
+                    batch_finished = True
                 return True
 
             await self.store.mutate(batch_id, fail)
@@ -1166,6 +1212,8 @@ class BatchScheduler:
                 translator._pipeline_run = None
             if slot is not None:
                 self._release_stage_resource(stage_id, slot)
+            if batch_finished:
+                await self._reclaim_batch_memory(batch_id, instance)
             await self.executors.free_executor(instance)
             self._wake.set()
             correlation_id_ctx.reset(token)
@@ -1180,13 +1228,20 @@ class BatchScheduler:
         batch_finished = False
         page_completed = False
         resource_slot = None
+        resource_class = None
         resource_acquired = False
         token = correlation_id_ctx.set(f"batch-{_log_token(batch_id)}/stage-{_log_token(item_id)}")
         try:
             batch = await self.store.get_batch(batch_id)
             item = next(item for item in batch["items"] if item["id"] == item_id)
             pipeline_stage = item.get("pipelineStage") or "initialize"
-            resource_slot = await self._acquire_stage_resource(pipeline_stage)
+            translator = instance.translator
+            if _stage_resource(pipeline_stage) == ResourceClass.GPU:
+                resource_class = ResourceClass.GPU
+                resource_slot = await self._acquire_stage_resource(pipeline_stage)
+            else:
+                resource_class = _stage_resource(pipeline_stage)
+                resource_slot = await self._acquire_stage_resource(pipeline_stage)
             resource_acquired = True
             if not item.get("resultFolder"):
                 await self._set_stage(batch_id, item_id, "initialize")
@@ -1199,7 +1254,6 @@ class BatchScheduler:
                     return False
                 await self.store.mutate(batch_id, mark_checkpointed)
             config = self._config_for(batch, item)
-            translator = instance.translator
             folder = item.get("resultFolder")
             if not isinstance(folder, str):
                 folder = None
@@ -1248,6 +1302,17 @@ class BatchScheduler:
                 )
 
                 if stage_id is not None and stage_id != "translation":
+                    if (
+                        _stage_resource(stage_id) == ResourceClass.GPU
+                        and resource_class != ResourceClass.GPU
+                    ):
+                        self._release_stage_resource(
+                            pipeline_stage, resource_slot, resource_class
+                        )
+                        resource_acquired = False
+                        resource_class = ResourceClass.GPU
+                        resource_slot = await self._acquire_stage_resource(stage_id)
+                        resource_acquired = True
                     await self._set_stage(batch_id, item_id, stage_id)
 
                     async def execute_stage():
@@ -1318,7 +1383,7 @@ class BatchScheduler:
                         manifest["status"] = "error" if any(
                             entry.get("status") == "error" for entry in manifest.get("items", [])
                         ) else "completed"
-                        batch_finished = manifest["status"] == "completed"
+                        batch_finished = True
                     return True
 
                 await self.store.mutate(batch_id, complete_page)
@@ -1360,11 +1425,13 @@ class BatchScheduler:
         except Exception as exc:
             logger.exception("Error running checkpointed batch stage %s for %s: %s", stage_id, item_id, exc)
             def fail(manifest: dict[str, Any]):
+                nonlocal batch_finished
                 for entry in manifest.get("items", []):
                     if entry.get("id") == item_id:
                         entry.update(status="error", stage=stage_id or "error", error=str(exc), resultFolder=folder or entry.get("resultFolder"))
                 if not any(entry.get("status") in {"queued", "processing"} for entry in manifest.get("items", [])):
                     manifest["status"] = "error"
+                    batch_finished = True
                 return True
             await self.store.mutate(batch_id, fail)
         finally:
@@ -1376,15 +1443,9 @@ class BatchScheduler:
             if image is not None:
                 image.close()
             if resource_acquired:
-                self._release_stage_resource(pipeline_stage, resource_slot)
-            if batch_finished and hasattr(instance, "reclaim_memory"):
-                translator = getattr(instance, "translator", None)
-                if translator is not None and hasattr(translator, "clear_batch_state"):
-                    translator.clear_batch_state(batch_id)
-                try:
-                    await instance.reclaim_memory()
-                except Exception as exc:
-                    logger.warning("Failed to reclaim memory after batch %s: %s", batch_id, exc)
+                self._release_stage_resource(pipeline_stage, resource_slot, resource_class)
+            if batch_finished:
+                await self._reclaim_batch_memory(batch_id, instance)
             await self.executors.free_executor(instance)
             self._wake.set()
             correlation_id_ctx.reset(token)
@@ -1394,6 +1455,8 @@ class BatchScheduler:
         staging_dir: Path | None = None
         hook = None
         stage_runs: dict[PipelineStage, float] = {}
+        batch_finished = False
+        ctx = executed_ctx = state = remap_result = None
         database = getattr(self.store, "database", None)
         page_ref: str | None = None
         try:
@@ -1517,6 +1580,7 @@ class BatchScheduler:
             )
 
             def complete(manifest: dict[str, Any]):
+                nonlocal batch_finished
                 for entry in manifest.get("items", []):
                     if entry.get("id") == item_id:
                         entry.update(
@@ -1530,6 +1594,7 @@ class BatchScheduler:
                     manifest["status"] = "error" if any(
                         entry.get("status") == "error" for entry in manifest.get("items", [])
                     ) else "completed"
+                    batch_finished = True
                 return True
 
             await self.store.mutate(batch_id, complete)
@@ -1553,11 +1618,13 @@ class BatchScheduler:
                         logger.exception("Failed to persist rerun stage status for %s", stage.value)
 
             def fail(manifest: dict[str, Any]):
+                nonlocal batch_finished
                 for entry in manifest.get("items", []):
                     if entry.get("id") == item_id:
                         entry.update(status="error", stage="error", error=str(exc))
                 if not any(entry.get("status") in {"queued", "processing"} for entry in manifest.get("items", [])):
                     manifest["status"] = "error"
+                    batch_finished = True
                 return True
 
             await self.store.mutate(batch_id, fail)
@@ -1567,6 +1634,9 @@ class BatchScheduler:
             translator = getattr(instance, "translator", instance)
             if hook is not None and translator is not None and hook in getattr(translator, "_progress_hooks", []):
                 translator._progress_hooks.remove(hook)
+            ctx = executed_ctx = state = remap_result = None
+            if batch_finished:
+                await self._reclaim_batch_memory(batch_id, instance)
             self._running_items.discard((batch_id, item_id))
             await self.executors.free_executor(instance)
             self._wake.set()
@@ -1583,6 +1653,7 @@ class BatchScheduler:
         hook = None
         owns_translation_lock = False
         owns_network_slot = False
+        batch_finished = False
         translation_runs = {}
         lock = self._translation_locks.setdefault(batch_id, asyncio.Lock())
         main_loop = asyncio.get_running_loop()
@@ -1748,6 +1819,7 @@ class BatchScheduler:
                 await self.store.mutate(batch_id, queue_mask_stage)
 
             def update_batch_status(manifest: dict[str, Any]):
+                nonlocal batch_finished
                 pending = any(
                     item.get("status") in {"queued", "processing"}
                     for item in manifest.get("items", [])
@@ -1756,6 +1828,7 @@ class BatchScheduler:
                     manifest["status"] = "error" if any(
                         item.get("status") == "error" for item in manifest.get("items", [])
                     ) else "completed"
+                    batch_finished = True
                 elif manifest.get("status") != "paused":
                     manifest["status"] = "processing"
                 return True
@@ -1765,11 +1838,13 @@ class BatchScheduler:
         except Exception as exc:
             logger.error("Error processing batch group %s: %s", item_ids, exc)
             def fail_group(manifest: dict[str, Any]):
+                nonlocal batch_finished
                 for entry in manifest.get("items", []):
                     if entry.get("id") in item_ids:
                         entry.update(status="error", stage="translation", error=str(exc))
                 if not any(entry.get("status") in {"queued", "processing"} for entry in manifest.get("items", [])):
                     manifest["status"] = "error"
+                    batch_finished = True
                 return True
             await self.store.mutate(batch_id, fail_group)
         finally:
@@ -1784,6 +1859,8 @@ class BatchScheduler:
                 translator = getattr(instance, "translator", None)
                 if hook is not None and translator is not None and hook in translator._progress_hooks:
                     translator._progress_hooks.remove(hook)
+                if batch_finished:
+                    await self._reclaim_batch_memory(batch_id, instance)
                 await self.executors.free_executor(instance)
             if owns_translation_lock:
                 lock.release()
@@ -2166,14 +2243,8 @@ class BatchScheduler:
             if hook is not None and translator is not None and hook in translator._progress_hooks:
                 translator._progress_hooks.remove(hook)
             image = context = config = None
-            reclaim_memory = getattr(instance, "reclaim_memory", None)
-            if batch_finished and reclaim_memory is not None:
-                if translator is not None and hasattr(translator, "clear_batch_state"):
-                    translator.clear_batch_state(batch_id)
-                try:
-                    await reclaim_memory()
-                except Exception as exc:
-                    logger.warning(f"Failed to reclaim memory after batch {batch_id}: {exc}")
+            if batch_finished:
+                await self._reclaim_batch_memory(batch_id, instance)
             await self.executors.free_executor(instance)
             self._wake.set()
             correlation_id_ctx.reset(token)

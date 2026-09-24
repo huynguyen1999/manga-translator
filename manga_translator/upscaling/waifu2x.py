@@ -76,6 +76,10 @@ class Waifu2xUpscaler(OfflineUpscaler): # ~2GB of vram
             image.save(os.path.join(in_dir, f'{i}.png'))
 
         try:
+            self.logger.info(
+                'Waifu2x NCNN-Vulkan processing pages=%d through one directory process',
+                len(image_batch),
+            )
             self._run_waifu2x_executable(in_dir, out_dir, upscale_ratio, 0)
         except Exception:
             # Maybe throw exception instead

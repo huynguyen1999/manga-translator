@@ -54,96 +54,141 @@ class LamaMPEInpainter(OfflineInpainter):
         del self.model
 
     async def _infer(self, image: np.ndarray, mask: np.ndarray, config: InpainterConfig, inpainting_size: int = 1024, verbose: bool = False) -> np.ndarray:
-        img_original = np.copy(image)
-        if mask is None or cv2.countNonZero(mask) == 0:
-            return img_original
+        return (await self._infer_batch([image], [mask], config, inpainting_size, verbose))[0]
 
-        height, width, c = image.shape
+    async def _infer_batch(self, images: list[np.ndarray], masks: list[np.ndarray], config: InpainterConfig, inpainting_size: int = 1024, verbose: bool = False) -> list[np.ndarray]:
+        if len(images) != len(masks):
+            raise ValueError('Inpainting image/mask count mismatch')
+        results = [None] * len(images)
+        prepared = []
+        for index, (image, mask) in enumerate(zip(images, masks)):
+            original = np.copy(image)
+            if mask is None or cv2.countNonZero(mask) == 0:
+                results[index] = original
+                continue
 
-        # Localized crop optimization: if text mask is confined to a sub-region (<55% area),
-        # inpaint only the padded bounding box to dramatically reduce convolution cost and preserve sharpness.
-        non_zero = cv2.findNonZero(mask)
-        if non_zero is not None and not getattr(config, '_disable_crop', False):
-            bx, by, bw, bh = cv2.boundingRect(non_zero)
-            pad = 48
-            cx1 = max(0, bx - pad)
-            cy1 = max(0, by - pad)
-            cx2 = min(width, bx + bw + pad)
-            cy2 = min(height, by + bh + pad)
-            crop_w = cx2 - cx1
-            crop_h = cy2 - cy1
-            if (crop_w * crop_h) < 0.55 * (width * height):
-                sub_img = image[cy1:cy2, cx1:cx2]
-                sub_mask = mask[cy1:cy2, cx1:cx2]
-                setattr(config, '_disable_crop', True)
-                try:
-                    sub_inpainted = await self._infer(sub_img, sub_mask, config, inpainting_size, verbose)
-                finally:
-                    setattr(config, '_disable_crop', False)
-                ans = img_original.copy()
-                ans[cy1:cy2, cx1:cx2] = sub_inpainted
-                return ans
+            height, width = image.shape[:2]
+            crop = None
+            non_zero = cv2.findNonZero(mask)
+            if non_zero is not None and not getattr(config, '_disable_crop', False):
+                bx, by, bw, bh = cv2.boundingRect(non_zero)
+                cx1, cy1 = max(0, bx - 48), max(0, by - 48)
+                cx2, cy2 = min(width, bx + bw + 48), min(height, by + bh + 48)
+                if (cx2 - cx1) * (cy2 - cy1) < 0.55 * width * height:
+                    crop = (cx1, cy1, cx2, cy2)
+                    image = image[cy1:cy2, cx1:cx2]
+                    mask = mask[cy1:cy2, cx1:cx2]
 
-        mask_original = np.copy(mask)
-        mask_original[mask_original < 127] = 0
-        mask_original[mask_original >= 127] = 1
-        mask_original = mask_original[:, :, None]
+            region_original = np.copy(image)
+            mask_original = (mask >= 127).astype(np.uint8)[:, :, None]
+            region_height, region_width = image.shape[:2]
+            if max(region_height, region_width) > inpainting_size:
+                image = resize_keep_aspect(image, inpainting_size)
+                mask = resize_keep_aspect(mask, inpainting_size)
+            height, width = image.shape[:2]
+            new_h = height + (-height % 8)
+            new_w = width + (-width % 8)
+            if (new_h, new_w) != (height, width):
+                image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            item = {
+                'original': original,
+                'region_original': region_original,
+                'mask_original': mask_original,
+                'crop': crop,
+                'region_size': (region_width, region_height),
+                'padded_size': (new_w, new_h),
+                'image': image,
+                'mask': mask,
+            }
+            prepared.append((index, item))
 
-        if max(image.shape[0: 2]) > inpainting_size:
-            image = resize_keep_aspect(image, inpainting_size)
-            mask = resize_keep_aspect(mask, inpainting_size)
-        pad_size = 8
-        h, w, c = image.shape
-        if h % pad_size != 0:
-            new_h = (pad_size - (h % pad_size)) + h
-        else:
-            new_h = h
-        if w % pad_size != 0:
-            new_w = (pad_size - (w % pad_size)) + w
-        else:
-            new_w = w
-        if new_h != h or new_w != w:
-            image = cv2.resize(image, (new_w, new_h), interpolation = cv2.INTER_LINEAR)
-            mask = cv2.resize(mask, (new_w, new_h), interpolation = cv2.INTER_LINEAR)
-        self.logger.info(f'Inpainting resolution: {new_w}x{new_h}')
-        if isinstance(self.model, LamaFourier):
-            img_torch = torch.from_numpy(image).permute(2, 0, 1).unsqueeze_(0).float() / 255.
-        else:
-            img_torch = torch.from_numpy(image).permute(2, 0, 1).unsqueeze_(0).float() / 127.5 - 1.0
-        mask_torch = torch.from_numpy(mask).unsqueeze_(0).unsqueeze_(0).float() / 255.0
-        mask_torch[mask_torch < 0.5] = 0
-        mask_torch[mask_torch >= 0.5] = 1
-        if self.device.startswith('cuda') or self.device == 'mps' or self.device == 'xpu':
-            img_torch = img_torch.to(self.device)
-            mask_torch = mask_torch.to(self.device)
-        with torch.no_grad():
-            img_torch *= (1 - mask_torch)
-            if not (self.device.startswith('cuda')):
-                # mps devices here
-                img_inpainted_torch = self.model(img_torch, mask_torch)
+        while prepared:
+            first = prepared.pop(0)
+            group = [first]
+            first_height, first_width = first[1]['padded_size'][1], first[1]['padded_size'][0]
+            batch_limit = (
+                1 if getattr(self.model, 'mpe', None) is not None or getattr(self.model, 'large_arch', False)
+                else len(images)
+            )
+            if batch_limit > 1:
+                candidate_index = 0
+                while candidate_index < len(prepared) and len(group) < batch_limit:
+                    _, item = prepared[candidate_index]
+                    height = max(first_height, item['padded_size'][1])
+                    width = max(first_width, item['padded_size'][0])
+                    height = max(height, *(candidate['padded_size'][1] for _, candidate in group))
+                    width = max(width, *(candidate['padded_size'][0] for _, candidate in group))
+                    if all(
+                        height * width <= 1.25 * candidate['padded_size'][0] * candidate['padded_size'][1]
+                        for _, candidate in [*group, prepared[candidate_index]]
+                    ):
+                        group.append(prepared.pop(candidate_index))
+                    else:
+                        candidate_index += 1
+
+            # ponytail: allow at most 25% batch padding overhead; tighter shape bucketing if waste matters.
+            height = max(item['padded_size'][1] for _, item in group)
+            width = max(item['padded_size'][0] for _, item in group)
+            images_padded = [
+                cv2.copyMakeBorder(
+                    item['image'], 0, height - item['image'].shape[0],
+                    0, width - item['image'].shape[1], cv2.BORDER_REPLICATE,
+                )
+                for _, item in group
+            ]
+            masks_padded = [
+                cv2.copyMakeBorder(
+                    item['mask'], 0, height - item['mask'].shape[0],
+                    0, width - item['mask'].shape[1], cv2.BORDER_CONSTANT, value=0,
+                )
+                for _, item in group
+            ]
+            self.logger.info(
+                f'Inpainting inference batch={len(group)} resolution={width}x{height} device={self.device}'
+            )
+            if isinstance(self.model, LamaFourier):
+                img_torch = torch.from_numpy(np.stack(images_padded)).permute(0, 3, 1, 2).float() / 255.
             else:
-                # Note: lama's weight shouldn't be convert to fp16 or bf16 otherwise it produces darkened results.
-                # but it can inference under torch.autocast
+                img_torch = torch.from_numpy(np.stack(images_padded)).permute(0, 3, 1, 2).float() / 127.5 - 1.0
+            mask_torch = torch.from_numpy(np.stack(masks_padded)).unsqueeze_(1).float() / 255.0
+            mask_torch[mask_torch < 0.5] = 0
+            mask_torch[mask_torch >= 0.5] = 1
+            if self.device.startswith('cuda') or self.device in {'mps', 'xpu'}:
+                img_torch = img_torch.to(self.device)
+                mask_torch = mask_torch.to(self.device)
+            with torch.no_grad():
+                img_torch *= (1 - mask_torch)
+                if self.device.startswith('cuda'):
+                    precision = TORCH_DTYPE_MAP[str(config.inpainting_precision)]
+                    if precision == torch.float16:
+                        precision = torch.bfloat16
+                        self.logger.warning('Switch to bf16 due to Lama only compatible with bf16 and fp32.')
+                    with torch.autocast(device_type='cuda', dtype=precision):
+                        output = self.model(img_torch, mask_torch)
+                else:
+                    output = self.model(img_torch, mask_torch)
 
-                precision = TORCH_DTYPE_MAP[str(config.inpainting_precision)]
-                
-                if precision == torch.float16:
-                    precision = torch.bfloat16
-                    self.logger.warning('Switch to bf16 due to Lama only compatible with bf16 and fp32.')
-
-                with torch.autocast(device_type="cuda", dtype=precision):
-                    img_inpainted_torch = self.model(img_torch, mask_torch)
-
-        if isinstance(self.model, LamaFourier):
-            img_inpainted_torch = img_inpainted_torch.to(torch.float32)
-            img_inpainted = (img_inpainted_torch.cpu().squeeze_(0).permute(1, 2, 0).numpy() * 255.).astype(np.uint8)
-        else:
-            img_inpainted_torch = img_inpainted_torch.to(torch.float32)
-            img_inpainted = ((img_inpainted_torch.cpu().squeeze_(0).permute(1, 2, 0).numpy() + 1.0) * 127.5).astype(np.uint8)
-        if new_h != height or new_w != width:
-            img_inpainted = cv2.resize(img_inpainted, (width, height), interpolation = cv2.INTER_LINEAR)
-        ans = img_inpainted * mask_original + img_original * (1 - mask_original)
-        return ans
+            output = output.to(torch.float32).cpu().permute(0, 2, 3, 1).numpy()
+            if isinstance(self.model, LamaFourier):
+                output = (output * 255.).astype(np.uint8)
+            else:
+                output = ((output + 1.0) * 127.5).astype(np.uint8)
+            for (index, item), inpainted in zip(group, output):
+                padded_width, padded_height = item['padded_size']
+                inpainted = inpainted[:padded_height, :padded_width]
+                region_width, region_height = item['region_size']
+                if item['padded_size'] != (region_width, region_height):
+                    inpainted = cv2.resize(inpainted, (region_width, region_height), interpolation=cv2.INTER_LINEAR)
+                region = inpainted * item['mask_original'] + item['region_original'] * (1 - item['mask_original'])
+                original = item['original']
+                if item['crop'] is not None:
+                    cx1, cy1, cx2, cy2 = item['crop']
+                    original[cy1:cy2, cx1:cx2] = region
+                else:
+                    original = region
+                results[index] = original
+        return results
     
 
 class LamaLargeInpainter(LamaMPEInpainter):
@@ -665,6 +710,7 @@ class LamaFourier:
     def __init__(self, build_discriminator=True, use_mpe=False, large_arch: bool = False) -> None:
         # super().__init__()
 
+        self.large_arch = large_arch
         n_blocks = 9
         if large_arch:
             n_blocks = 18

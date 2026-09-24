@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "@iconify/react";
 import { Link } from "react-router";
 import type { MangaSummary, SummaryJob, TranslationBatch, TranslationSettings, TranslatorKey } from "@/types";
@@ -7,6 +7,8 @@ import { summaryJobProgress } from "@/utils/summaryJobs";
 import { apiUrl } from "@/utils/api";
 import { buildMangaDetailIdUrl, mangaIdForTitle } from "@/utils/routeState";
 import { summaryModelOptions } from "@/config";
+import { AppOverlayPortal } from "./AppOverlayPortal";
+import { RenderProfiler } from "@/utils/renderPerformance";
 
 type AsyncAction = () => void | Promise<void>;
 type JobSection = "active" | "queued" | "attention" | "completed";
@@ -87,15 +89,15 @@ export const sectionLabels: Record<JobSection, string> = {
 
 const SummaryJobRow: React.FC<{
   job: SummaryJob;
-  onDismiss: () => void | Promise<void>;
-  onRetry: (summaryModel: string, refreshText?: boolean) => void | Promise<void>;
-  onPause?: () => void | Promise<void>;
-  onResume?: () => void | Promise<void>;
-  onStop?: () => void | Promise<void>;
-  onOpen: () => void;
+  onDismiss: (job: SummaryJob) => void | Promise<void>;
+  onRetry: (job: SummaryJob, summaryModel: string, refreshText?: boolean) => void | Promise<void>;
+  onPause?: (job: SummaryJob) => void | Promise<void>;
+  onResume?: (job: SummaryJob) => void | Promise<void>;
+  onStop?: (job: SummaryJob) => void | Promise<void>;
+  onOpen: (job: SummaryJob) => void;
   isActionPending: (key: string) => boolean;
   runAction: (key: string, label: string, action: AsyncAction) => void;
-}> = ({ job, onDismiss, onRetry, onPause, onResume, onStop, onOpen, isActionPending, runAction }) => {
+}> = React.memo(({ job, onDismiss, onRetry, onPause, onResume, onStop, onOpen, isActionPending, runAction }) => {
   const [expanded, setExpanded] = useState(job.status === "generating" || job.status === "error");
   const [summaryModel, setSummaryModel] = useState(() => {
     const provider = job.provider?.toLowerCase();
@@ -109,7 +111,8 @@ const SummaryJobRow: React.FC<{
   const extractionRequired = job.jobExtractionRequired !== false;
 
   return (
-    <article className="relative overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+    <RenderProfiler id={`SummaryJob:${job.id}`}>
+    <article className="job-card job-offscreen-row relative overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
@@ -141,7 +144,7 @@ const SummaryJobRow: React.FC<{
         type="button"
         onClick={(event) => {
           event.stopPropagation();
-          runAction(`dismiss-summary:${job.id}`, "Clearing…", onDismiss);
+          runAction(`dismiss-summary:${job.id}`, "Clearing…", () => onDismiss(job));
         }}
         disabled={isActionPending(`dismiss-summary:${job.id}`)}
         className="absolute right-2 top-2 inline-flex min-h-10 min-w-10 items-center justify-center rounded-lg p-2 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 disabled:cursor-wait disabled:opacity-60 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
@@ -162,7 +165,7 @@ const SummaryJobRow: React.FC<{
               type="button"
               onClick={(event) => {
                 event.stopPropagation();
-                runAction(`retry-summary:${job.id}`, "Retrying…", () => onRetry(summaryModel, false));
+                runAction(`retry-summary:${job.id}`, "Retrying…", () => onRetry(job, summaryModel, false));
               }}
               disabled={isActionPending(`retry-summary:${job.id}`) || isActionPending(`retry-summary-start:${job.id}`)}
               className="inline-flex min-h-8 items-center gap-1.5 rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-60"
@@ -175,7 +178,7 @@ const SummaryJobRow: React.FC<{
               type="button"
               onClick={(event) => {
                 event.stopPropagation();
-                runAction(`retry-summary-start:${job.id}`, "Retrying from start…", () => onRetry(summaryModel, true));
+                runAction(`retry-summary-start:${job.id}`, "Retrying from start…", () => onRetry(job, summaryModel, true));
               }}
               disabled={isActionPending(`retry-summary:${job.id}`) || isActionPending(`retry-summary-start:${job.id}`)}
               className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-60 dark:border-indigo-800 dark:bg-indigo-950/50 dark:text-indigo-300 dark:hover:bg-indigo-900/60"
@@ -226,22 +229,22 @@ const SummaryJobRow: React.FC<{
           )}
           <div className="mt-4 flex flex-wrap gap-2">
             {job.status === "ready" && (
-              <button type="button" onClick={onOpen} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">
+              <button type="button" onClick={() => onOpen(job)} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">
                 <Icon icon="carbon:document-sentiment" className="h-3.5 w-3.5" /> Open summary
               </button>
             )}
             {job.status === "generating" && onPause && (
-              <button type="button" onClick={() => runAction(`pause-summary:${job.id}`, "Pausing…", onPause)} disabled={isActionPending(`pause-summary:${job.id}`)} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-semibold text-zinc-700 hover:bg-white disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800">
+              <button type="button" onClick={() => runAction(`pause-summary:${job.id}`, "Pausing…", () => onPause(job))} disabled={isActionPending(`pause-summary:${job.id}`)} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-semibold text-zinc-700 hover:bg-white disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800">
                 <Icon icon={isActionPending(`pause-summary:${job.id}`) ? "carbon:renew" : "carbon:pause"} className={`h-3.5 w-3.5 ${isActionPending(`pause-summary:${job.id}`) ? "animate-spin" : ""}`} /> Pause
               </button>
             )}
             {job.status === "paused" && onResume && (
-              <button type="button" onClick={() => runAction(`resume-summary:${job.id}`, "Resuming…", onResume)} disabled={isActionPending(`resume-summary:${job.id}`)} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-60">
+              <button type="button" onClick={() => runAction(`resume-summary:${job.id}`, "Resuming…", () => onResume(job))} disabled={isActionPending(`resume-summary:${job.id}`)} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-60">
                 <Icon icon={isActionPending(`resume-summary:${job.id}`) ? "carbon:renew" : "carbon:play"} className={`h-3.5 w-3.5 ${isActionPending(`resume-summary:${job.id}`) ? "animate-spin" : ""}`} /> Resume
               </button>
             )}
             {(job.status === "generating" || job.status === "paused" || job.status === "queued") && onStop && (
-              <button type="button" onClick={() => runAction(`stop-summary:${job.id}`, "Stopping…", onStop)} disabled={isActionPending(`stop-summary:${job.id}`)} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-60 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
+              <button type="button" onClick={() => runAction(`stop-summary:${job.id}`, "Stopping…", () => onStop(job))} disabled={isActionPending(`stop-summary:${job.id}`)} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-60 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
                 <Icon icon={isActionPending(`stop-summary:${job.id}`) ? "carbon:renew" : "carbon:stop-filled-alt"} className={`h-3.5 w-3.5 ${isActionPending(`stop-summary:${job.id}`) ? "animate-spin" : ""}`} /> Stop
               </button>
             )}
@@ -249,7 +252,7 @@ const SummaryJobRow: React.FC<{
               <>
                 <button
                   type="button"
-                  onClick={() => runAction(`retry-summary:${job.id}`, "Retrying…", () => onRetry(summaryModel, false))}
+                  onClick={() => runAction(`retry-summary:${job.id}`, "Retrying…", () => onRetry(job, summaryModel, false))}
                   disabled={isActionPending(`retry-summary:${job.id}`) || isActionPending(`retry-summary-start:${job.id}`)}
                   className="inline-flex min-h-10 items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-60"
                   title="Retry synopsis generation using cached text"
@@ -259,7 +262,7 @@ const SummaryJobRow: React.FC<{
                 </button>
                 <button
                   type="button"
-                  onClick={() => runAction(`retry-summary-start:${job.id}`, "Retrying from start…", () => onRetry(summaryModel, true))}
+                  onClick={() => runAction(`retry-summary-start:${job.id}`, "Retrying from start…", () => onRetry(job, summaryModel, true))}
                   disabled={isActionPending(`retry-summary:${job.id}`) || isActionPending(`retry-summary-start:${job.id}`)}
                   className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-60 dark:border-indigo-800 dark:bg-indigo-950/50 dark:text-indigo-300 dark:hover:bg-indigo-900/60"
                   title="Run OCR and text extraction from scratch from the beginning, then generate summary"
@@ -273,8 +276,9 @@ const SummaryJobRow: React.FC<{
         </div>
       )}
     </article>
+    </RenderProfiler>
   );
-};
+});
 
 export const JobsDrawer: React.FC<JobsDrawerProps> = ({
   open,
@@ -306,7 +310,12 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
   const drawerRef = useRef<HTMLElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const summaryCloseRef = useRef<HTMLButtonElement>(null);
-  const [pendingActions, setPendingActions] = useState<Record<string, string>>({});
+  const attachCloseButton = useCallback((element: HTMLButtonElement | null) => {
+    closeRef.current = element;
+    element?.focus();
+  }, []);
+  const [, setPendingActions] = useState<Record<string, string>>({});
+  const pendingActionsRef = useRef<Record<string, string>>({});
   const [actionError, setActionError] = useState<string | null>(null);
   const [collapsedSections, setCollapsedSections] = useState<Record<JobSection, boolean>>({
     active: false,
@@ -333,8 +342,6 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
     if (!open) return;
     restoreFocusRef.current = document.activeElement as HTMLElement | null;
     closeRef.current?.focus();
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         if (shouldCloseJobsDrawer(event.target, drawerRef.current)) onClose();
@@ -356,7 +363,6 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
-      document.body.style.overflow = previousOverflow;
       restoreFocusRef.current?.focus();
     };
   }, [open, onClose]);
@@ -371,22 +377,25 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [summaryModal]);
 
-  const isActionPending = (key: string) => Boolean(pendingActions[key]);
-  const runAction = (key: string, label: string, action: AsyncAction) => {
-    if (isActionPending(key)) return;
+  const isActionPending = useCallback((key: string) => Boolean(pendingActionsRef.current[key]), []);
+  const runAction = useCallback((key: string, label: string, action: AsyncAction) => {
+    if (pendingActionsRef.current[key]) return;
     setActionError(null);
-    setPendingActions((current) => ({ ...current, [key]: label }));
+    const started = { ...pendingActionsRef.current, [key]: label };
+    pendingActionsRef.current = started;
+    setPendingActions(started);
     void Promise.resolve().then(action).catch((error) => {
       console.warn(`Jobs action failed (${key}):`, error);
       setActionError(error instanceof Error ? error.message : "Couldn’t complete that action.");
-    }).finally(() => setPendingActions((current) => {
-      const next = { ...current };
+    }).finally(() => {
+      const next = { ...pendingActionsRef.current };
       delete next[key];
-      return next;
-    }));
-  };
+      pendingActionsRef.current = next;
+      setPendingActions(next);
+    });
+  }, []);
 
-  const openSummary = async (job: SummaryJob) => {
+  const openSummary = useCallback(async (job: SummaryJob) => {
     const requestId = ++summaryRequestRef.current;
     setSummaryModal({ job, data: null, loading: true, error: null });
     try {
@@ -408,7 +417,7 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
         });
       }
     }
-  };
+  }, []);
 
   const groups = useMemo(() => {
     const result: Record<JobSection, { type: "batch" | "summary"; value: TranslationBatch | SummaryJob }[]> = { active: [], queued: [], attention: [], completed: [] };
@@ -437,15 +446,16 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
   const controlSummary = !controlBatch ? [...groups.active, ...groups.queued].find((job) => job.type === "summary" && ["generating", "paused"].includes((job.value as SummaryJob).status))?.value as SummaryJob | undefined : undefined;
 
   return (
-    <div className="fixed inset-0 z-50" role="presentation">
-      <button type="button" aria-label="Close jobs" onClick={onClose} className="absolute inset-0 bg-zinc-950/40 backdrop-blur-[2px]" />
+    <AppOverlayPortal>
+    <div data-app-overlay="jobs" className="fixed inset-0 z-50" role="presentation">
+      <button type="button" aria-label="Close jobs" onClick={onClose} className="absolute inset-0 bg-zinc-950/40" />
       <aside ref={drawerRef} role="dialog" aria-modal="true" aria-labelledby="jobs-drawer-title" className="absolute inset-y-0 right-0 flex w-full max-w-xl flex-col border-l border-zinc-200 bg-zinc-50 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
         <div className="flex items-start justify-between gap-4 border-b border-zinc-200 px-4 py-4 dark:border-zinc-800 sm:px-6">
           <div>
             <h2 id="jobs-drawer-title" className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Jobs</h2>
             <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Translation, layout rerender, manga upload, and summary work</p>
           </div>
-          <button ref={closeRef} type="button" onClick={onClose} className="rounded-lg p-2 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-100" aria-label="Close jobs">
+          <button ref={attachCloseButton} type="button" onClick={onClose} className="rounded-lg p-2 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-100" aria-label="Close jobs">
             <Icon icon="carbon:close" className="h-5 w-5" />
           </button>
         </div>
@@ -549,12 +559,12 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
                       <SummaryJobRow
                         key={entry.value.id}
                         job={entry.value as SummaryJob}
-                        onDismiss={() => onDismissSummary(entry.value as SummaryJob)}
-                        onRetry={(summaryModel, refreshText) => onRetrySummary(entry.value as SummaryJob, summaryModel, refreshText)}
-                        onPause={onPauseSummary ? () => onPauseSummary(entry.value as SummaryJob) : undefined}
-                        onResume={onResumeSummary ? () => onResumeSummary(entry.value as SummaryJob) : undefined}
-                        onStop={onStopSummary ? () => onStopSummary(entry.value as SummaryJob) : undefined}
-                        onOpen={() => void openSummary(entry.value as SummaryJob)}
+                        onDismiss={onDismissSummary}
+                        onRetry={onRetrySummary}
+                        onPause={onPauseSummary}
+                        onResume={onResumeSummary}
+                        onStop={onStopSummary}
+                        onOpen={openSummary}
                         isActionPending={isActionPending}
                         runAction={runAction}
                       />
@@ -562,19 +572,19 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
                       <BatchCard
                         key={entry.value.id}
                         batch={entry.value as TranslationBatch}
-                        onLoadDetails={() => onLoadBatchDetails(entry.value.id)}
-                        onDismiss={() => onDismissBatch(entry.value.id)}
-                        onRemove={() => onRemoveBatch(entry.value.id)}
-                        onRetryItem={(itemId, keep) => onRetryItem(entry.value.id, itemId, keep)}
-                        onRemoveItem={(itemId) => onRemoveItem(entry.value.id, itemId)}
-                        onTranslatorChange={(translator) => onTranslatorChange(entry.value.id, translator)}
-                        onManualReviewChange={(enabled) => onManualReviewChange(entry.value.id, enabled)}
-                        onPriorityChange={(priority) => onPriorityChange(entry.value.id, priority)}
-                        onMangaTitleChange={(title) => onMangaTitleChange?.(entry.value.id, title)}
+                        onLoadDetails={onLoadBatchDetails}
+                        onDismiss={onDismissBatch}
+                        onRemove={onRemoveBatch}
+                        onRetryItem={onRetryItem}
+                        onRemoveItem={onRemoveItem}
+                        onTranslatorChange={onTranslatorChange}
+                        onManualReviewChange={onManualReviewChange}
+                        onPriorityChange={onPriorityChange}
+                        onMangaTitleChange={onMangaTitleChange}
                         onOpenLightbox={onOpenLightbox}
                         onOpenPageEdit={onOpenPageEdit}
                         isColorizerActive={isColorizerActive}
-                        onToggleExcludeColor={(itemId) => onToggleExcludeColor?.(entry.value.id, itemId)}
+                        onToggleExcludeColor={onToggleExcludeColor}
                         isActionPending={isActionPending}
                         runAction={runAction}
                         onNavigate={onClose}
@@ -665,5 +675,6 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
         </div>
       )}
     </div>
+    </AppOverlayPortal>
   );
 };

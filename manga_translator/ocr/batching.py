@@ -14,10 +14,11 @@ from ..utils.bubble import is_ignore
 
 
 def recognize_ctc_batch(ocr, pages: Sequence[tuple[np.ndarray, list, object]]):
-    """Recognize several pages in shared 16-crop model calls, preserving page order."""
+    """Batch crops across pages, keeping one crop per page in the first call."""
     text_height = 48
     outputs = []
     crops = []
+    page_crop_indices = [[] for _ in pages]
 
     for page_index, (image, textlines, config) in enumerate(pages):
         lines = list(ocr._generate_text_direction(textlines))
@@ -30,8 +31,17 @@ def recognize_ctc_batch(ocr, pages: Sequence[tuple[np.ndarray, list, object]]):
                 and is_ignore(crop, config.ignore_bubble)
             )
             crops.append((page_index, region, direction, crop, ignored, is_quadrilaterals))
+            page_crop_indices[page_index].append(len(crops) - 1)
 
-    for indices in chunks(sorted(range(len(crops)), key=lambda i: crops[i][3].shape[1]), 16):
+    for indices in page_crop_indices:
+        indices.sort(key=lambda index: crops[index][3].shape[1])
+    perm = [
+        indices[rank]
+        for rank in range(max(map(len, page_crop_indices), default=0))
+        for indices in page_crop_indices
+        if rank < len(indices)
+    ]
+    for indices in chunks(perm, max(16, len(pages))):
         widths = [crops[index][3].shape[1] for index in indices]
         max_width = (4 * (max(widths) + 7) // 4) + 128
         batch = np.zeros((len(indices), text_height, max_width, 3), dtype=np.uint8)

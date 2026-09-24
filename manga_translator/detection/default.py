@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import os
 import shutil
 import threading
@@ -40,10 +41,11 @@ def det_batch_forward_default(batch: np.ndarray, device: str, model=None):
     if target_model is None:
         raise RuntimeError("Text detection model is not loaded.")
 
-    with torch.no_grad():
+    amp = torch.autocast(device_type='mps', dtype=torch.float16) if device == 'mps' else nullcontext()
+    with torch.inference_mode(), amp:
         db, mask = target_model(tensor)
-        db = db.sigmoid().cpu().numpy()
-        mask = mask.cpu().numpy()
+        db = db.cpu().float().sigmoid().numpy()
+        mask = mask.cpu().float().numpy()
     return db, mask
 
 class DefaultDetector(OfflineDetector):

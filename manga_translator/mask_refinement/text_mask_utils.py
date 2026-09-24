@@ -57,8 +57,8 @@ def rect_distance(x1, y1, x1b, y1b, x2, y2, x2b, y2b):
 def extend_rect(x, y, w, h, max_x, max_y, extend_size):
     x1 = max(x - extend_size, 0)
     y1 = max(y - extend_size, 0)
-    w1 = min(w + extend_size * 2, max_x - x1 - 1)
-    h1 = min(h + extend_size * 2, max_y - y1 - 1)
+    w1 = min(w + extend_size * 2, max_x - x1)
+    h1 = min(h + extend_size * 2, max_y - y1)
     return x1, y1, w1, h1
 
 def complete_mask_fill(text_lines: List[Tuple[int, int, int, int]]):

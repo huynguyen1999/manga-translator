@@ -5,6 +5,7 @@ import numpy as np
 import freetype
 import functools
 import logging
+from threading import local
 from pathlib import Path
 from typing import Tuple, Optional, List
 from hyphen import Hyphenator, dictools
@@ -212,10 +213,30 @@ FALLBACK_FONTS = [
     os.path.join(BASE_PATH, 'fonts/msyh.ttc'),
     os.path.join(BASE_PATH, 'fonts/msgothic.ttc'),
 ]
-FONT_SELECTION: List[freetype.Face] = []
-font_cache = {}
-FONT_SELECTION_KEY: Tuple[str, ...] = ()
-CURRENT_FONT_PATH = ''
+# FreeType faces mutate their size and glyph slot, so a face cannot be shared by CPU workers.
+_FONT_STATE = local()
+
+
+def _font_state():
+    if not hasattr(_FONT_STATE, "font_cache"):
+        _FONT_STATE.font_cache = {}
+        _FONT_STATE.selection = []
+        _FONT_STATE.selection_key = ()
+        _FONT_STATE.current_font_path = ""
+    return _FONT_STATE
+
+
+def __getattr__(name):
+    state = _font_state()
+    if name == "FONT_SELECTION":
+        return state.selection
+    if name == "FONT_SELECTION_KEY":
+        return state.selection_key
+    if name == "CURRENT_FONT_PATH":
+        return state.current_font_path
+    if name == "font_cache":
+        return state.font_cache
+    raise AttributeError(name)
 
 
 def _normalize_font_path(path: str) -> str:
@@ -224,26 +245,23 @@ def _normalize_font_path(path: str) -> str:
 
 def get_cached_font(path: str) -> freetype.Face:
     path = _normalize_font_path(path)
-    if not font_cache.get(path):
+    font_cache = _font_state().font_cache
+    if path not in font_cache:
         # To circumvent a bug with non ascii paths in windows use memory fonts
         # https://github.com/rougier/freetype-py/issues/157#issuecomment-1683713726
         font_cache[path] = freetype.Face(Path(path).open('rb'))
     return font_cache[path]
 
 def set_font(font_path: str):
-    global FONT_SELECTION, FONT_SELECTION_KEY, CURRENT_FONT_PATH
+    state = _font_state()
     if font_path:
         selection = [font_path] + FALLBACK_FONTS
     else:
         selection = FALLBACK_FONTS
     selection_key = tuple(_normalize_font_path(path) for path in selection)
-    FONT_SELECTION = [get_cached_font(p) for p in selection]
-    CURRENT_FONT_PATH = selection_key[0] if selection_key else ''
-    if selection_key != FONT_SELECTION_KEY:
-        FONT_SELECTION_KEY = selection_key
-        cached = globals().get('_get_char_glyph_cached')
-        if cached is not None:
-            cached.cache_clear()
+    state.selection = [get_cached_font(p) for p in selection]
+    state.current_font_path = selection_key[0] if selection_key else ''
+    state.selection_key = selection_key
 
 class namespace:
     pass
@@ -269,9 +287,9 @@ class Glyph:
 
 @functools.lru_cache(maxsize = 1024, typed = True)
 def _get_char_glyph_cached(cdpt: str, font_size: int, direction: int, font_face_id: Tuple[str, ...]) -> Glyph:
-    global FONT_SELECTION
-    for i, face in enumerate(FONT_SELECTION):
-        if face.get_char_index(cdpt) == 0 and i != len(FONT_SELECTION) - 1:
+    font_selection = _font_state().selection
+    for i, face in enumerate(font_selection):
+        if face.get_char_index(cdpt) == 0 and i != len(font_selection) - 1:
             continue
         if direction == 0:
             face.set_pixel_sizes(0, font_size)
@@ -283,7 +301,7 @@ def _get_char_glyph_cached(cdpt: str, font_size: int, direction: int, font_face_
 
 def get_char_glyph(cdpt: str, font_size: int, direction: int) -> Glyph:
     """Return a glyph keyed by the active font selection as well as size/direction."""
-    return _get_char_glyph_cached(cdpt, font_size, direction, FONT_SELECTION_KEY)
+    return _get_char_glyph_cached(cdpt, font_size, direction, _font_state().selection_key)
 
 
 # Preserve the small cache API used by callers and diagnostics.
@@ -294,9 +312,9 @@ get_char_glyph.__wrapped__ = _get_char_glyph_cached.__wrapped__
 
 #@functools.lru_cache(maxsize = 1024, typed = True)
 def get_char_border(cdpt: str, font_size: int, direction: int):
-    global FONT_SELECTION
-    for i, face in enumerate(FONT_SELECTION):
-        if face.get_char_index(cdpt) == 0 and i != len(FONT_SELECTION) - 1:
+    font_selection = _font_state().selection
+    for i, face in enumerate(font_selection):
+        if face.get_char_index(cdpt) == 0 and i != len(font_selection) - 1:
             continue
         if direction == 0:
             face.set_pixel_sizes(0, font_size)

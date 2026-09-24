@@ -2,6 +2,68 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-24 — Log actual GPU inference batch sizes
+
+- Added bubble detector page-count logs, inpainting tensor batch/device logs, and backend-specific upscaler logs that distinguish tensor batching, tiled calls, and NCNN-Vulkan directory processing.
+
+## 2026-09-24 — Run page layout concurrently
+
+- Isolated FreeType font state per worker thread, keyed text-wrapping cache entries by font selection, and removed the page-wide render lock from layout.
+
+## 2026-09-24 — Reduce software-rendering work in Studio overlays
+
+- Moved Jobs and Page Detail into a shared overlay portal, keeping the blurred/tinted background while scrolling only the overlay surface.
+- Isolated and memoized the Page Detail image stage, retained decoded view sources, coalesced image and sidebar geometry updates, and memoized/contained Jobs cards and rows.
+- Added a development-only `?renderPerf=1` probe for frame pacing, p95 frame time, click response, long tasks, React commits, Chromium long-frame layout/render timing, and acceptance thresholds.
+
+## 2026-09-24 — Context-aware 3-state OCR numeric preservation and noise filtering
+
+- Implemented 3-tier OCR numeric classification (`MEANINGFUL_NUMERIC`, `POSSIBLE_NUMERIC`, `NOISE_NUMERIC`).
+- Numeric regions with semantic units, brackets, date/time formats, multi-digits, speech bubble membership, or spatial proximity to adjacent text regions are classified as `MEANINGFUL_NUMERIC` and preserved directly.
+- Standalone digits with lower confidence default to `POSSIBLE_NUMERIC` (preserved on canvas with review flag enabled) rather than silent deletion.
+- Pure noise and low-confidence isolated artifacts are filtered out as `NOISE_NUMERIC`.
+
+## 2026-09-24 — Batch MPS text detection by worker count
+
+- Removed the MPS single-page scheduler gate. Compatible default/DBNet pages now share one detector call up to the configured `--workers` count while accelerator calls remain serialized.
+
+## 2026-09-24 — Reduce memory for batched MPS text detection
+
+- Run default and DBConvNeXt detectors with MPS FP16 autocast and inference mode to reduce full-resolution activation memory without splitting the page batch. Keep detector outputs in FP32 for postprocessing, and do not retry MPS memory errors on CPU.
+
+## 2026-09-24 — Batch MangaOCR crops across pages
+
+- Include MangaOCR in worker-sized OCR page groups and batch its text-generation crops and auxiliary confidence/color crops across pages. Verbose mode no longer forces OCR page groups to run serially.
+
+## 2026-09-24 — Render saved speech-bubble regions
+
+- Page detail now outlines persisted bubble polygons in source-image coordinates and reports loading or missing region data.
+
+## 2026-09-24 — Restore completed batch pages to a manga
+
+- Manga detail can reassign existing result pages from terminal translation batches matching its title or group ID, without uploading or translating them again.
+- Completed translation and rerender batches invalidate cached manga page lists so newly saved or replaced pages appear in an already-open detail view.
+
+## 2026-09-24 — Keep GPU-capable stages on the selected accelerator
+
+- Scheduler GPU stages now wait for the shared accelerator slot instead of rerunning on CPU when another page is using it; removed the fallback-only CPU model cache.
+- Compatible page groups for 48px OCR, CTC, bubble detection, and default AOT inpainting now scale to the startup `--workers` count. OCR crop batches expand as needed to include at least one crop from each grouped page.
+- Compatible default text-detection pages also share a model call on non-MPS GPUs, even with one active GPU slot. MPS detection stays page-serial due to measured driver-memory growth and a native heap-corruption failure.
+- LaMa Large starts at batch size one for activation memory; LaMa MPE stays single-page because its positional-encoding path assumes batch size one; inpainting batches cap padding overhead at 25%.
+
+## 2026-09-24 — Serialize GPU stages and use CPU for queued pages
+
+- Keep accelerator-backed model calls to one at a time. With multiple in-process workers, pages that find the GPU stage occupied can use an isolated CPU model cache and a CPU-heavy slot instead of waiting on GPU execution.
+
+## 2026-09-24 — Keep MPS inference serial after native crash
+
+- Reverted two-call MPS inference and paired text detection after a native heap-corruption abort; other devices retain two GPU slots.
+
+## 2026-09-24 — Keep two CPU stages available for two pipelines
+
+- Preserve two background CPU slots when `--workers=2`, allowing two pages to run CPU-heavy layout or mask generation concurrently even when auto-reserving a core would reduce the calculated limit to one.
+- An explicit `--cpu-stage-workers` value still controls the shared background pool.
+
 ## 2026-09-23 — Overlay speech bubbles in page detail
 
 - Replaced the standalone bubble-mask view with a translucent bubble overlay on the original page.

@@ -64,5 +64,21 @@ async def dispatch(inpainter_key: Inpainter, image: np.ndarray, mask: np.ndarray
     return await inpainter.inpaint(image, mask, config, inpainting_size, verbose)
 
 @model_operation
+async def dispatch_batch(inpainter_key: Inpainter, images: list[np.ndarray], masks: list[np.ndarray], config: Optional[InpainterConfig], inpainting_size: int = 1024, device: str = 'cpu', verbose: bool = False) -> list[np.ndarray]:
+    if len(images) != len(masks):
+        raise ValueError('Inpainting image/mask count mismatch')
+    inpainter = get_inpainter(inpainter_key)
+    if isinstance(inpainter, OfflineInpainter):
+        await inpainter.load(device)
+    config = config or InpainterConfig()
+    if _inpainting_semaphore is not None:
+        await asyncio.to_thread(_inpainting_semaphore.acquire)
+        try:
+            return await inpainter.inpaint_batch(images, masks, config, inpainting_size, verbose)
+        finally:
+            _inpainting_semaphore.release()
+    return await inpainter.inpaint_batch(images, masks, config, inpainting_size, verbose)
+
+@model_operation
 async def unload(inpainter_key: Inpainter):
     remove_cached_model('inpainter', inpainter_cache, inpainter_key)
