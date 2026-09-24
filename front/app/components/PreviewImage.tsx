@@ -30,6 +30,11 @@ interface PreviewImageProps {
   onViewModeChange?: (mode: "split" | "translated" | "inpainted" | "original") => void;
   loading?: "lazy" | "eager";
   preloadImages?: boolean;
+  fullOriginal?: string | null;
+  fullResult?: string | null;
+  fullInpainted?: string | null;
+  coordinateSize?: { width: number; height: number } | null;
+  useFullResolution?: boolean;
 }
 
 export function getConfidenceStyle(conf: number | null | undefined) {
@@ -92,6 +97,11 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     onViewModeChange,
     loading,
     preloadImages = true,
+    fullOriginal,
+    fullResult,
+    fullInpainted,
+    coordinateSize,
+    useFullResolution = false,
   }) => {
     const [originalUrl, setOriginalUrl] = useState<string | null>(null);
     const [resultUrl, setResultUrl] = useState<string | null>(null);
@@ -102,6 +112,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     const [resultLoadFailed, setResultLoadFailed] = useState(false);
     const [resultLoaded, setResultLoaded] = useState(false);
     const [retryCount, setRetryCount] = useState(0);
+    const [previewFallbacks, setPreviewFallbacks] = useState({ original: false, result: false, inpainted: false });
 
     const isHoldingOriginal = controlledIsHoldingOriginal ?? internalIsHoldingOriginal;
     const setIsHoldingOriginal = (holding: boolean) => {
@@ -155,11 +166,12 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       ? file.name
       : "image";
 
-    // Reset error when result changes
+    // Reset image fallback state when either resolution tier changes.
     useEffect(() => {
       setResultLoadFailed(false);
       setResultLoaded(false);
-    }, [result, retryCount]);
+      setPreviewFallbacks({ original: false, result: false, inpainted: false });
+    }, [result, fullResult, originalUrl, inpaintedUrl, fullOriginal, fullInpainted, retryCount, useFullResolution]);
 
     // Create and revoke ObjectURLs safely
     useEffect(() => {
@@ -227,15 +239,21 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       };
     }, [originalUrl, resultUrl, inpaintedUrl, preloadImages]);
 
-    const effectiveResultUrl = resultUrl;
-    const hasMultiple = [originalUrl, effectiveResultUrl, inpaintedUrl].filter(Boolean).length >= 2;
-    const hasBoth = Boolean(originalUrl && effectiveResultUrl);
+    const effectiveOriginalUrl = useFullResolution || previewFallbacks.original ? fullOriginal ? apiUrl(fullOriginal) : originalUrl : originalUrl;
+    const fullResultUrl = fullResult ? apiUrl(fullResult) : null;
+    const retryFullResultUrl = fullResultUrl && retryCount && !fullResultUrl.startsWith("blob:") && !fullResultUrl.startsWith("data:")
+      ? `${fullResultUrl}${fullResultUrl.includes("?") ? "&" : "?"}previewRetry=${retryCount}`
+      : fullResultUrl;
+    const effectiveResultUrl = useFullResolution || previewFallbacks.result ? retryFullResultUrl ?? resultUrl : resultUrl;
+    const effectiveInpaintedUrl = useFullResolution || previewFallbacks.inpainted ? fullInpainted ? apiUrl(fullInpainted) : inpaintedUrl : inpaintedUrl;
+    const hasMultiple = [effectiveOriginalUrl, effectiveResultUrl, effectiveInpaintedUrl].filter(Boolean).length >= 2;
+    const hasBoth = Boolean(effectiveOriginalUrl && effectiveResultUrl);
     const displayUrl =
-      (viewMode === "inpainted" && inpaintedUrl)
-        ? inpaintedUrl
-        : (viewMode === "original" && originalUrl)
-        ? originalUrl
-        : (effectiveResultUrl || originalUrl || inpaintedUrl);
+      (viewMode === "inpainted" && effectiveInpaintedUrl)
+        ? effectiveInpaintedUrl
+        : (viewMode === "original" && effectiveOriginalUrl)
+        ? effectiveOriginalUrl
+        : (effectiveResultUrl || effectiveOriginalUrl || effectiveInpaintedUrl);
 
     const isShowingTranslatedResult = Boolean(effectiveResultUrl && displayUrl === effectiveResultUrl);
     const resultFeedback = isShowingTranslatedResult && !resultLoaded ? (
@@ -317,7 +335,8 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       });
     }, [effectiveBlocks]);
     const originalTextLines: DetectedRegionLine[] = detectedTextLines ?? fallbackOriginalTextLines;
-    const bubbleCoordinateSize = detectedBubbleRegions.find((region) => region.imageSize)?.imageSize ?? naturalSize;
+    const imageCoordinateSize = coordinateSize ?? naturalSize;
+    const bubbleCoordinateSize = detectedBubbleRegions.find((region) => region.imageSize)?.imageSize ?? imageCoordinateSize;
     const originalRegionCount = detectedTextLines?.length ?? countOriginalTextRegions(effectiveBlocks);
     const hasOriginalRegionData = originalRegionCount > 0;
     const effectiveTextRegionsUrl = textRegionsUrl
@@ -495,7 +514,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
           imageMeasureFrameRef.current = null;
         }
       };
-    }, [updateImageRect, viewMode, isHoldingOriginal, originalUrl, effectiveResultUrl, inpaintedUrl]);
+    }, [updateImageRect, viewMode, isHoldingOriginal, effectiveOriginalUrl, effectiveResultUrl, effectiveInpaintedUrl]);
 
     const handleImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
       const target = e.currentTarget;
@@ -545,6 +564,15 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     }, [selectedBlockId]);
 
     const hasBubbleData = effectiveBlocks.length > 0 || isLoadingRegions || Boolean(effectiveTextRegionsUrl);
+    const handleSourceError = (kind: "original" | "result" | "inpainted") => {
+      const fullUrl = kind === "original" ? fullOriginal : kind === "result" ? fullResult : fullInpainted;
+      if (!useFullResolution && fullUrl && !previewFallbacks[kind]) {
+        setPreviewFallbacks((previous) => ({ ...previous, [kind]: true }));
+      } else if (kind === "result") {
+        setResultLoaded(false);
+        setResultLoadFailed(true);
+      }
+    };
 
     // If only one image is available AND no comparison/bubble controls needed, render cleanly
     if (!showComparisonControls || (!hasMultiple && !hasBubbleData)) {
@@ -559,12 +587,11 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
               alt={fileName}
               className="max-w-full max-h-full w-auto h-auto object-contain rounded-lg select-none"
               draggable={false}
-              onError={() => {
-                if (effectiveResultUrl && displayUrl === effectiveResultUrl) {
-                  setResultLoaded(false);
-                  setResultLoadFailed(true);
-                }
-              }}
+              onError={() => displayUrl === effectiveOriginalUrl
+                ? handleSourceError("original")
+                : displayUrl === effectiveInpaintedUrl
+                ? handleSourceError("inpainted")
+                : handleSourceError("result")}
             />
           ) : (
             <div className="flex items-center justify-center text-zinc-400">
@@ -577,9 +604,9 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     }
 
     // Multiple image states available or bubble data present: show comparison viewer
-    const effectiveShowOriginal = isHoldingOriginal || (viewMode === "original" && Boolean(originalUrl));
-    const effectiveShowInpainted = !isHoldingOriginal && viewMode === "inpainted" && Boolean(inpaintedUrl);
-    const effectiveShowTranslated = !isHoldingOriginal && !effectiveShowInpainted && (viewMode === "translated" || !originalUrl);
+    const effectiveShowOriginal = isHoldingOriginal || (viewMode === "original" && Boolean(effectiveOriginalUrl));
+    const effectiveShowInpainted = !isHoldingOriginal && viewMode === "inpainted" && Boolean(effectiveInpaintedUrl);
+    const effectiveShowTranslated = !isHoldingOriginal && !effectiveShowInpainted && (viewMode === "translated" || !effectiveOriginalUrl);
     const isSplitView = !effectiveShowOriginal && !effectiveShowInpainted && !effectiveShowTranslated;
     const activeImage = effectiveShowOriginal
       ? "original"
@@ -589,11 +616,11 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
 
     const selectedBlockIndex = selectedBlockId ? effectiveBlocks.findIndex((b) => b.id === selectedBlockId) : -1;
     const selectedBlock = selectedBlockIndex !== -1 ? effectiveBlocks[selectedBlockIndex] : null;
-    const isCardNearBottom = selectedBlock && naturalSize && naturalSize.height > 0
-      ? (selectedBlock.y + selectedBlock.height) / naturalSize.height > 0.62
+    const isCardNearBottom = selectedBlock && imageCoordinateSize && imageCoordinateSize.height > 0
+      ? (selectedBlock.y + selectedBlock.height) / imageCoordinateSize.height > 0.62
       : false;
-    const clampedCardXPct = selectedBlock && naturalSize && naturalSize.width > 0
-      ? Math.max(20, Math.min(80, ((selectedBlock.x + selectedBlock.width / 2) / naturalSize.width) * 100))
+    const clampedCardXPct = selectedBlock && imageCoordinateSize && imageCoordinateSize.width > 0
+      ? Math.max(20, Math.min(80, ((selectedBlock.x + selectedBlock.width / 2) / imageCoordinateSize.width) * 100))
       : 50;
 
     return (
@@ -766,63 +793,61 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
           </div>
         )}
 
-        {/* Persistent image layers keep decoded sources and geometry across view changes. */}
+        {/* Only the selected view is mounted; split mode needs both sources. */}
         <div className="relative h-full w-full">
-          {originalUrl && (
+          {effectiveShowOriginal && effectiveOriginalUrl && (
             <img
-              ref={activeImage === "original" ? imgRef : undefined}
-              src={originalUrl}
+              ref={imgRef}
+              src={effectiveOriginalUrl}
               loading={loading}
               onLoad={handleImageLoad}
-              alt={effectiveShowOriginal ? `${fileName} (${originalLabel})` : ""}
-              aria-hidden={!effectiveShowOriginal}
-              className={`absolute inset-0 m-auto max-h-full max-w-full rounded-lg object-contain ${effectiveShowOriginal ? "visible" : "invisible"}`}
+              onError={() => handleSourceError("original")}
+              alt={`${fileName} (${originalLabel})`}
+              className="absolute inset-0 m-auto max-h-full max-w-full rounded-lg object-contain"
               draggable={false}
             />
           )}
-          {inpaintedUrl && (
+          {(effectiveShowInpainted || (isSplitView && !effectiveResultUrl)) && effectiveInpaintedUrl && (
             <img
               ref={activeImage === "inpainted" ? imgRef : undefined}
-              src={inpaintedUrl}
+              src={effectiveInpaintedUrl}
               loading={loading}
               onLoad={handleImageLoad}
-              alt={effectiveShowInpainted ? `${fileName} (${inpaintedLabel})` : ""}
-              aria-hidden={!effectiveShowInpainted}
-              className={`absolute inset-0 m-auto max-h-full max-w-full rounded-lg object-contain ${effectiveShowInpainted || (isSplitView && !effectiveResultUrl) ? "visible" : "invisible"}`}
+              onError={() => handleSourceError("inpainted")}
+              alt={`${fileName} (${inpaintedLabel})`}
+              className="absolute inset-0 m-auto max-h-full max-w-full rounded-lg object-contain"
               draggable={false}
             />
           )}
-          {effectiveResultUrl && (
+          {(effectiveShowTranslated || (isSplitView && Boolean(effectiveResultUrl))) && effectiveResultUrl && (
             <img
               ref={activeImage === "translated" ? imgRef : undefined}
               key={`${effectiveResultUrl}-${retryCount}`}
               src={effectiveResultUrl}
               loading={loading}
               onLoad={handleImageLoad}
-              alt={effectiveShowTranslated ? `${fileName} (${resultLabel})` : ""}
-              aria-hidden={!effectiveShowTranslated}
-              className={`absolute inset-0 m-auto max-h-full max-w-full rounded-lg object-contain ${effectiveShowTranslated || isSplitView ? "visible" : "invisible"}`}
+              alt={`${fileName} (${resultLabel})`}
+              className="absolute inset-0 m-auto max-h-full max-w-full rounded-lg object-contain"
               draggable={false}
-              onError={() => { setResultLoaded(false); setResultLoadFailed(true); }}
+              onError={() => handleSourceError("result")}
             />
           )}
 
-          {isSplitView && (
+          {isSplitView && effectiveOriginalUrl && (
             <>
               <div
                 className="pointer-events-none absolute inset-0 flex items-center justify-center"
                 style={{ clipPath: "inset(0 calc(100% - var(--slider-pos)) 0 0)" }}
               >
-                {originalUrl && (
-                  <img
-                    src={originalUrl}
+                <img
+                    src={effectiveOriginalUrl}
                     loading={loading}
                     alt=""
                     aria-hidden="true"
+                    onError={() => handleSourceError("original")}
                     className="max-h-full max-w-full rounded-lg object-contain"
                     draggable={false}
                   />
-                )}
               </div>
               <div
                 className="absolute bottom-0 top-0 z-10 flex cursor-ew-resize items-center justify-center -translate-x-1/2"
@@ -836,7 +861,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                 </div>
               </div>
               <div ref={sliderBadgeRef} className="pointer-events-none absolute bottom-2 left-2 rounded bg-black/60 px-2 py-0.5 text-[11px] text-white backdrop-blur-xs select-none">
-                {originalUrl ? originalLabel : inpaintedLabel} ({Math.round(sliderPos)}%)
+                {effectiveOriginalUrl ? originalLabel : inpaintedLabel} ({Math.round(sliderPos)}%)
               </div>
               <div className="pointer-events-none absolute bottom-2 right-2 rounded bg-indigo-600/90 px-2 py-0.5 text-[11px] text-white backdrop-blur-xs select-none">
                 {effectiveResultUrl ? resultLabel : inpaintedLabel}
@@ -846,7 +871,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
         </div>
 
         {/* Text Region Overlays & Interactive Bubble Inspector Layer */}
-        {(showBubbleRegions || showBubbleBoxes || (showOriginalRegions && hasOriginalRegionData)) && imageRect && naturalSize && naturalSize.width > 0 && naturalSize.height > 0 && (
+        {(showBubbleRegions || showBubbleBoxes || (showOriginalRegions && hasOriginalRegionData)) && imageRect && imageCoordinateSize && imageCoordinateSize.width > 0 && imageCoordinateSize.height > 0 && (
           <div
             className="absolute pointer-events-none z-20"
             style={{
@@ -861,7 +886,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                 role="img"
                 aria-label={`${detectedBubbleRegions.length} detected speech bubbles`}
                 className="absolute inset-0 h-full w-full pointer-events-none"
-                viewBox={`0 0 ${bubbleCoordinateSize?.width ?? naturalSize.width} ${bubbleCoordinateSize?.height ?? naturalSize.height}`}
+                viewBox={`0 0 ${bubbleCoordinateSize?.width ?? imageCoordinateSize.width} ${bubbleCoordinateSize?.height ?? imageCoordinateSize.height}`}
                 preserveAspectRatio="none"
               >
                 {detectedBubbleRegions.flatMap((region) => region.polygons.map((polygon, polygonIdx) => (
@@ -886,7 +911,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                 <svg
                   aria-hidden="true"
                   className="absolute inset-0 h-full w-full pointer-events-none"
-                  viewBox={`0 0 ${naturalSize.width} ${naturalSize.height}`}
+                  viewBox={`0 0 ${imageCoordinateSize.width} ${imageCoordinateSize.height}`}
                   preserveAspectRatio="none"
                 >
                   {originalTextLines.map((region, lineIdx) => {
@@ -925,8 +950,8 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                   const minY = Math.min(...ys);
                   const maxX = Math.max(...xs);
                   const midX = (minX + maxX) / 2;
-                  const leftPct = (midX / naturalSize.width) * 100;
-                  const topPct = (minY / naturalSize.height) * 100;
+                  const leftPct = (midX / imageCoordinateSize.width) * 100;
+                  const topPct = (minY / imageCoordinateSize.height) * 100;
                   const conf = region.confidence;
                   const confStyle = getConfidenceStyle(conf);
                   const hasConf = typeof conf === "number" && !isNaN(conf);
@@ -961,10 +986,10 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
 
             {showBubbleBoxes && effectiveBlocks.map((block, idx) => {
               const isSelected = selectedBlockId === block.id;
-              const leftPct = (block.x / naturalSize.width) * 100;
-              const topPct = (block.y / naturalSize.height) * 100;
-              const widthPct = (block.width / naturalSize.width) * 100;
-              const heightPct = (block.height / naturalSize.height) * 100;
+              const leftPct = (block.x / imageCoordinateSize.width) * 100;
+              const topPct = (block.y / imageCoordinateSize.height) * 100;
+              const widthPct = (block.width / imageCoordinateSize.width) * 100;
+              const heightPct = (block.height / imageCoordinateSize.height) * 100;
 
               return (
                 <div
@@ -1020,8 +1045,8 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                   left: `${clampedCardXPct}%`,
                   transform: "translateX(-50%)",
                   ...(isCardNearBottom
-                    ? { bottom: `calc(${100 - (selectedBlock.y / naturalSize.height) * 100}% + 8px)` }
-                    : { top: `calc(${((selectedBlock.y + selectedBlock.height) / naturalSize.height) * 100}% + 8px)` }),
+                    ? { bottom: `calc(${100 - (selectedBlock.y / imageCoordinateSize.height) * 100}% + 8px)` }
+                    : { top: `calc(${((selectedBlock.y + selectedBlock.height) / imageCoordinateSize.height) * 100}% + 8px)` }),
                 }}
                 onClick={(e) => e.stopPropagation()}
               >

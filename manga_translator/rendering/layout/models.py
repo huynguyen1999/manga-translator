@@ -103,6 +103,18 @@ class PageObstacleMap:
     panel_mask: np.ndarray
 
 
+@dataclass(frozen=True)
+class PanelConstraint:
+    """Axis-aligned panel bounds in page coordinates; bounds use [left, top, right, bottom)."""
+
+    panel_id: str
+    bounds: Tuple[int, int, int, int]
+    mask: Optional[np.ndarray] = None
+    confidence: float = 0.0
+    source: str = "fallback"
+    margin: int = 0
+
+
 @dataclass
 class PlacementTarget:
     """Capacity-weighted center and bounds for a safe placement mask."""
@@ -163,6 +175,7 @@ class FreeTextZone:
     total_coverable_weight: float = 1.0
     total_core_coverable: int = 0
     damage_target: Optional[FreeTextDamageTarget] = None
+    panel_constraint: Optional[PanelConstraint] = None
 
 
 @dataclass
@@ -221,6 +234,19 @@ class LayoutCandidate:
     status: str = "ok"
     valid: bool = True
     qa: Dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class RegionFontPolicy:
+    """Typography preference, feasibility thresholds, and emergency floors."""
+    region_target: int
+    page_baseline: Optional[int]
+    preferred_size: int
+    consistency_floor: int
+    mild_compression_floor: int
+    absolute_minimum: int
+    hyphenation_trigger_size: int
+    source_font_size: Optional[int] = None
 
 
 @dataclass

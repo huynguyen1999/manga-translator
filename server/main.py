@@ -121,7 +121,7 @@ from server.postgres_store import (
     SeriesConflict,
     SeriesNotFound,
 )
-from server.image_variants import asset_version, final_file, generate_image_variants
+from server.image_variants import asset_version, final_file, generate_image_variants, generate_reader_asset
 from server.result_migration import migrate_legacy_results
 from server.search_api import search_router
 from server.search_service import SearchService
@@ -1374,6 +1374,12 @@ async def get_result_file_by_folder(folder_name: str, file_name: str, request: R
                     raise HTTPException(404, detail=f"{file_name} not found in active pipeline artifacts")
                 target_path = artifact_path
 
+    if file_name in {"input-reader.webp", "inpainted-reader.webp"}:
+        generated_path = await asyncio.to_thread(generate_reader_asset, folder_path, file_name)
+        if generated_path is None:
+            raise HTTPException(404, detail=f"{file_name} not found in folder")
+        target_path = generated_path
+
     if not target_path.is_file():
         if file_name in {"batch.webp", "cover.webp", "preview.webp", "reader.webp"}:
             await asyncio.to_thread(generate_image_variants, folder_path, only=file_name.removesuffix(".webp"))
@@ -1905,13 +1911,6 @@ async def batch_images(req: Request, data: BatchTranslateRequest):
             media_type="application/zip",
             headers={"Content-Disposition": "attachment; filename=translated_images.zip"}
         )
-
-@app.get("/", response_class=HTMLResponse,tags=["ui"])
-async def index() -> HTMLResponse:
-    script_directory = Path(__file__).parent
-    html_file = script_directory / "index.html"
-    html_content = html_file.read_text(encoding="utf-8")
-    return HTMLResponse(content=html_content)
 
 @app.get("/manual", response_class=HTMLResponse, tags=["ui"])
 async def manual():
@@ -4916,6 +4915,7 @@ async def delete_result(folder_name: str):
         raise HTTPException(500, detail=f"Error deleting result: {str(e)}")
 
 
+@app.post("/results/batch-delete", tags=["api"])
 @app.post("/api/results/batch-delete", tags=["api"])
 async def delete_results(data: DeletePagesRequest):
     folders = list(dict.fromkeys(data.folders))

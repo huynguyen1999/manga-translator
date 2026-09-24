@@ -76,6 +76,21 @@ def create_free_text_layout_debug(
             x1, y1, x2, y2 = [int(v) for v in bounds]
             cv2.rectangle(debug, (x1, y1), (x2, y2), (255, 255, 255), 1)
 
+        panel = getattr(raw_zone, "panel_constraint", None)
+        if panel is not None and panel.source == "cv":
+            x1, y1, x2, y2 = panel.bounds
+            cv2.rectangle(debug, (x1, y1), (max(x1, x2 - 1), max(y1, y2 - 1)), (255, 0, 255), 2)
+            cv2.putText(
+                debug,
+                f"PANEL {panel.source} {panel.confidence:.2f}",
+                (max(2, x1 + 3), max(14, y1 + 14)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (255, 0, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
         target = raw_zone.damage_target if isinstance(raw_zone, FreeTextZone) else None
         if target is not None:
             damage_pt = (int(round(target.centroid_x)), int(round(target.centroid_y)))
@@ -95,4 +110,3 @@ def create_free_text_layout_debug(
             cv2.putText(debug, label, (damage_pt[0] + 6, damage_pt[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
 
     return debug
-

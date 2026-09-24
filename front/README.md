@@ -34,7 +34,7 @@ npm install
 
 ### Development
 
-Prepare the FastAPI server at `http://127.0.0.1:8000/`. Use verbose mode for the diagnostic artifacts:
+Run the FastAPI backend (API docs: `http://127.0.0.1:8000/docs`). Use verbose mode for the diagnostic artifacts:
 
 ```bash
 python server/main.py --verbose --start-instance

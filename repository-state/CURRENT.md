@@ -2,17 +2,28 @@
 
 Last reviewed: 2026-09-24
 
+## Backend UI surface
+- The API server no longer serves the legacy HTML translator at `/`; port 8000 serves API routes and OpenAPI docs at `/docs`. The separate browser Studio remains under `front/` on port 6868.
+
+## Reader mobile navigation
+- Touch readers use a dedicated, full-width page jump row with a numeric keyboard and 44px controls; desktop keeps its compact toolbar input.
+
 ## Active feature — original manga CBZ export
 - Manga library downloads offer translated and original CBZ archives. Original exports use each page's retained source image and name the archive with an `_original` suffix.
 
 ## Active optimization — page-local layout profiling and reusable free-text rasters
 - Solver counters now belong to one layout execution. The line-alpha cache includes the active font selection; candidate ink, visual, and block masks are reused across placement offsets, and final QA rasterizes overflow from those cached masks.
 - Row-slot, placement-target, and zone-profile results are cached for the lifetime of one page layout. Long-word pressure reads a cached row maximum or computes only that maximum; hyphenation rescue skips splits that cannot fit or improve the bottleneck.
-- Free-text search retains the existing score and exhaustive fallback while deferring full QA until the best eight candidates. `--layout-shadow-compare` compares strict centroid/local candidates with exhaustive output and returns the exhaustive layout. Production early exits remain gated by `LAYOUT_FAST_FREE_TEXT=1` (single free-text region); `LAYOUT_LAZY_CANDIDATES=1` adds the top-three local stage when the fast path is enabled.
-- `python devscripts/pipeline_step_runner.py layout-benchmark --dataset devscripts/data --repeat 5` reports layout percentiles and solver counters by page category. The current local dataset contains one sample page; shadow validation should cover a larger corpus before enabling the fast path broadly.
+- Free-text search retains the existing score and exhaustive fallback while deferring full QA until the best eight candidates. Strict ideal placements are attempted by default; `LAYOUT_FAST_FREE_TEXT=0` disables the ideal stage, and `LAYOUT_LAZY_CANDIDATES=1` independently enables local candidates. Multiple free-text regions use exact joint collision checks and rerun exhaustive search for colliding fast placements. `--layout-shadow-compare` returns the exhaustive layout. Row-slot bands use vertical prefix counts; DP word-run widths use prefix sums, compaction visits only feasible Y positions, and composite whitespace scoring reuses row/column counts.
+- `python devscripts/pipeline_step_runner.py layout-benchmark --dataset devscripts/data --repeat 5` reports layout percentiles and solver counters by page category. The current local dataset contains one sample page; shadow comparisons on a larger corpus should quantify candidate-quality differences.
 
 ## Active developer tool — local semantic-search lab
 - `devscripts/semantic_search_lab.py` indexes manga directories and ZIP archives with the pinned Search Lab BGE/SigLIP encoders, normalized `.npy` vectors, incremental fingerprints, exact cosine retrieval, image/text/RRF comparison, standalone HTML reports, and labeled benchmarks. The thin Colab/Jupyter frontend is `devscripts/semantic_search_lab_colab.ipynb`; no database or server is required.
+
+## Active developer tool — manga panel detection & segmentation (YOLO26)
+- `devscripts/detect_panels.py` runs inference with both `ShadowB/Manga109-panel-balloon-text-yolov26-segmentation` (YOLO26s instance segmentation for panels, balloons, and text with polygon masks) and `leoxs22/manga-panel-detector-yolo26n` (YOLO26n panel and text detector). It handles automatic checkpoint downloading from Hugging Face, Ultralytics serialization shims (`Segment26`, `Proto26`, `E2ELoss`), RTL/LTR reading-order sorting, retina mask overlays, panel cropping, and metadata JSON generation.
+
+
 
 ## Active feature — memory-aware shared model cache
 - The shared executor tracks each cached model's last use and active users. Idle entries expire after the server's 120-second default, with `--models-ttl 0` retaining them indefinitely; under 60% process-RAM pressure it evicts idle entries by LRU, and at 72% it performs full idle eviction and synchronized device-cache cleanup.
@@ -20,7 +31,7 @@ Last reviewed: 2026-09-24
 - Detection no longer copies unmodified source pages. 48px OCR and MangaOCR generate crop microbatches instead of retaining all page crops; scheduler page groups cap at 3 for detection/OCR/bubbles and 2 for upscaling/inpainting, with smaller groups as process RSS approaches the memory threshold.
 
 ## Active feature — software-rendered Studio overlays
-- Jobs and Page Detail render in a shared portal above an inert, scroll-locked app root; the root retains the existing tint and blur appearance without a live backdrop filter. Page Detail isolates its memoized image stage, keeps source images mounted across view changes, coalesces geometry reads to animation frames, and applies sidebar drag width through a CSS variable until release. Jobs rows are memoized and use paint/layout containment with offscreen content skipping. In development, `?renderPerf=1` exposes `window.__renderPerf.reset()` and `.report()` for frame pacing, p95 frame time, click response, long tasks, React commits, Chromium long-frame layout/render timing, and acceptance thresholds.
+- Jobs and Page Detail render in a shared portal above an inert, scroll-locked app root; blur is scoped to the viewport-sized overlay. Jobs rows use 160px WebP thumbnails and expanded lists over 16 pages render visible rows plus overscan with measured heights. Page Detail uses reader-sized WebP variants through 150% zoom, switches to full images above that, and aligns overlays from pipeline source dimensions; it mounts only the selected view (two images for Split). The memoized image stage coalesces geometry reads to animation frames, the details sidebar owns its tab and retry-selection state, and sidebar drag width applies through a CSS variable until release. SSE batch merges preserve unchanged batch and item references. In development, `?renderPerf=1` exposes `window.__renderPerf.reset()` and `.report()` for frame pacing, p95 frame time, click response, long tasks, React commits, Chromium long-frame layout/render timing, and acceptance thresholds.
 
 ## Active feature — searchable manga assignment
 - Translation and upload group dialogs search existing manga titles; Gallery's Move to Manga dialog filters its existing manga list. Studio existing-group options come from library manga, not recent titles or unfinished batches.
@@ -33,6 +44,9 @@ Last reviewed: 2026-09-24
 
 ## Active feature — source typography measurement
 - Shared OCR processing measures each raw textline's relative source size, ink density, relative stroke width, orientation, rotation, and OCR foreground/background colors against the original page before inpainting; measurements persist per line through merged region JSON and pipeline manifest reloads. Preserved numeric-only annotations use the measured source font size as their layout target.
+
+## Active behavior — orientation-aware textline grouping
+- Textline grouping and its MST split share an orientation-aware pair metric based on perpendicular spacing, flow-axis overlap, font size, and angle. Vertical Japanese columns retain right-to-left order; verbose runs include `textline_merge_debug.json` pair diagnostics.
 
 ## Active feature — preset-based pipeline rerun and translation remapping
 - Unified partial and full rerun execution into `server/pipeline_rerun.py` (`PipelineRerunMode`: `full`, `typesetting`, `translation_typesetting`, `reprocess_text`) and `server/batch_scheduler.py` (`_process_pipeline_rerun_item`).
@@ -65,13 +79,15 @@ Last reviewed: 2026-09-24
 - Speech bubble detections are serialized and persisted to `bubble_detections.json` during batch preparation and reloaded during translation/rendering, eliminating duplicate YOLO inference passes.
 - Studio stage serialization (`serialize_regions` and `deserialize_textblocks`) losslessly preserves `source_font_size`, `calibrated_font_size`, `placement_mode`, `source_region_ids`, `source_regions`, and `bubble_safe_shape`.
 - Text rendering is unified into the canonical `render_page()` function in `manga_translator/rendering/__init__.py`, guaranteeing bit-level pixel and geometry parity between Web Studio translations and devscripts fast renders.
+- `render_page()` partitions restoration from drawing: suppressed regions are restored once before rendering and excluded from all renderers; valid review-required fallback translations still draw.
+- FREE_TEXT regions use conservative CV frame-line inference to constrain wrapping and the full paragraph box to the source panel, with fallback to page bounds when no reliable panel edge is found. Bubble solving is unchanged.
 
 ## Active migration — production layout boundary
 
 - `manga_translator/rendering/layout/` owns page-layout data contracts, extracted bubble-mask geometry/lobe detection, page obstacle masks, shared free-text ownership targets, region identities, crop-local candidate rasterization, and non-fatal layout validation.
 - `layout_page()` runs after final mask generation and before inpainting; it runs the shared shape-aware solver used by the pipeline runner, then freezes the result for rendering and diagnostics.
 - Versioned `layout.json` is the authoritative `FrozenLayout`: it stores stable region/bubble IDs, selected styles, safe bubble shape, exact positioned lines, and fingerprints for translations, source geometry, bubble geometry, mask, font, settings, and page size. Rendering hydrates by region ID and rasterizes those lines without reflow; `translations.json` remains the text source. Rare unresolved legacy placements retain their validated RGBA crop.
-- Bubble layout keeps its non-hyphenated solve as the primary path. If one dictionary-breakable word causes the normal font to fall below 90% of its calibrated target, a single near-target rescue may replace it after a meaningful font gain; `no_hyphenation` disables rescue, and comparison diagnostics persist in `layout.json`.
+- Bubble layout uses a robust page dialogue baseline as its preferred target; long words do not cap adaptive font estimates, and preserved annotations do not affect the baseline or receive inserted hyphens. The non-hyphenated solve remains primary; one legal split of an 8+ letter bottleneck word may replace it after a meaningful font gain. `no_hyphenation` disables rescue, and comparison diagnostics persist in `layout.json`.
 - `TextBlock` and grouped bubble regions preserve `region_id`, `source_region_ids`, and per-source geometry snapshots for ID-based edits and multi-region placement.
 - Bubble association persists stable `bubble_id` values so separate OCR regions in one speech bubble remain jointly optimized after checkpoint reload. Merging remains opt-in through `BubbleDetectionConfig.group_regions` or the dev runner's `--bubble-grouping` flag.
 

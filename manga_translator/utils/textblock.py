@@ -141,6 +141,8 @@ class TextBlock(object):
         self.shadow_strength = shadow_strength
         self.shadow_color = shadow_color
         self.shadow_offset = shadow_offset
+        self.review_required: bool = False
+        self.review_reason: Optional[str] = None
 
     @cached_property
     def xyxy(self):

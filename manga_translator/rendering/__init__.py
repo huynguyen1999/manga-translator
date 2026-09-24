@@ -988,14 +988,10 @@ async def render_page(
     
     Renders placed dialogue/free-text directly onto the inpainted canvas
     without reflowing or rewrapping solved lines, and restores original
-    pixels for unplaced or review-flagged regions.
+    pixels for suppressed or untranslated review-required regions.
     """
     if getattr(ctx, "img_inpainted", None) is None:
         raise ValueError("render_page requires ctx.img_inpainted")
-
-    render_canvas = ctx.img_inpainted.copy()
-    if getattr(ctx, "img_rgb", None) is not None:
-        render_canvas = restore_original(render_canvas, ctx.img_rgb, ctx.text_regions or [])
 
     active_font = font_path or getattr(getattr(config, "render", None), "font_path", None) or get_default_eng_font()
 
@@ -1006,17 +1002,30 @@ async def render_page(
         elif transform_text_case and getattr(region, "translation", None) and isinstance(region.translation, str):
             region.translation = transform_text_case(region.translation)
 
-    render_regions = [
-        region for region in (ctx.text_regions or [])
-        if getattr(region, "translation", None)
-        and str(region.translation).strip()
+    regions = list(ctx.text_regions or [])
+    restore_regions = [
+        region for region in regions
+        if getattr(region, "_render_suppressed", False)
+        or (
+            getattr(region, "review_required", False)
+            and not str(getattr(region, "translation", None) or "").strip()
+        )
     ]
-    frozen_regions = [region for region in render_regions if getattr(region, "_layout_frozen", False)]
+    drawable_regions = [
+        region for region in regions
+        if not getattr(region, "_render_suppressed", False)
+        and str(getattr(region, "translation", None) or "").strip()
+    ]
+    frozen_regions = [region for region in drawable_regions if getattr(region, "_layout_frozen", False)]
     frozen_ids = {id(region) for region in frozen_regions}
-    bubble_and_legacy = [region for region in render_regions if id(region) not in frozen_ids]
+    legacy_regions = [region for region in drawable_regions if id(region) not in frozen_ids]
+    restore_ids = {id(region) for region in restore_regions}
+    drawable_ids = {id(region) for region in frozen_regions + legacy_regions}
+    assert restore_ids.isdisjoint(drawable_ids)
 
-    if not render_regions and (ctx.text_regions or []):
-        bubble_and_legacy = list(ctx.text_regions or [])
+    render_canvas = ctx.img_inpainted.copy()
+    if getattr(ctx, "img_rgb", None) is not None and restore_regions:
+        render_canvas = restore_original(render_canvas, ctx.img_rgb, restore_regions)
 
     render_cfg = getattr(config, "render", None)
     renderer_type = getattr(render_cfg, "renderer", Renderer.default)
@@ -1025,21 +1034,21 @@ async def render_page(
         output = render_canvas
     elif (
         renderer_type in (Renderer.manga2Eng, Renderer.manga2EngPillow)
-        and bubble_and_legacy
-        and LANGUAGE_ORIENTATION_PRESETS.get(getattr(bubble_and_legacy[0], "target_lang", "ENG")) == "h"
+        and legacy_regions
+        and LANGUAGE_ORIENTATION_PRESETS.get(getattr(legacy_regions[0], "target_lang", "ENG")) == "h"
     ):
         if renderer_type == Renderer.manga2EngPillow:
             output = await dispatch_eng_render_pillow(
-                render_canvas, ctx.img_rgb, bubble_and_legacy, active_font, render_cfg.line_spacing
+                render_canvas, ctx.img_rgb, legacy_regions, active_font, render_cfg.line_spacing
             )
         else:
             output = await dispatch_eng_render(
-                render_canvas, ctx.img_rgb, bubble_and_legacy, active_font, render_cfg.line_spacing
+                render_canvas, ctx.img_rgb, legacy_regions, active_font, render_cfg.line_spacing
             )
     else:
         output = await dispatch(
             render_canvas,
-            bubble_and_legacy,
+            legacy_regions,
             active_font,
             render_cfg.font_size,
             render_cfg.font_size_offset,
@@ -1053,8 +1062,5 @@ async def render_page(
         with _RENDER_LOCK:
             for region in frozen_regions:
                 output = _render_frozen_region(output, region, active_font)
-
-    if getattr(ctx, "img_rgb", None) is not None:
-        output = restore_original(output, ctx.img_rgb, ctx.text_regions or [])
 
     return output

@@ -31,15 +31,16 @@ html.dark body {
 
 #app-root {
   min-height: 100vh;
-  transition: filter 120ms ease;
 }
 
-body:has(#overlay-root [data-app-overlay="jobs"]) #app-root {
-  filter: blur(2px);
+body:has(#overlay-root [data-app-overlay="jobs"]) #overlay-root [data-app-overlay="jobs"] {
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
 }
 
-body:has(#overlay-root [data-app-overlay="page-detail"]) #app-root {
-  filter: blur(12px);
+body:has(#overlay-root [data-app-overlay="page-detail"]) #overlay-root [data-app-overlay="page-detail"] {
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
 }
 
 .job-card {

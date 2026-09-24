@@ -72,6 +72,66 @@ async def test_merged_confidence_is_independent_of_other_regions():
 
     assert sorted(region.prob for region in regions) == pytest.approx([0.6, 0.8])
 
+
+@pytest.mark.asyncio
+async def test_orientation_aware_pair_merging_and_diagnostics():
+    def box(x, y, w, h, text):
+        return Quadrilateral(
+            np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]]),
+            str(text),
+            1,
+        )
+
+    async def groups(lines):
+        regions = await dispatch_merge(lines, 600, 500)
+        return {frozenset(map(int, region.texts)) for region in regions}
+
+    # Short nested vertical line beside a long column (the reported failure).
+    assert await groups([box(100, 20, 36, 240, 0), box(138, 90, 36, 75, 1)]) == {frozenset({0, 1})}
+
+    # Close columns still stay separate when their flow spans and edges do not align.
+    assert await groups([box(100, 120, 36, 220, 0), box(138, 20, 36, 35, 1)]) == {frozenset({0}), frozenset({1})}
+
+    # Low overlap remains eligible when one flow edge aligns closely.
+    assert await groups([box(100, 20, 36, 200, 0), box(138, 200, 36, 40, 1)]) == {frozenset({0, 1})}
+
+    # A large perpendicular gap rejects otherwise aligned columns.
+    assert await groups([box(100, 30, 36, 180, 0), box(190, 40, 36, 160, 1)]) == {frozenset({0}), frozenset({1})}
+
+    # The same geometry works for horizontal rows.
+    assert await groups([box(20, 100, 220, 36, 0), box(70, 138, 90, 36, 1)]) == {frozenset({0, 1})}
+
+    # Size mismatch and mixed orientation do not create links.
+    assert await groups([box(100, 20, 36, 220, 0), box(138, 100, 10, 50, 1)]) == {frozenset({0}), frozenset({1})}
+    assert await groups([box(100, 20, 36, 180, 0), box(110, 100, 180, 36, 1)]) == {frozenset({0}), frozenset({1})}
+
+    # A four-column paragraph keeps a short final column with its neighbors.
+    four_columns = [
+        box(100, 20, 36, 220, 0),
+        box(138, 20, 36, 220, 1),
+        box(176, 20, 36, 220, 2),
+        box(214, 90, 36, 75, 3),
+    ]
+    assert await groups(four_columns) == {frozenset({0, 1, 2, 3})}
+    rtl_region = (await dispatch_merge(four_columns, 600, 500))[0]
+    assert rtl_region.texts == ["3", "2", "1", "0"]
+
+    # A short OCR bridge touching two paragraphs only by weak aligned edges is split back out.
+    assert await groups([
+        box(100, 40, 36, 220, 0),
+        box(138, 70, 36, 60, 1),
+        box(201, 260, 36, 80, 2),
+        box(260, 50, 36, 210, 3),
+        box(298, 70, 36, 60, 4),
+    ]) == {frozenset({0, 1}), frozenset({2}), frozenset({3, 4})}
+
+    diagnostics = []
+    await dispatch_merge([box(100, 20, 36, 220, 0), box(138, 80, 36, 60, 1)], 600, 500,
+                         pair_diagnostics=diagnostics)
+    assert diagnostics[0]["merge_class"] == "strong"
+    assert diagnostics[0]["accepted"] is True
+    assert "old_distance_px" in diagnostics[0]
+
         # # Search for all associated regions
         # associated_regions = []
         # similar_expected_combination = None

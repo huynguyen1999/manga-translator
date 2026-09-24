@@ -2,6 +2,46 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-24 — Keep free-text translations inside their manga panel
+
+- Infer conservative axis-aligned panel bounds from frame lines and constrain free-text wrapping and placement to those bounds.
+
+## 2026-09-24 — Group neighboring Japanese text columns by shared geometry
+
+- Use orientation-aware overlap and spacing metrics in both textline grouping stages; verbose runs persist pair diagnostics.
+
+## 2026-09-24 — Add devscript for manga panel detection and instance segmentation
+
+- Added `devscripts/detect_panels.py` supporting:
+  - `leoxs22` (`leoxs22/manga-panel-detector-yolo26n`): lightweight YOLO26n bounding box detector for panels and text.
+  - `shadowb` (`ShadowB/Manga109-panel-balloon-text-yolov26-segmentation`): YOLO26s instance segmentation model for panels/frames, speech balloons, and text regions with high-resolution polygon masks.
+- Features automatic Hugging Face model downloads, Ultralytics serialization compatibility shims (`Segment26`, `Proto26`, `E2ELoss`), reading-order sorting (RTL/LTR), visual overlays, panel cropping, and structured JSON export.
+
+
+## 2026-09-24 — Separate source restoration from translated rendering
+
+- Restore suppressed regions once before drawing and keep them out of legacy and frozen renderers.
+
+## 2026-09-24 — Reduce Studio overlay and page-viewer work
+
+- Jobs use batch-sized thumbnails and window large expanded page lists; Page Detail uses reader-sized variants until zoom requires full resolution, and unchanged SSE batches retain their references.
+
+## 2026-09-24 — Improve mobile reader page selection
+
+- Give touch readers a dedicated page jump row with a larger numeric input and tap target.
+
+## 2026-09-24 — Reduce repeated layout search work
+
+- Enable strict ideal free-text placement by default, expand exhaustive search only for colliding fast placements, and use exact prefix-based row-slot, DP word-width, compaction, and whitespace-count calculations.
+
+## 2026-09-24 — Preserve dialogue font consistency in bubble layout
+
+- Use a page-level dialogue font baseline for bubble targets so a single long word cannot silently shrink its whole region; keep one dictionary-backed hyphenation rescue for severe compression.
+
+## 2026-09-24 — Remove legacy API-root frontend
+
+- Removed the embedded translator page at `/`; the API server remains available on port 8000, with OpenAPI docs at `/docs` and the separate Studio on port 6868.
+
 ## 2026-09-24 — Search existing manga when moving pages
 
 - Added a title filter to Gallery's Move to Manga dialog.

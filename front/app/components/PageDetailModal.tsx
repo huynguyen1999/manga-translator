@@ -517,9 +517,12 @@ export const shouldLoadTranslationArtifacts = (sourceType?: FinishedImage["sourc
 export interface ResolvedImageUrls {
   folder: string | null;
   resultUrl: Blob | string | null;
+  resultPreviewUrl: Blob | string | null;
   inpaintedUrl: string | null;
+  inpaintedPreviewUrl: string | null;
   bubbleMaskUrl: string | null;
   originalUrl: Blob | File | string | null;
+  originalPreviewUrl: Blob | File | string | null;
 }
 
 export const resolveImageUrls = (
@@ -530,9 +533,12 @@ export const resolveImageUrls = (
     return {
       folder: null,
       resultUrl: null,
+      resultPreviewUrl: null,
       inpaintedUrl: null,
+      inpaintedPreviewUrl: null,
       bubbleMaskUrl: null,
       originalUrl: null,
+      originalPreviewUrl: null,
     };
   }
 
@@ -541,16 +547,28 @@ export const resolveImageUrls = (
     ?? (typeof image.result === "string" ? resultFolderFromUrl(image.result) : null)
     ?? (image.fullUrl ? resultFolderFromUrl(image.fullUrl) : null);
 
-  const resultUrl =
+  const resultUrl = image.fullUrl
+    ? apiUrlFn(image.fullUrl)
+    :
     image.result instanceof Blob && image.result.size < 1000 && folder
       ? apiUrlFn(`/result/${folder}/final.jpg`)
       : image.result || (folder ? apiUrlFn(`/result/${folder}/final.jpg`) : null);
+  const resultPreviewUrl = image.readerUrl
+    ? apiUrlFn(image.readerUrl)
+    : image.detailPreviewUrl
+    ? apiUrlFn(image.detailPreviewUrl)
+    : folder
+    ? apiUrlFn(`/result/${folder}/reader.webp`)
+    : resultUrl;
 
   const inpaintedUrl = image.inpaintedUrl
     ? apiUrlFn(image.inpaintedUrl)
     : folder
     ? apiUrlFn(`/result/${folder}/inpainted.jpg`)
     : null;
+  const inpaintedPreviewUrl = folder
+    ? apiUrlFn(`/result/${folder}/inpainted-reader.webp`)
+    : inpaintedUrl;
   const bubbleMaskUrl = image.bubbleMaskUrl ? apiUrlFn(image.bubbleMaskUrl) : null;
 
   let originalUrl: Blob | File | string | null = null;
@@ -561,13 +579,19 @@ export const resolveImageUrls = (
   } else if (folder) {
     originalUrl = apiUrlFn(`/result/${folder}/input.png`);
   }
+  const originalPreviewUrl = folder && !(image.inputUrl instanceof Blob)
+    ? apiUrlFn(`/result/${folder}/input-reader.webp`)
+    : originalUrl;
 
   return {
     folder,
     resultUrl,
+    resultPreviewUrl,
     inpaintedUrl,
+    inpaintedPreviewUrl,
     bubbleMaskUrl,
     originalUrl,
+    originalPreviewUrl,
   };
 };
 
@@ -576,6 +600,11 @@ interface PageImageStageProps {
   zoomLevel: number;
   isOriginal: boolean;
   originalUrl: Blob | File | string | null;
+  originalFullUrl: Blob | File | string | null;
+  resultFullUrl: Blob | string | null;
+  inpaintedFullUrl: string | null;
+  coordinateSize?: { width: number; height: number } | null;
+  useFullResolution: boolean;
   resultUrl: Blob | string | null;
   inpaintedUrl: string | null;
   folder: string | null;
@@ -596,8 +625,13 @@ const PageImageStage = React.memo<PageImageStageProps>(({
   zoomLevel,
   isOriginal,
   originalUrl,
+  originalFullUrl,
   resultUrl,
+  resultFullUrl,
   inpaintedUrl,
+  inpaintedFullUrl,
+  coordinateSize,
+  useFullResolution,
   folder,
   textRegionsUrl,
   viewMode,
@@ -620,6 +654,11 @@ const PageImageStage = React.memo<PageImageStageProps>(({
       file={originalUrl}
       result={isOriginal ? null : resultUrl}
       inpainted={isOriginal ? null : inpaintedUrl}
+      fullOriginal={typeof originalFullUrl === "string" ? originalFullUrl : null}
+      fullResult={typeof resultFullUrl === "string" ? resultFullUrl : null}
+      fullInpainted={inpaintedFullUrl}
+      coordinateSize={coordinateSize}
+      useFullResolution={useFullResolution}
       folder={folder}
       textRegionsUrl={textRegionsUrl}
       viewMode={isOriginal ? "original" : viewMode === "speech-bubbles" ? "original" : viewMode}
@@ -638,6 +677,45 @@ const PageImageStage = React.memo<PageImageStageProps>(({
   </div>
   </RenderProfiler>
 ));
+
+type SidebarTab = "timing" | "localization" | "story" | "settings";
+interface PipelineDetailsSidebarState {
+  tab: SidebarTab;
+  setTab: React.Dispatch<React.SetStateAction<SidebarTab>>;
+  selectedRetryStage: string | null;
+  setSelectedRetryStage: React.Dispatch<React.SetStateAction<string | null>>;
+  isRetryingFromStage: boolean;
+  setIsRetryingFromStage: React.Dispatch<React.SetStateAction<boolean>>;
+  retryFromStageError: string | null;
+  setRetryFromStageError: React.Dispatch<React.SetStateAction<string | null>>;
+}
+
+const PipelineDetailsSidebar: React.FC<{
+  imageId: string;
+  render: (state: PipelineDetailsSidebarState) => React.ReactNode;
+}> = React.memo(({ imageId, render }) => {
+  const [tab, setTab] = useState<SidebarTab>("timing");
+  const [selectedRetryStage, setSelectedRetryStage] = useState<string | null>(null);
+  const [isRetryingFromStage, setIsRetryingFromStage] = useState(false);
+  const [retryFromStageError, setRetryFromStageError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSelectedRetryStage(null);
+    setIsRetryingFromStage(false);
+    setRetryFromStageError(null);
+  }, [imageId]);
+
+  return render({
+    tab,
+    setTab,
+    selectedRetryStage,
+    setSelectedRetryStage,
+    isRetryingFromStage,
+    setIsRetryingFromStage,
+    retryFromStageError,
+    setRetryFromStageError,
+  });
+});
 
 export interface PageDetailModalProps {
   image: FinishedImage;
@@ -675,14 +753,14 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   const [showBubbleBoxes, setShowBubbleBoxes] = useState(false);
   const [showOriginalRegions, setShowOriginalRegions] = useState(false);
   const [isHoldingOriginal, setIsHoldingOriginal] = useState(false);
+  const [isCompactViewport, setIsCompactViewport] = useState(() =>
+    typeof window !== "undefined" && window.matchMedia("(max-width: 640px)").matches,
+  );
   const [bubbleCount, setBubbleCount] = useState<number | null>(null);
   const [originalRegionCount, setOriginalRegionCount] = useState<number | null>(null);
 
   const [isRetrying, setIsRetrying] = useState(false);
   const [retryStatus, setRetryStatus] = useState<"queued" | "error" | null>(null);
-  const [selectedRetryStage, setSelectedRetryStage] = useState<string | null>(null);
-  const [isRetryingFromStage, setIsRetryingFromStage] = useState(false);
-  const [retryFromStageError, setRetryFromStageError] = useState<string | null>(null);
   const [isRerendering, setIsRerendering] = useState(false);
   const [rerenderStatus, setRerenderStatus] = useState<"queued" | "error" | null>(null);
   const [pipelineManifest, setPipelineManifest] = useState<PipelineRunManifest | null>(null);
@@ -693,8 +771,6 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   const [discoveredBubbleMaskUrl, setDiscoveredBubbleMaskUrl] = useState<string | null>(null);
 
   // Sidebar tab and resize state
-  type SidebarTab = "timing" | "localization" | "story" | "settings";
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("timing");
   const [sidebarWidth, setSidebarWidth] = useState(480); // 1.5x of original 320px
   const sidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const sidebarWidthRef = useRef(sidebarWidth);
@@ -720,6 +796,14 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
 
   useEffect(() => () => sidebarResizeCleanupRef.current?.(), []);
 
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 640px)");
+    const update = () => setIsCompactViewport(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
   // Reset stage-specific details when the active image changes
   useEffect(() => {
     setZoomLevel(1);
@@ -731,9 +815,6 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
     setOriginalRegionCount(null);
     setIsRetrying(false);
     setRetryStatus(null);
-    setSelectedRetryStage(null);
-    setIsRetryingFromStage(false);
-    setRetryFromStageError(null);
     setIsRerendering(false);
     setRerenderStatus(null);
   }, [image.id, image.folder, image.sourceType]);
@@ -743,9 +824,12 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   const {
     folder: resolvedFolder,
     resultUrl: resolvedResultUrl,
+    resultPreviewUrl: resolvedResultPreviewUrl,
     inpaintedUrl: resolvedInpaintedUrl,
+    inpaintedPreviewUrl: resolvedInpaintedPreviewUrl,
     bubbleMaskUrl,
     originalUrl: resolvedOriginalUrl,
+    originalPreviewUrl: resolvedOriginalPreviewUrl,
   } = resolvedImageUrls;
   const resolvedBubbleMaskUrl = bubbleMaskUrl ?? discoveredBubbleMaskUrl;
 
@@ -770,7 +854,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
     let cancelled = false;
     setPipelineManifest(null);
     setIsPipelineTimingLoading(false);
-    if (!resolvedFolder || !shouldLoadTranslationArtifacts(image.sourceType)) return;
+    if (!resolvedFolder) return;
 
     setIsPipelineTimingLoading(true);
     fetch(apiUrl(`/pipeline-runs/${encodeURIComponent(resolvedFolder)}/manifest`), {
@@ -794,7 +878,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [image.sourceType, resolvedFolder]);
+  }, [resolvedFolder]);
 
   useEffect(() => {
     let cancelled = false;
@@ -909,22 +993,17 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
     }
   }, [image, isRetrying, onRetry, retryStatus]);
 
-  const handleRetryFromStage = useCallback(async () => {
-    if (!selectedRetryStage || !onRetryFromStage || isRetryingFromStage) return;
-    setIsRetryingFromStage(true);
-    setRetryFromStageError(null);
+  const queueRetryFromStage = useCallback(async (stageId: string) => {
+    if (!onRetryFromStage) return;
     setRetryStatus(null);
     try {
-      await onRetryFromStage(image, selectedRetryStage);
+      await onRetryFromStage(image, stageId);
       setRetryStatus("queued");
-      setSelectedRetryStage(null);
     } catch (error) {
       setRetryStatus("error");
-      setRetryFromStageError(error instanceof Error ? error.message : "Could not queue this stage retry.");
-    } finally {
-      setIsRetryingFromStage(false);
+      throw error;
     }
-  }, [image, isRetryingFromStage, onRetryFromStage, selectedRetryStage]);
+  }, [image, onRetryFromStage]);
 
   const handleRerender = useCallback(async () => {
     if (!onRerender || isRerendering || rerenderStatus === "queued") return;
@@ -1009,10 +1088,6 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   const engine = stepSettings.translation.engine;
   const model = stepSettings.translation.model;
   const timing = resolveTranslationTiming(pipelineManifest, image.finishedAt, image.startedAt, image.durationMs);
-  const selectedRetryStageData = pipelineManifest?.stages.find((stage) => stage.id === selectedRetryStage);
-  const stagesToRetry = selectedRetryStage
-    ? resolveStagesToRetry(pipelineManifest?.stages, selectedRetryStage)
-    : [];
   const originalTextAvailable = Boolean(
     image.hasTextRegions || image.textRegionsUrl || (bubbleCount !== null && bubbleCount > 0),
   );
@@ -1401,9 +1476,18 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                 imageId={image.id}
                 zoomLevel={zoomLevel}
                 isOriginal={isOriginal}
-                originalUrl={resolvedOriginalUrl}
-                resultUrl={resolvedResultUrl}
-                inpaintedUrl={resolvedInpaintedUrl}
+                originalUrl={resolvedOriginalPreviewUrl}
+                originalFullUrl={resolvedOriginalUrl}
+                resultUrl={isCompactViewport && image.detailPreviewUrl
+                  ? apiUrl(image.detailPreviewUrl)
+                  : resolvedResultPreviewUrl}
+                resultFullUrl={resolvedResultUrl}
+                inpaintedUrl={resolvedInpaintedPreviewUrl}
+                inpaintedFullUrl={resolvedInpaintedUrl}
+                coordinateSize={pipelineManifest?.source?.width && pipelineManifest.source.height
+                  ? { width: pipelineManifest.source.width, height: pipelineManifest.source.height }
+                  : null}
+                useFullResolution={zoomLevel > 1.5}
                 folder={resolvedFolder}
                 textRegionsUrl={image.textRegionsUrl}
                 viewMode={viewMode}
@@ -1435,6 +1519,13 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                     className="flex h-full flex-col rounded-xl border border-white/10 bg-white/5 text-white overflow-hidden"
                     onClick={(event) => event.stopPropagation()}
                   >
+                    <PipelineDetailsSidebar imageId={image.id} render={(sidebar) => {
+                      const selectedRetryStageData = pipelineManifest?.stages.find((stage) => stage.id === sidebar.selectedRetryStage);
+                      const stagesToRetry = sidebar.selectedRetryStage
+                        ? resolveStagesToRetry(pipelineManifest?.stages, sidebar.selectedRetryStage)
+                        : [];
+                      return (
+                      <>
                     {/* Tab bar */}
                     <div className="flex shrink-0 border-b border-white/10 bg-black/20">
                       {(
@@ -1448,9 +1539,9 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                         <button
                           key={tab.id}
                           type="button"
-                          onClick={() => setSidebarTab(tab.id)}
+                          onClick={() => sidebar.setTab(tab.id)}
                           className={`flex flex-1 flex-col items-center gap-1 px-1 py-2 text-[10px] font-medium transition-colors cursor-pointer ${
-                            sidebarTab === tab.id
+                            sidebar.tab === tab.id
                               ? "border-b-2 border-indigo-400 text-indigo-300"
                               : "border-b-2 border-transparent text-zinc-400 hover:text-zinc-200"
                           }`}
@@ -1466,7 +1557,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                     <div className="flex-1 overflow-y-auto p-4">
 
                       {/* ── Pipeline Timing tab ── */}
-                      {sidebarTab === "timing" && (
+                      {sidebar.tab === "timing" && (
                         <div className="space-y-4">
                           {/* Start / End / Duration */}
                           <section className="rounded-lg border border-indigo-400/20 bg-indigo-500/10 p-3" aria-label="Translation timing">
@@ -1534,7 +1625,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                                       <div
                                         key={stage.id}
                                         className={`flex items-center justify-between gap-3 rounded-lg px-3 py-2 ${
-                                          selectedRetryStage === stage.id ? "bg-indigo-500/15 ring-1 ring-indigo-400/40" : "bg-black/20"
+                                          sidebar.selectedRetryStage === stage.id ? "bg-indigo-500/15 ring-1 ring-indigo-400/40" : "bg-black/20"
                                         }`}
                                       >
                                         <div className="min-w-0">
@@ -1553,11 +1644,11 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                                             <button
                                               type="button"
                                               onClick={() => {
-                                                setSelectedRetryStage(stage.id);
-                                                setRetryFromStageError(null);
+                                                sidebar.setSelectedRetryStage(stage.id);
+                                                sidebar.setRetryFromStageError(null);
                                               }}
-                                              disabled={!canRetry || isRetryingFromStage}
-                                              aria-pressed={selectedRetryStage === stage.id}
+                                              disabled={!canRetry || sidebar.isRetryingFromStage}
+                                              aria-pressed={sidebar.selectedRetryStage === stage.id}
                                               aria-label={`Retry from ${stage.label || stage.id}`}
                                               title="Choose this stage and its downstream stages to run again"
                                               className="inline-flex min-h-7 items-center gap-1 rounded-md border border-indigo-400/30 px-2 text-xs font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20 focus-visible:outline-2 focus-visible:outline-indigo-300 disabled:cursor-not-allowed disabled:opacity-50"
@@ -1571,7 +1662,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                                     );
                                   })}
                                 </div>
-                                {selectedRetryStage && selectedRetryStageData && onRetryFromStage && (
+                                {sidebar.selectedRetryStage && selectedRetryStageData && onRetryFromStage && (
                                   <section className="mt-3 rounded-lg border border-indigo-400/30 bg-indigo-500/10 p-3" aria-label="Stage retry plan">
                                     <h4 className="text-xs font-semibold text-indigo-100">
                                       Retry from {selectedRetryStageData.label || selectedRetryStageData.id}?
@@ -1582,25 +1673,33 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                                     <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
                                       <button
                                         type="button"
-                                        onClick={() => setSelectedRetryStage(null)}
-                                        disabled={isRetryingFromStage}
+                                        onClick={() => sidebar.setSelectedRetryStage(null)}
+                                        disabled={sidebar.isRetryingFromStage}
                                         className="min-h-8 rounded-md px-2.5 text-xs font-medium text-zinc-300 hover:bg-white/10 focus-visible:outline-2 focus-visible:outline-zinc-300 disabled:opacity-50"
                                       >
                                         Cancel
                                       </button>
                                       <button
                                         type="button"
-                                        onClick={() => void handleRetryFromStage()}
-                                        disabled={!stagesToRetry.length || isRetryingFromStage}
-                                        aria-busy={isRetryingFromStage}
+                                        onClick={() => {
+                                          sidebar.setIsRetryingFromStage(true);
+                                          sidebar.setRetryFromStageError(null);
+                                          void queueRetryFromStage(sidebar.selectedRetryStage!).then(() => {
+                                            sidebar.setSelectedRetryStage(null);
+                                          }).catch((error) => {
+                                            sidebar.setRetryFromStageError(error instanceof Error ? error.message : "Could not queue this stage retry.");
+                                          }).finally(() => sidebar.setIsRetryingFromStage(false));
+                                        }}
+                                        disabled={!stagesToRetry.length || sidebar.isRetryingFromStage}
+                                        aria-busy={sidebar.isRetryingFromStage}
                                         className="inline-flex min-h-8 items-center gap-1.5 rounded-md bg-indigo-600 px-3 text-xs font-semibold text-white transition-colors hover:bg-indigo-500 focus-visible:outline-2 focus-visible:outline-indigo-300 disabled:cursor-wait disabled:opacity-60"
                                       >
-                                        <Icon icon="carbon:renew" className={`h-3.5 w-3.5 ${isRetryingFromStage ? "animate-spin" : ""}`} />
-                                        {isRetryingFromStage ? "Queueing…" : "Queue retry"}
+                                        <Icon icon="carbon:renew" className={`h-3.5 w-3.5 ${sidebar.isRetryingFromStage ? "animate-spin" : ""}`} />
+                                        {sidebar.isRetryingFromStage ? "Queueing…" : "Queue retry"}
                                       </button>
                                     </div>
-                                    {retryFromStageError && (
-                                      <p className="mt-2 text-xs text-rose-300" role="alert">{retryFromStageError}</p>
+                                    {sidebar.retryFromStageError && (
+                                      <p className="mt-2 text-xs text-rose-300" role="alert">{sidebar.retryFromStageError}</p>
                                     )}
                                   </section>
                                 )}
@@ -1615,7 +1714,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                       )}
 
                       {/* ── Professional Localization tab ── */}
-                      {sidebarTab === "localization" && (
+                      {sidebar.tab === "localization" && (
                         <div>
                           {professionalAudit?.regions?.length ? (
                             <section className="rounded-lg border border-amber-400/25 bg-amber-500/10 p-3" aria-label="Professional localization audit">
@@ -1668,7 +1767,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                       )}
 
                       {/* ── Story Analysis tab ── */}
-                      {sidebarTab === "story" && (
+                      {sidebar.tab === "story" && (
                         <div>
                           {professionalAudit?.analysis?.stories?.length ? (
                             <section className="rounded-lg border border-indigo-400/25 bg-indigo-500/10 p-3" aria-label="Professional story analysis">
@@ -1740,7 +1839,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                       )}
 
                       {/* ── Step Settings tab ── */}
-                      {sidebarTab === "settings" && (
+                      {sidebar.tab === "settings" && (
                         <div className="space-y-3">
                           {/* Translation Details Card */}
                           <section className="rounded-lg border border-indigo-400/20 bg-indigo-500/10 p-3" aria-label="Translation details">
@@ -1949,6 +2048,9 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                       )}
 
                     </div>
+                      </>
+                      );
+                    }} />
                   </aside>
                 </div>
               )}

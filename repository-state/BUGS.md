@@ -2,6 +2,55 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-24 — Short vertical Japanese lines were split from neighboring columns
+
+- Symptom: A short vertical OCR line beside a longer Japanese column became a separate translation region.
+- Root cause: Initial grouping relied on top/bottom edge alignment, then the MST split stage ranked endpoint distance, so large flow-axis offsets outweighed close column spacing and overlap.
+- Fix: Use one orientation-aware pair geometry for textline grouping and MST costs; strong, highly overlapping neighbors cannot be split, while weak aligned edges remain fallback candidates. Verbose runs save pair metrics in `textline_merge_debug.json`.
+- Prevention: Keep horizontal and vertical fixtures for nested short lines, flow gaps, typography mismatch, mixed directions, reading order, and noisy bridges.
+
+## 2026-09-24 — Suppressed render regions could mix source and translated text
+
+- Symptom: A free-text region marked for render suppression could show both its original text and a translated overlay.
+- Root cause: `render_page()` restored source pixels for all regions before and after drawing, while suppressed regions could still reach the legacy renderer.
+- Fix: Partition restore and drawable regions once, restore suppressed (and untranslated review-required) regions before drawing, and exclude suppressed regions from every renderer.
+- Prevention: Keep regression coverage for suppressed free text/bubbles, valid review-required fallback rendering, frozen rendering, and runner/Studio pixel parity.
+
+## 2026-09-24 — Free-text translation could cross manga panel frames
+
+- Symptom: Translated free text could spill through a panel divider into an adjacent panel.
+- Root cause: Free-text hard validation used a page-wide `panel_mask` and had no source-panel constraint, so text could pass validation in any unoccupied page area.
+- Fix: Infer conservative frame-line envelopes from the source page, use panel dimensions when wrapping, clamp source-centered placements, and validate the complete paragraph box against its assigned panel.
+- Prevention: Keep synthetic vertical/horizontal divider tests, whitespace-box containment checks, and a solver-level near-divider regression; bubble layout stays on its existing path.
+
+## 2026-09-24 — Studio overlays decoded and filtered oversized content
+
+- Symptom: Jobs thumbnails and Page Detail interactions stalled in software-rendering mode.
+- Root cause: Job rows loaded full result images, Page Detail mounted hidden full-resolution sources, the app-root blur covered the full document, and SSE snapshots replaced unchanged batch objects.
+- Fix: Use 160px job previews and 1600px detail variants, mount only the active viewer source, scope blur to the viewport overlay, and preserve unchanged batch and item references.
+- Prevention: Keep thumbnail and viewer image tiers separate, do not assign `src` to hidden viewer states, scope overlay effects to the viewport, and compare incoming SSE data before replacing memoized objects.
+
+## 2026-09-24 — Bulk page deletion missed the configured API route
+
+- Symptom: Bulk-deleted pages disappeared from the gallery but returned after reload when the frontend used a direct API base URL.
+- Root cause: `apiUrl()` removes `/api` for direct-base requests, but the batch-delete endpoint only accepted `/api/results/batch-delete`; the frontend also treated failed responses as success.
+- Fix: Register both route forms and keep selected pages visible when the request fails.
+- Prevention: Give new API endpoints both prefixed and unprefixed routes when they are called through `apiUrl()`, and do not hide persisted records after a failed delete.
+
+## 2026-09-24 — Free-text fast path stayed disabled in production
+
+- Symptom: Free-text regions always ran exhaustive placement search unless an environment variable was set, and pages with multiple regions never took the fast path.
+- Root cause: Early acceptance was opt-in and additionally restricted to a single free-text region.
+- Fix: Enable strict-gated ideal placements by default, then use exact joint collision checks to exhaustively expand colliding fast placements; retain `LAYOUT_FAST_FREE_TEXT=0` to disable the ideal stage during debugging.
+- Prevention: Treat local candidate generation and early acceptance as independent controls, and validate page-level collision behavior after per-region solving.
+
+## 2026-09-24 — Long bubble words suppressed font rescue
+
+- Symptom: A narrow dialogue bubble rendered much smaller than the rest of the page when it contained one long word.
+- Root cause: The shared adaptive font estimate capped the target by the longest word, then production layout compared the compressed result against that already-reduced target.
+- Fix: Remove the word cap and compare bubble candidates against a robust page dialogue baseline; retain one dictionary-backed rescue for an 8+ letter bottleneck.
+- Prevention: Keep word-fit pressure in wrapping/rescue decisions, not in the preferred page font estimate.
+
 ## 2026-09-24 — Concurrent page deletion deadlocked during order compaction
 
 - Symptom: Deleting pages concurrently could fail with PostgreSQL `DeadlockDetectedError` in `_compact_page_order()`.

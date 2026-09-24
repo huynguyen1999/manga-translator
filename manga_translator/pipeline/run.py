@@ -60,7 +60,7 @@ STAGE_ARTIFACTS = {
     "upscaling": ("upscaled.png",),
     "detection": ("mask_raw.png", "detection.json", "bubble_mask.png"),
     "ocr": ("ocr.json",),
-    "textline_merge": ("text_regions_merged.json",),
+    "textline_merge": ("text_regions_merged.json", "textline_merge_debug.json"),
     "bubble_detection": ("bubble_mask.png", "bubble_detections.json"),
     "translation": ("translations.json", "translation_detail.json"),
     "layout": ("layout.json",),

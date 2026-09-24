@@ -5,8 +5,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from manga_translator.geometry.panels import infer_panel_constraints
+
 from .geometry import _mask_moments
-from .models import FreeTextDamageTarget, FreeTextZone, PageObstacleMap, PlacementMode
+from .models import FreeTextDamageTarget, FreeTextZone, PageObstacleMap, PanelConstraint, PlacementMode
 from .obstacles import _region_source_mask
 
 
@@ -62,6 +64,8 @@ def build_free_text_ownership_zones(
     regions: List[Any],
     obstacles: PageObstacleMap,
     inpaint_mask: Optional[np.ndarray] = None,
+    image: Optional[np.ndarray] = None,
+    other_regions: Optional[List[Any]] = None,
 ) -> Dict[int, FreeTextZone]:
     """Assign all free-text seeds simultaneously to disjoint FreeTextZones."""
     free_regions = [
@@ -73,6 +77,11 @@ def build_free_text_ownership_zones(
 
     shape = obstacles.panel_mask.shape[:2]
     h, w = shape
+    panel_constraints = (
+        infer_panel_constraints(image, free_regions, other_regions=other_regions or regions)
+        if image is not None
+        else {id(region): PanelConstraint("page", (0, 0, w, h)) for region in free_regions}
+    )
     forbidden_global = (
         (obstacles.protected_bubble_mask > 0)
         | (obstacles.panel_mask == 0)
@@ -168,14 +177,14 @@ def build_free_text_ownership_zones(
             total_coverable_weight=total_w,
             total_core_coverable=core_total,
             damage_target=damage_target,
+            panel_constraint=panel_constraints.get(rid),
         )
         zones[rid] = ft_zone
+        region._panel_constraint = ft_zone.panel_constraint
         region._free_text_source_mask = seeds[index].astype(np.uint8)
         region._free_text_inpaint_mask = damage_mask.astype(np.uint8)
         region._free_text_ownership_mask = ownership.astype(np.uint8)
         region._free_text_zone = ft_zone
 
     return zones
-
-
 

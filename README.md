@@ -37,8 +37,6 @@ This project is v2 of [Qiú wén zhuǎn yì zhì](https://github.com/PatchyVideo
 *   [Usage](#usage)
     *   [Local (Batch) Mode](#local-batch-mode)
     *   [Web Mode](#web-mode)
-        *   [Old UI](#old-ui)
-        *   [New UI](#new-ui)
     *   [API Mode](#api-mode)
         *   [API Documentation](#api-documentation)
     *   [Config-help Mode](#config-help-mode)
@@ -258,7 +256,7 @@ Or use the compose file
 docker-compose -f demo/doc/docker-compose-web-with-cpu.yml up
 ```
 
-The Web Server starts on port [8000](http://localhost:8000) by default, and the translation results will be saved in the `/result` folder.
+The API server starts on port 8000 by default; its OpenAPI documentation is at [http://localhost:8000/docs](http://localhost:8000/docs). Translation results are saved in the `/result` folder.
 
 ##### Using Nvidia GPU
 
@@ -339,14 +337,8 @@ $ python -m manga_translator local -i './manga/*.cbz'
 $ python -m manga_translator local -i volume1.cbz volume2.zip
 ```
 ### Web Mode
-#### Old UI
-```bash
-# Start a web server.
-$ cd server
-$ python main.py --use-gpu
-# The web demo service address is http://127.0.0.1:8000
-```
-#### New UI
+The browser studio runs separately from the API server on port 6868.
+
 [Documentation](../main/front/README.md)
 
 To process up to four images at once in one process, run from the repository root:
@@ -369,7 +361,7 @@ service, model downloads, resumable indexing, and score definitions.
 # Start a web server.
 $ cd server
 $ python main.py --use-gpu
-# The API service address is http://127.0.0.1:8001
+# The API service address is http://127.0.0.1:8000
 ```
 #### API Documentation
 

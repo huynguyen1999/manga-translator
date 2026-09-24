@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from time import perf_counter
 from typing import Any, Dict, Optional
-from .. import get_default_eng_font
 from .models import PageLayoutResult, PlacedLine, RegionLayout
 from .obstacles import classify_placement_modes
 from .regions import prepare_regions
@@ -39,6 +37,8 @@ def _region_layout(region: Any, font_path: Optional[str]) -> RegionLayout:
 
 def layout_page(ctx: Any, config: Any, font_path: Optional[str] = None, options: Any = None) -> PageLayoutResult:
     """Run the production shape-aware solver and freeze its result for rendering."""
+    from time import perf_counter
+    from .. import get_default_eng_font
     from .solver import apply_shape_aware_bubble_layout, reset_solver_profile
 
     profile = reset_solver_profile()

@@ -76,9 +76,15 @@ def build_page_obstacle_map(
 
 
 def build_free_text_ownership_zones(
-    regions: List[Any], obstacles: PageObstacleMap, inpaint_mask: np.ndarray | None = None
+    regions: List[Any],
+    obstacles: PageObstacleMap,
+    inpaint_mask: np.ndarray | None = None,
+    image: np.ndarray | None = None,
+    other_regions: List[Any] | None = None,
 ) -> Dict[int, FreeTextZone]:
     """Create source-anchored free-text zones using the shared ownership solver."""
     from .ownership import build_free_text_ownership_zones as build_zones
 
-    return build_zones(regions, obstacles, inpaint_mask=inpaint_mask)
+    return build_zones(
+        regions, obstacles, inpaint_mask=inpaint_mask, image=image, other_regions=other_regions
+    )

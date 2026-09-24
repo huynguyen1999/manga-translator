@@ -158,7 +158,73 @@ def test_hyphenation_variant_uses_dictionary_breaks_and_preserves_source_compoun
     assert variant[1].endswith("-")
     assert variant[2].endswith(",")
     assert variant[1][:-1] + variant[2][:-1] == "UNCHARACTERISTICALLY"
+    assert layout_solver._hyphenation_variant(["ANOTHER"], 0, "en_US", 32) is None
     assert layout_solver._hyphenation_variant(["SELF-DEFENSE"], 0, "en_US", 32) is None
+
+
+def test_long_word_does_not_lower_adaptive_font_target():
+    narrow_bubble = np.ones((120, 64), dtype=np.uint8)
+
+    assert layout_solver._estimate_adaptive_font_size(
+        narrow_bubble, "A INTERVIEWER", 8
+    ) >= 20
+
+
+def test_page_font_baseline_sets_solver_target_and_diagnostics(monkeypatch):
+    calls = []
+    candidate = LayoutCandidate(25, 0, 0, [PlacedLine("SHORT", 0, 0, 50, 25)], 0, 0)
+
+    def solve(**kwargs):
+        calls.append(kwargs)
+        return candidate
+
+    monkeypatch.setattr(layout_solver, "solve_layout", solve)
+    monkeypatch.setattr(layout_solver, "_estimate_adaptive_font_size", lambda *_: 16)
+    monkeypatch.setattr(layout_solver, "build_original_layout_profile", lambda *_: None)
+    monkeypatch.setattr(layout_solver, "fg_bg_compare", lambda fg, bg: (fg, bg))
+
+    region = SimpleNamespace(
+        translation="SHORT", source_font_size=32, target_lang="en_US",
+        placement_mode=PlacementMode.BUBBLE, direction="hr",
+        get_font_colors=lambda: ((0, 0, 0), (255, 255, 255)),
+        get_translation_for_rendering=lambda: "SHORT",
+    )
+    config = SimpleNamespace(render=SimpleNamespace(
+        font_size_minimum=12, font_size=None, font_size_offset=0,
+        line_spacing=0, no_hyphenation=False,
+    ))
+
+    plan = _build_region_layout_plan(
+        region, np.ones((100, 180), dtype=np.uint8), config, (100, 180),
+        2.0, 4, None, 1, page_font_baseline=28,
+    )
+
+    assert calls[0]["font_size_max"] == 28
+    assert region.calibrated_font_size == 28
+    assert plan.candidates[0].qa["page_font_baseline"] == 28
+    assert plan.candidates[0].qa["region_geometric_target"] == 16
+    assert plan.candidates[0].qa["consistency_floor"] == 25
+
+
+def test_page_font_baseline_uses_dialogue_bubbles_and_ignores_preserved_text(monkeypatch):
+    monkeypatch.setattr(
+        layout_solver, "_estimate_adaptive_font_size",
+        lambda _mask, text, _minimum: {"ordinary": 20, "second": 30}.get(text, 100),
+    )
+    mask = np.ones((40, 60), dtype=np.uint8)
+
+    def region(text, policy=None):
+        return SimpleNamespace(
+            translation=text, translation_policy=policy,
+            get_translation_for_rendering=lambda: text,
+        )
+
+    groups = [
+        SimpleNamespace(interior=mask, regions=[region("ordinary"), region("preserved", "preserve")]),
+        SimpleNamespace(interior=mask, regions=[region("second")]),
+    ]
+
+    assert layout_solver._page_dialogue_font_baseline(groups, 8) == 27
 
 
 def test_bubble_rescue_is_gated_and_splits_only_one_bottleneck(monkeypatch):
@@ -296,3 +362,248 @@ def test_long_word_rescue_restores_font_without_reflowing_selected_lines():
     assert [line["text"] for line in region.layout_segments[0]["lines"]] == [
         line.text for line in candidate.lines
     ]
+
+
+def test_long_word_interviewer_rescue_and_font_consistency():
+    text_render.set_font(get_default_eng_font())
+    text = "OH, A JOB INTERVIEWER?"
+    # Bubble 110x120 is narrow; INTERVIEWER cannot fit on one line at 27px
+    mask = np.ones((140, 130), dtype=np.uint8)
+    region = TextBlock(
+        [[[10, 10], [120, 10], [120, 130], [10, 130]]],
+        texts=[text], translation=text, target_lang="en_US",
+    )
+    region.placement_mode = PlacementMode.BUBBLE
+    region._bubble_interior = mask
+    config = SimpleNamespace(render=RenderConfig(
+        font_size=None, font_size_minimum=8, no_hyphenation=False, line_spacing=0,
+    ))
+
+    plan = _build_region_layout_plan(region, mask, config, mask.shape, 2.0, 8, None, 1, page_font_baseline=27)
+    candidate = plan.candidates[0]
+
+    assert candidate.qa["page_baseline"] == 27
+    assert candidate.qa["hyphenation_rescue_selected"] is True
+    assert candidate.qa["introduced_hyphen_count"] == 1
+    assert candidate.font_size >= 24  # Rescued close to baseline
+    assert any("INTER-" in line.text for line in candidate.lines)
+
+
+def test_healthy_natural_wrapping_beats_hyphenation():
+    text_render.set_font(get_default_eng_font())
+    text = "HELLO HOW ARE YOU TODAY MY FRIEND"
+    mask = np.ones((160, 200), dtype=np.uint8)
+    region = TextBlock(
+        [[[10, 10], [190, 10], [190, 150], [10, 150]]],
+        texts=[text], translation=text, target_lang="en_US",
+    )
+    region.placement_mode = PlacementMode.BUBBLE
+    region._bubble_interior = mask
+    config = SimpleNamespace(render=RenderConfig(
+        font_size=None, font_size_minimum=8, no_hyphenation=False, line_spacing=0,
+    ))
+
+    plan = _build_region_layout_plan(region, mask, config, mask.shape, 2.0, 8, None, 1, page_font_baseline=28)
+    candidate = plan.candidates[0]
+
+    assert candidate.qa["hyphenation_rescue_selected"] is False
+    assert candidate.qa["introduced_hyphen_count"] == 0
+    assert not any(line.text.endswith("-") for line in candidate.lines)
+
+
+def test_tiny_gain_does_not_justify_hyphenation(monkeypatch):
+    calls = []
+    normal_candidate = LayoutCandidate(24, 0, 0, [PlacedLine("TESTING", 0, 0, 80, 24)], 0, 0)
+    rescue_candidate = LayoutCandidate(25, 0, 0, [PlacedLine("TEST-", 0, 0, 40, 25), PlacedLine("ING", 0, 0, 30, 25)], 0, 0)
+
+    def solve(**kwargs):
+        calls.append(kwargs)
+        return rescue_candidate if kwargs.get("forced_break_after") is not None else normal_candidate
+
+    monkeypatch.setattr(layout_solver, "solve_layout", solve)
+    monkeypatch.setattr(layout_solver, "build_original_layout_profile", lambda *_: None)
+    monkeypatch.setattr(layout_solver, "fg_bg_compare", lambda fg, bg: (fg, bg))
+    monkeypatch.setattr(layout_solver, "_long_word_pressure", lambda *_: ({
+        "longest_word": "TESTINGWORD",
+        "longest_word_width": 150,
+        "max_usable_row_width": 100,
+        "word_pressure_ratio": 1.5,
+        "long_word_bottleneck": True,
+        "bottleneck_word": "TESTINGWORD",
+    }, 0))
+    monkeypatch.setattr(layout_solver, "_hyphenation_variants", lambda *args, **kwargs: [
+        layout_solver.HyphenVariant(words=["TEST-", "ING"], word="TESTINGWORD", left="TEST-", right="ING", breakpoint=4, split_str="TEST-/ING")
+    ])
+    monkeypatch.setattr(layout_solver, "_hyphenation_variant", lambda words, *_: ["TEST-", "ING"])
+    monkeypatch.setattr(layout_solver, "_precompute_widths", lambda words, _size: ([50, 40], 10))
+
+    region = SimpleNamespace(
+        translation="TESTINGWORD",
+        target_lang="en_US",
+        placement_mode=PlacementMode.BUBBLE,
+        source_font_size=28,
+        direction="hr",
+        get_font_colors=lambda: ((0, 0, 0), (255, 255, 255)),
+        get_translation_for_rendering=lambda: "TESTINGWORD",
+    )
+    config = SimpleNamespace(render=SimpleNamespace(
+        font_size_minimum=12, font_size=28, font_size_offset=0,
+        line_spacing=0, no_hyphenation=False,
+    ))
+
+    plan = _build_region_layout_plan(
+        region, np.ones((100, 180), dtype=np.uint8), config, (100, 180),
+        2.0, 4, None, 1, page_font_baseline=28,
+    )
+
+    # 24 -> 25 is only +1px gain (< HYPHEN_MIN_GAIN_PX = 2), so hyphenation should be rejected
+    assert plan.candidates[0] is normal_candidate
+    assert plan.candidates[0].qa["hyphenation_rescue_selected"] is False
+
+
+def test_existing_compound_preserved():
+    text_render.set_font(get_default_eng_font())
+    text = "SELF-DEFENSE"
+    mask = np.ones((100, 180), dtype=np.uint8)
+    region = TextBlock(
+        [[[10, 10], [170, 10], [170, 90], [10, 90]]],
+        texts=[text], translation=text, target_lang="en_US",
+    )
+    region.placement_mode = PlacementMode.BUBBLE
+    region._bubble_interior = mask
+    config = SimpleNamespace(render=RenderConfig(
+        font_size=24, font_size_minimum=8, no_hyphenation=False, line_spacing=0,
+    ))
+
+    plan = _build_region_layout_plan(region, mask, config, mask.shape, 2.0, 8, None, 1)
+    candidate = plan.candidates[0]
+    assert candidate.qa["introduced_hyphen_count"] == 0
+
+
+def test_numeric_tokens_not_artificially_split():
+    text_render.set_font(get_default_eng_font())
+    for num_text in ["48", "2026", "12:30", "100%"]:
+        pressure, b_idx = layout_solver._long_word_pressure(
+            BubbleGeometry(np.ones((60, 60), dtype=np.uint8)), [num_text], 24, 0, 2.0
+        )
+        assert b_idx is None
+        variants = layout_solver._hyphenation_variants([num_text], 0, "en_US", 24)
+        assert len(variants) == 0
+
+
+def test_at_most_one_introduced_hyphen():
+    text_render.set_font(get_default_eng_font())
+    text = "UNCHARACTERISTICALLY MISUNDERSTANDING"
+    mask = np.ones((120, 150), dtype=np.uint8)
+    region = TextBlock(
+        [[[10, 10], [140, 10], [140, 110], [10, 110]]],
+        texts=[text], translation=text, target_lang="en_US",
+    )
+    region.placement_mode = PlacementMode.BUBBLE
+    region._bubble_interior = mask
+    config = SimpleNamespace(render=RenderConfig(
+        font_size=28, font_size_minimum=8, no_hyphenation=False, line_spacing=0,
+    ))
+
+    plan = _build_region_layout_plan(region, mask, config, mask.shape, 2.0, 8, None, 1, page_font_baseline=28)
+    candidate = plan.candidates[0]
+    assert candidate.qa.get("introduced_hyphen_count", 0) <= 1
+
+
+def test_paragraph_density_does_not_trigger_random_hyphens():
+    text_render.set_font(get_default_eng_font())
+    text = "I WOULD LIKE TO DISCUSS THIS VERY IMPORTANT MATTER WITH YOU BEFORE WE DECIDE"
+    mask = np.ones((200, 200), dtype=np.uint8)
+    region = TextBlock(
+        [[[10, 10], [190, 10], [190, 190], [10, 190]]],
+        texts=[text], translation=text, target_lang="en_US",
+    )
+    region.placement_mode = PlacementMode.BUBBLE
+    region._bubble_interior = mask
+    config = SimpleNamespace(render=RenderConfig(
+        font_size=None, font_size_minimum=8, no_hyphenation=False, line_spacing=0,
+    ))
+
+    plan = _build_region_layout_plan(region, mask, config, mask.shape, 2.0, 8, None, 1, page_font_baseline=26)
+    candidate = plan.candidates[0]
+    assert candidate.qa["hyphenation_rescue_selected"] is False
+    assert candidate.qa["introduced_hyphen_count"] == 0
+
+
+def test_page_consistency_across_dialogue_bubbles():
+    text_render.set_font(get_default_eng_font())
+    dialogue_texts = [
+        "Hello there!",
+        "How have you been doing?",
+        "I have been looking for you all day.",
+        "Let us meet at the station.",
+        "See you soon!",
+    ]
+    mask = np.ones((150, 150), dtype=np.uint8)
+    config = SimpleNamespace(render=RenderConfig(
+        font_size=None, font_size_minimum=8, no_hyphenation=False, line_spacing=0,
+    ))
+
+    font_sizes = []
+    for txt in dialogue_texts:
+        reg = TextBlock([[[10, 10], [140, 10], [140, 140], [10, 140]]], texts=[txt], translation=txt, target_lang="en_US")
+        reg.placement_mode = PlacementMode.BUBBLE
+        reg._bubble_interior = mask
+        plan = _build_region_layout_plan(reg, mask, config, mask.shape, 2.0, 8, None, 1, page_font_baseline=27)
+        font_sizes.append(plan.candidates[0].font_size)
+
+    median_font = float(np.median(font_sizes))
+    assert min(font_sizes) >= median_font * 0.85
+
+
+def test_different_sized_bubbles_remain_natural():
+    text_render.set_font(get_default_eng_font())
+    config = SimpleNamespace(render=RenderConfig(
+        font_size=None, font_size_minimum=8, no_hyphenation=False, line_spacing=0,
+    ))
+    
+    # Small bubble with dense content forces smaller font
+    mask_s = np.ones((70, 70), dtype=np.uint8)
+    reg_s = TextBlock([[[5, 5], [65, 5], [65, 65], [5, 65]]], texts=["This is a longer line of text."], translation="This is a longer line of text.", target_lang="en_US")
+    reg_s.placement_mode = PlacementMode.BUBBLE
+    reg_s._bubble_interior = mask_s
+    plan_s = _build_region_layout_plan(reg_s, mask_s, config, mask_s.shape, 2.0, 8, None, 1, page_font_baseline=28)
+
+    # Medium bubble
+    mask_m = np.ones((130, 130), dtype=np.uint8)
+    reg_m = TextBlock([[[5, 5], [125, 5], [125, 125], [5, 125]]], texts=["I see what you mean."], translation="I see what you mean.", target_lang="en_US")
+    reg_m.placement_mode = PlacementMode.BUBBLE
+    reg_m._bubble_interior = mask_m
+    plan_m = _build_region_layout_plan(reg_m, mask_m, config, mask_m.shape, 2.0, 8, None, 1, page_font_baseline=28)
+
+    # Large bubble
+    mask_l = np.ones((220, 220), dtype=np.uint8)
+    reg_l = TextBlock([[[5, 5], [215, 5], [215, 215], [5, 215]]], texts=["That is totally unexpected and unbelievable!"], translation="That is totally unexpected and unbelievable!", target_lang="en_US")
+    reg_l.placement_mode = PlacementMode.BUBBLE
+    reg_l._bubble_interior = mask_l
+    plan_l = _build_region_layout_plan(reg_l, mask_l, config, mask_l.shape, 2.0, 8, None, 1, page_font_baseline=28)
+
+    # Sizes should remain natural according to geometry
+    assert plan_s.candidates[0].font_size <= plan_m.candidates[0].font_size <= plan_l.candidates[0].font_size
+
+
+def test_safe_mask_containment_after_rescue():
+    text_render.set_font(get_default_eng_font())
+    text = "OH, A JOB INTERVIEWER?"
+    mask = np.ones((140, 130), dtype=np.uint8)
+    region = TextBlock(
+        [[[10, 10], [120, 10], [120, 130], [10, 130]]],
+        texts=[text], translation=text, target_lang="en_US",
+    )
+    region.placement_mode = PlacementMode.BUBBLE
+    region._bubble_interior = mask
+    config = SimpleNamespace(render=RenderConfig(
+        font_size=None, font_size_minimum=8, no_hyphenation=False, line_spacing=0,
+    ))
+
+    plan = _build_region_layout_plan(region, mask, config, mask.shape, 2.0, 8, None, 1, page_font_baseline=27)
+    candidate = plan.candidates[0]
+    valid, p5 = layout_solver._validate_glyph_pixels(
+        candidate.lines, BubbleGeometry(mask), candidate.font_size, 0, 2.0
+    )
+    assert valid is True

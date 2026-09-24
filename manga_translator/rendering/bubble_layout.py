@@ -197,11 +197,7 @@ def _estimate_adaptive_font_size(interior, text, minimum_font):
     bw = float(xs.max() - xs.min() + 1) if len(xs) else interior.shape[1]
     bh = float(ys.max() - ys.min() + 1) if len(ys) else interior.shape[0]
 
-    words = text.strip().split()
-    max_word_len = max((len(w) for w in words), default=1)
-    word_cap = (bw * 0.82) / max(1.0, 0.55 * max_word_len)
-
-    font_cap = min(max_radius * 1.35, max(bh, bw) * 0.38, word_cap, 54.0)
+    font_cap = min(max_radius * 1.35, max(bh, bw) * 0.38, 54.0)
     ideal = max(float(minimum_font), min(font_cap, est_size))
     return int(round(ideal))
 
@@ -1360,7 +1356,7 @@ def prepare_bubble_masks(image, regions, padding: int = 9, profile=None, return_
     )
     return cleanup
 
-def prepare_bubbles(image, regions, font_path, render_config, group: bool = True):
+def prepare_bubbles(image, regions, font_path, render_config, group: bool = True, page_target_font=None):
     from . import text_render, _horizontal_layout, _find_horizontal_placement, _points_for_rect, fg_bg_compare
 
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
@@ -1430,7 +1426,8 @@ def prepare_bubbles(image, regions, font_path, render_config, group: bool = True
                 separate._bubble_mask = component
                 separate._bubble_source_order = index
                 prepared_regions = prepare_bubbles(
-                    image, [separate], font_path, render_config, group=True
+                    image, [separate], font_path, render_config, group=True,
+                    page_target_font=page_target_font,
                 )
                 for prepared_region in prepared_regions:
                     prepared_region.region_id = getattr(member, "region_id", None)
@@ -1450,23 +1447,23 @@ def prepare_bubbles(image, regions, font_path, render_config, group: bool = True
         return sorted(result, key=lambda item: getattr(item, "_bubble_source_order", 0))
     text_render.set_font(font_path)
 
-    # Pre-calculate page-level baseline target font size across all bubble groups
-    page_target_estimates = []
-    for (u_b, lbl), mems in groups.items():
-        comp = custom_masks[lbl] if custom_mode else ((closed_labels if u_b else labels) == lbl).astype(np.uint8)
-        cnts, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        inter = np.zeros_like(comp)
-        cv2.drawContours(inter, cnts, -1, 1, cv2.FILLED)
-        inter = cv2.erode(inter, np.ones((7, 7), np.uint8))
-        t = "\n".join(r.translation for _, r in mems)
-        min_f = render_config.font_size_minimum
-        if min_f == -1:
-            min_f = round(sum(gray.shape) / 200)
-        min_f = max(1, min_f)
-        est = _estimate_adaptive_font_size(inter, t, min_f)
-        if est > min_f:
-            page_target_estimates.append(est)
-    page_target_font = int(round(np.percentile(page_target_estimates, 70))) if page_target_estimates else None
+    if page_target_font is None:
+        page_target_estimates = []
+        for (u_b, lbl), mems in groups.items():
+            comp = custom_masks[lbl] if custom_mode else ((closed_labels if u_b else labels) == lbl).astype(np.uint8)
+            cnts, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            inter = np.zeros_like(comp)
+            cv2.drawContours(inter, cnts, -1, 1, cv2.FILLED)
+            inter = cv2.erode(inter, np.ones((7, 7), np.uint8))
+            t = "\n".join(r.translation for _, r in mems)
+            min_f = render_config.font_size_minimum
+            if min_f == -1:
+                min_f = round(sum(gray.shape) / 200)
+            min_f = max(1, min_f)
+            est = _estimate_adaptive_font_size(inter, t, min_f)
+            if est > min_f:
+                page_target_estimates.append(est)
+        page_target_font = int(round(np.percentile(page_target_estimates, 70))) if page_target_estimates else None
 
     for (uncertain_boundary, label), members in groups.items():
         # Existing pipeline region order is already the source reading order.

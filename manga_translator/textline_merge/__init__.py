@@ -4,83 +4,115 @@ from typing import List, Set
 from collections import Counter
 import networkx as nx
 from shapely.geometry import Polygon
-
-from ..utils import TextBlock, Quadrilateral, quadrilateral_can_merge_region
+from ..utils import TextBlock, Quadrilateral
+from .geometry import analyze_textline_pair
 
 def split_text_region(
         bboxes: List[Quadrilateral],
         connected_region_indices: Set[int],
         width,
         height,
-        gamma = 0.5,
-        sigma = 2
+        gamma=0.5,
+        sigma=2,
+        pair_geometries=None,
     ) -> List[Set[int]]:
+    if pair_geometries is None:
+        return _split_text_region_legacy(bboxes, connected_region_indices, width, height, gamma, sigma)
 
     connected_region_indices = list(connected_region_indices)
-
-    # case 1
     if len(connected_region_indices) == 1:
         return [set(connected_region_indices)]
 
-    # case 2
-    if len(connected_region_indices) == 2:
-        fs1 = bboxes[connected_region_indices[0]].font_size
-        fs2 = bboxes[connected_region_indices[1]].font_size
-        fs = max(fs1, fs2)
+    graph = nx.Graph()
+    graph.add_nodes_from(connected_region_indices)
+    for first, second in itertools.combinations(connected_region_indices, 2):
+        pair = _get_pair_geometry(bboxes, first, second, pair_geometries)
+        if pair.can_merge:
+            graph.add_edge(first, second, weight=pair.score)
 
-        # print(bboxes[connected_region_indices[0]].pts, bboxes[connected_region_indices[1]].pts)
-        # print(fs, bboxes[connected_region_indices[0]].distance(bboxes[connected_region_indices[1]]), (1 + gamma) * fs)
-        # print(bboxes[connected_region_indices[0]].angle, bboxes[connected_region_indices[1]].angle, 4 * np.pi / 180)
-
-        if bboxes[connected_region_indices[0]].distance(bboxes[connected_region_indices[1]]) < (1 + gamma) * fs \
-                and abs(bboxes[connected_region_indices[0]].angle - bboxes[connected_region_indices[1]].angle) < 0.2 * np.pi:
-            return [set(connected_region_indices)]
-        else:
-            return [set([connected_region_indices[0]]), set([connected_region_indices[1]])]
-
-    # case 3
-    G = nx.Graph()
-    for idx in connected_region_indices:
-        G.add_node(idx)
-    for (u, v) in itertools.combinations(connected_region_indices, 2):
-        G.add_edge(u, v, weight=bboxes[u].distance(bboxes[v]))
-    # Get distances from neighbouring bboxes
-    edges = nx.algorithms.tree.minimum_spanning_edges(G, algorithm='kruskal', data=True)
-    edges = sorted(edges, key=lambda a: a[2]['weight'], reverse=True)
-    distances_sorted = [a[2]['weight'] for a in edges]
-    fontsize = np.mean([bboxes[idx].font_size for idx in connected_region_indices])
-    distances_std = np.std(distances_sorted)
-    distances_mean = np.mean(distances_sorted)
-    std_threshold = max(0.3 * fontsize + 5, 5)
-
-    b1, b2 = bboxes[edges[0][0]], bboxes[edges[0][1]]
-    max_poly_distance = Polygon(b1.pts).distance(Polygon(b2.pts))
-    max_centroid_alignment = min(abs(b1.centroid[0] - b2.centroid[0]), abs(b1.centroid[1] - b2.centroid[1]))
-
-    # print(edges)
-    # print(f'std: {distances_std} < thrshold: {std_threshold}, mean: {distances_mean}')
-    # print(f'{distances_sorted[0]} <= {distances_mean + distances_std * sigma}' \
-    #         f' or {distances_sorted[0]} <= {fontsize * (1 + gamma)}' \
-    #         f' or {distances_sorted[0] - distances_sorted[1]} < {distances_std * sigma}')
-
-    if (distances_sorted[0] <= distances_mean + distances_std * sigma \
-            or distances_sorted[0] <= fontsize * (1 + gamma)) \
-            and (distances_std < std_threshold \
-            or max_poly_distance == 0 and max_centroid_alignment < 5):
+    if len(connected_region_indices) == 2 or graph.number_of_edges() == 0:
         return [set(connected_region_indices)]
-    else:
-        # (split_u, split_v, _) = edges[0]
-        # print(f'split between "{bboxes[split_u].pts}", "{bboxes[split_v].pts}"')
-        G = nx.Graph()
-        for idx in connected_region_indices:
-            G.add_node(idx)
-        # Split out the most deviating bbox
-        for edge in edges[1:]:
-            G.add_edge(edge[0], edge[1])
-        ans = []
-        for node_set in nx.algorithms.components.connected_components(G):
-            ans.extend(split_text_region(bboxes, node_set, width, height))
-        return ans
+
+    tree = nx.minimum_spanning_tree(graph, weight="weight")
+    if not nx.is_connected(tree):
+        return [set(component) for component in nx.connected_components(tree)]
+
+    tree_edges = sorted(tree.edges(data=True), key=lambda edge: edge[2]["weight"], reverse=True)
+    possible_edges = [
+        edge for edge in tree_edges
+        if _get_pair_geometry(bboxes, edge[0], edge[1], pair_geometries).merge_class == "possible"
+    ]
+    if not possible_edges:
+        return [set(connected_region_indices)]
+
+    split_edge = possible_edges[0]
+    edge_score = float(split_edge[2]["weight"])
+    typical_score = float(np.median([edge[2]["weight"] for edge in tree_edges]))
+    if edge_score < 1.0 or edge_score - typical_score < 0.65:
+        return [set(connected_region_indices)]
+
+    # Strong overlap edges are never cut; split only a costly fallback edge.
+    tree.remove_edge(split_edge[0], split_edge[1])
+    components = list(nx.connected_components(tree))
+    if len(components) == 1:
+        return [set(connected_region_indices)]
+
+    result = []
+    for component in components:
+        result.extend(split_text_region(bboxes, component, width, height, pair_geometries=pair_geometries))
+    return result
+
+
+def _split_text_region_legacy(bboxes, connected_region_indices, width, height, gamma, sigma):
+    """Keep model_manga_ocr's independent grouping behavior unchanged."""
+    indices = list(connected_region_indices)
+    if len(indices) == 1:
+        return [set(indices)]
+    if len(indices) == 2:
+        first, second = (bboxes[index] for index in indices)
+        if first.distance(second) < (1 + gamma) * max(first.font_size, second.font_size) \
+                and abs(first.angle - second.angle) < 0.2 * np.pi:
+            return [set(indices)]
+        return [{index} for index in indices]
+
+    graph = nx.Graph()
+    graph.add_nodes_from(indices)
+    for first, second in itertools.combinations(indices, 2):
+        graph.add_edge(first, second, weight=bboxes[first].distance(bboxes[second]))
+    edges = sorted(
+        nx.minimum_spanning_edges(graph, algorithm="kruskal", data=True),
+        key=lambda edge: edge[2]["weight"],
+        reverse=True,
+    )
+    distances = [edge[2]["weight"] for edge in edges]
+    fontsize = np.mean([bboxes[index].font_size for index in indices])
+    std = np.std(distances)
+    mean = np.mean(distances)
+    std_threshold = max(0.3 * fontsize + 5, 5)
+    first, second = (bboxes[index] for index in edges[0][:2])
+    aligned = min(abs(first.centroid[0] - second.centroid[0]), abs(first.centroid[1] - second.centroid[1])) < 5
+    if ((distances[0] <= mean + std * sigma or distances[0] <= fontsize * (1 + gamma))
+            and (std < std_threshold or Polygon(first.pts).distance(Polygon(second.pts)) == 0 and aligned)):
+        return [set(indices)]
+
+    forest = nx.Graph()
+    forest.add_nodes_from(indices)
+    forest.add_edges_from((edge[0], edge[1]) for edge in edges[1:])
+    result = []
+    for component in nx.connected_components(forest):
+        result.extend(_split_text_region_legacy(bboxes, component, width, height, gamma, sigma))
+    return result
+
+
+def _pair_key(first: int, second: int) -> tuple[int, int]:
+    return (first, second) if first < second else (second, first)
+
+
+def _get_pair_geometry(bboxes, first, second, pair_geometries):
+    key = _pair_key(first, second)
+    if pair_geometries is not None and key in pair_geometries:
+        return pair_geometries[key]
+    return analyze_textline_pair(bboxes[first], bboxes[second])
 
 # def get_mini_boxes(contour):
 #     bounding_box = cv2.minAreaRect(contour)
@@ -107,7 +139,7 @@ def split_text_region(
 #     box = np.array(box)
 #     return box
 
-def merge_bboxes_text_region(bboxes: List[Quadrilateral], width, height):
+def merge_bboxes_text_region(bboxes: List[Quadrilateral], width, height, pair_diagnostics=None):
     # step 0: merge quadrilaterals that belong to the same textline
     # u = 0
     # removed_counter = 0
@@ -129,16 +161,21 @@ def merge_bboxes_text_region(bboxes: List[Quadrilateral], width, height):
     for i, box in enumerate(bboxes):
         G.add_node(i, box=box)
 
+    pair_geometries = {}
     for ((u, ubox), (v, vbox)) in itertools.combinations(enumerate(bboxes), 2):
-        # if quadrilateral_can_merge_region_coarse(ubox, vbox):
-        if quadrilateral_can_merge_region(ubox, vbox, aspect_ratio_tol=1.3, font_size_ratio_tol=2,
-                                          char_gap_tolerance=1, char_gap_tolerance2=3):
-            G.add_edge(u, v)
+        pair = analyze_textline_pair(ubox, vbox)
+        pair_geometries[(u, v)] = pair
+        if pair_diagnostics is not None:
+            pair_diagnostics.append(pair.to_dict(u, v))
+        if pair.can_merge:
+            G.add_edge(u, v, weight=pair.score, merge_class=pair.merge_class)
 
     # step 2: postprocess - further split each region
     region_indices: List[Set[int]] = []
     for node_set in nx.algorithms.components.connected_components(G):
-         region_indices.extend(split_text_region(bboxes, node_set, width, height))
+        region_indices.extend(
+            split_text_region(bboxes, node_set, width, height, pair_geometries=pair_geometries)
+        )
 
     # step 3: return regions
     for node_set in region_indices:
@@ -181,7 +218,13 @@ def merge_bboxes_text_region(bboxes: List[Quadrilateral], width, height):
         # yield overall bbox and sorted indices
         yield txtlns, (fg_r, fg_g, fg_b), (bg_r, bg_g, bg_b)
 
-async def dispatch(textlines: List[Quadrilateral], width: int, height: int, verbose: bool = False) -> List[TextBlock]:
+async def dispatch(
+    textlines: List[Quadrilateral],
+    width: int,
+    height: int,
+    verbose: bool = False,
+    pair_diagnostics=None,
+) -> List[TextBlock]:
     # print(width, height)
     # import re
     # for l in textlines:
@@ -190,7 +233,9 @@ async def dispatch(textlines: List[Quadrilateral], width: int, height: int, verb
     #     print(s)
 
     text_regions: List[TextBlock] = []
-    for (txtlns, fg_color, bg_color) in merge_bboxes_text_region(textlines, width, height):
+    for (txtlns, fg_color, bg_color) in merge_bboxes_text_region(
+        textlines, width, height, pair_diagnostics=pair_diagnostics
+    ):
         total_logprobs = 0
         for txtln in txtlns:
             total_logprobs += np.log(txtln.prob) * txtln.area

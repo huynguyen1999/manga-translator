@@ -1454,8 +1454,29 @@ class MangaTranslator:
                 filtered_textlines.append(txtln)  
             ctx.textlines = filtered_textlines  
     
-        text_regions = await dispatch_textline_merge(ctx.textlines, ctx.img_rgb.shape[1], ctx.img_rgb.shape[0],  
-                                                     verbose=self.verbose)  
+        verbose = getattr(self, "verbose", False)
+        pair_diagnostics = [] if verbose else None
+        text_regions = await dispatch_textline_merge(
+            ctx.textlines,
+            ctx.img_rgb.shape[1],
+            ctx.img_rgb.shape[0],
+            verbose=verbose,
+            pair_diagnostics=pair_diagnostics,
+        )
+        if pair_diagnostics is not None:
+            debug_document = {"pairs": pair_diagnostics}
+            if getattr(ctx, "result_documents", None) is None:
+                ctx.result_documents = {}
+            ctx.result_documents["textline_merge_debug.json"] = debug_document
+            pipeline_run = getattr(self, "_pipeline_run", None)
+            if pipeline_run is not None:
+                pipeline_run.write_json("textline_merge_debug.json", debug_document)
+            elif getattr(self, "_current_image_context", None):
+                await save_result_documents(
+                    self._current_image_context["subfolder"],
+                    {"textline_merge_debug.json": debug_document},
+                    self.result_root,
+                )
         for region in text_regions:
             if not hasattr(region, "text_raw"):
                 region.text_raw = region.text      # <- Save the initial OCR results to expand the render detection box. Also, prevent affecting the forbidden translation function.  
@@ -2485,9 +2506,10 @@ class MangaTranslator:
         if (getattr(ctx, 'img_rgb', None) is not None
                 and not getattr(ctx, '_bubble_layout_ready', False)):
             try:
-                await self._report_progress('layout')
+                if hasattr(self, '_progress_hooks'):
+                    await self._report_progress('layout')
                 await run_cpu_stage(layout_page, ctx, config, active_font, priority=cpu_priority)
-                if self._pipeline_run is not None:
+                if getattr(self, '_pipeline_run', None) is not None:
                     bubble_doc = serialize_bubble_detections(getattr(ctx, 'bubble_detections', None) or [])
                     self._pipeline_run.write_json('layout.json', serialize_frozen_layout(
                         ctx, config, active_font, bubble_doc,

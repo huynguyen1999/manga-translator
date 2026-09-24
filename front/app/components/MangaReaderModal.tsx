@@ -1081,6 +1081,42 @@ export const MangaReaderModal: React.FC<MangaReaderModalProps> = ({
     { label: 'Full Width', value: '100%', desc: '100% of screen width' },
   ];
 
+  const renderPageJumpForm = (mobile = false) => (
+    <form
+      onSubmit={handleSubmitPageJump}
+      className={mobile
+        ? 'grid w-full grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2 border-t border-zinc-800/80 pt-2'
+        : 'flex items-center gap-1'}
+      aria-label="Go to page"
+    >
+      <label htmlFor="reader-page-input" className={mobile ? 'text-xs font-medium text-zinc-300' : 'sr-only'}>
+        {mobile ? 'Page' : 'Page number'}
+      </label>
+      <input
+        id="reader-page-input"
+        type="number"
+        inputMode="numeric"
+        enterKeyHint="go"
+        min={1}
+        max={images.length}
+        value={pageInput}
+        onChange={(event) => setPageInput(event.target.value)}
+        className={`${mobile ? 'h-11 w-full min-w-0 text-base' : 'h-8 sm:h-10 w-11 sm:w-14 text-xs'} rounded-lg border border-zinc-700/60 bg-zinc-800 px-1 text-center font-mono text-zinc-200 focus:border-indigo-500 focus:outline-hidden focus:ring-1 focus:ring-indigo-500`}
+        aria-label="Page number"
+      />
+      {mobile && <span className="whitespace-nowrap text-xs text-zinc-400">of {images.length}</span>}
+      <button
+        type="submit"
+        className={mobile
+          ? 'min-h-11 min-w-11 rounded-lg bg-indigo-600 px-3 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline-2 focus-visible:outline-indigo-400'
+          : 'min-h-8 sm:min-h-10 rounded-lg border border-zinc-700/60 bg-zinc-800 px-2 sm:px-2.5 text-xs text-zinc-300 hover:bg-zinc-700 hover:text-white'}
+        title={getReaderTitle('Go to page', touchDevice)}
+      >
+        Go
+      </button>
+    </form>
+  );
+
   return createPortal((
     <div
       ref={containerRef}
@@ -1119,7 +1155,7 @@ export const MangaReaderModal: React.FC<MangaReaderModalProps> = ({
       {/* Header Toolbar */}
       <header
         onClick={(e) => e.stopPropagation()}
-        className={`${touchDevice ? 'fixed' : 'absolute'} top-0 left-0 right-0 flex items-center justify-between gap-1.5 sm:gap-3 px-2.5 sm:px-6 py-2 bg-zinc-900/95 border-b border-zinc-800/80 z-30 transition-all duration-200 ${
+        className={`${touchDevice ? 'fixed flex-col items-stretch gap-2' : 'absolute flex-row items-center gap-1.5 sm:gap-3'} top-0 left-0 right-0 flex justify-between px-2.5 sm:px-6 py-2 bg-zinc-900/95 border-b border-zinc-800/80 z-30 transition-all duration-200 ${
           showControls
             ? 'translate-y-0 opacity-100 visible pointer-events-auto'
             : '-translate-y-full opacity-0 invisible pointer-events-none'
@@ -1128,221 +1164,205 @@ export const MangaReaderModal: React.FC<MangaReaderModalProps> = ({
           paddingTop: 'calc(0.5rem + env(safe-area-inset-top, 0px))',
         }}
       >
-        {/* Title & Page Info & Series Switcher */}
-        <div className="flex items-center space-x-2 sm:space-x-3 min-w-0 shrink">
-          <div className="p-1.5 rounded-lg bg-indigo-600/20 text-indigo-400 shrink-0 hidden xs:block">
-            <Icon icon="carbon:book" className="w-4 h-4 sm:w-5 sm:h-5" />
-          </div>
-          <div className="min-w-0">
-            {seriesNavigation && series ? (
-              <label className="flex items-center min-w-0">
-                <span className="sr-only">Manga in series</span>
-                <select
-                  aria-label="Manga in series"
-                  value={mangaId || mangaTitle}
-                  disabled={isLoadingManga}
-                  onChange={(event) => {
-                    const member = series.members.find((entry) => entry.id === event.target.value);
-                    if (member) void onSelectManga?.(member);
-                  }}
-                  className="max-w-[120px] xs:max-w-[160px] sm:max-w-xs md:max-w-md truncate bg-zinc-800 border border-zinc-700/80 rounded-md px-1.5 py-0.5 font-semibold text-xs text-zinc-100 focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
-                >
-                  {series.members.map((member) => (
-                    <option key={member.id} value={member.id} className="bg-zinc-900 text-zinc-100">
-                      {member.position}. {member.title}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : (
-              <h2 id="manga-reader-title" className="font-semibold text-xs sm:text-sm text-zinc-100 truncate max-w-[100px] xs:max-w-[150px] sm:max-w-xs md:max-w-md" title={getReaderTitle(mangaTitle, touchDevice)}>
-                {mangaTitle}
-              </h2>
-            )}
-            <p className="text-[10px] sm:text-xs text-zinc-300 font-mono truncate">
-              Page {currentPage} of {images.length}
-            </p>
-          </div>
-        </div>
-
-        {/* Center Controls: Reading Mode Toggle & Page Width */}
-        <div className="flex items-center space-x-1 sm:space-x-2.5 shrink-0">
-          {readerMode === 'single' && (
-            <button
-              type="button"
-              onClick={() => handleJumpToPage(1)}
-              className="min-h-9 sm:min-h-10 flex items-center space-x-1 px-2 sm:px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs border border-zinc-700/60 transition-colors"
-              title={getReaderTitle('Go to top', touchDevice)}
-              aria-label="Go to top"
-            >
-              <Icon icon="carbon:arrow-up" className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-              <span className="hidden md:inline">Top</span>
-            </button>
-          )}
-
-          <form onSubmit={handleSubmitPageJump} className="flex items-center gap-1" aria-label="Go to page">
-            <label htmlFor="reader-page-input" className="sr-only">Page number</label>
-            <input
-              id="reader-page-input"
-              type="number"
-              min={1}
-              max={images.length}
-              value={pageInput}
-              onChange={(event) => setPageInput(event.target.value)}
-              className="h-8 sm:h-10 w-11 sm:w-14 rounded-lg border border-zinc-700/60 bg-zinc-800 px-1 text-center font-mono text-xs text-zinc-200 focus:border-indigo-500 focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
-              aria-label="Page number"
-            />
-            <button
-              type="submit"
-              className="min-h-8 sm:min-h-10 px-2 sm:px-2.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs border border-zinc-700/60 transition-colors"
-              title={getReaderTitle('Go to page', touchDevice)}
-            >
-              Go
-            </button>
-          </form>
-
-          {/* Mode Switcher: Infinite Scroll vs Single Page */}
-          <div className="flex items-center rounded-lg bg-zinc-800/90 p-0.5 border border-zinc-700/60 shadow-inner">
-            <button
-              type="button"
-              onClick={() => handleSetMode('infinite')}
-              className={`min-h-8 sm:min-h-10 flex items-center space-x-1 px-2 sm:px-2.5 py-1 text-xs font-medium rounded-md transition-all ${
-                readerMode === 'infinite'
-                  ? 'bg-indigo-600 text-white shadow-xs'
-                  : 'text-zinc-400 hover:text-zinc-200'
-              }`}
-              title={getReaderTitle('Continuous infinite vertical scroll', touchDevice)}
-              aria-label="Continuous scroll mode"
-            >
-              <Icon icon="carbon:page-break" className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Infinite Scroll</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSetMode('single')}
-              className={`min-h-8 sm:min-h-10 flex items-center space-x-1 px-2 sm:px-2.5 py-1 text-xs font-medium rounded-md transition-all ${
-                readerMode === 'single'
-                  ? 'bg-indigo-600 text-white shadow-xs'
-                  : 'text-zinc-400 hover:text-zinc-200'
-              }`}
-              title={getReaderTitle('Single page pagination mode', touchDevice)}
-              aria-label="Single page mode"
-            >
-              <Icon icon="carbon:document" className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Single Page</span>
-            </button>
-          </div>
-
-          {/* Page Width Dropdown Button */}
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setShowWidthMenu((prev) => !prev)}
-              className="min-h-8 sm:min-h-10 flex items-center space-x-1 px-2 sm:px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs border border-zinc-700/60 transition-colors"
-              title={getReaderTitle('Change page width', touchDevice)}
-              aria-label={`Change page width, currently ${readerWidth}`}
-            >
-              <Icon icon="carbon:fit-to-width" className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-indigo-400" />
-              <span className="font-mono text-xs hidden md:inline">{readerWidth}</span>
-              <Icon icon="carbon:chevron-down" className="w-3 h-3 text-zinc-400 hidden sm:inline" />
-            </button>
-
-            {showWidthMenu && (
-              <div
-                className="absolute right-0 mt-1.5 w-44 rounded-xl bg-zinc-900 border border-zinc-700 shadow-2xl p-1 z-50 animate-in fade-in zoom-in-95"
-                onMouseLeave={() => setShowWidthMenu(false)}
-              >
-                <div className="px-2.5 py-1.5 text-xs font-semibold text-zinc-300 uppercase tracking-wider border-b border-zinc-800">
-                  Page Width
-                </div>
-                {widthPresets.map((preset) => (
-                  <button
-                    key={preset.value}
-                    type="button"
-                    onClick={() => handleSetWidth(preset.value)}
-                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
-                      readerWidth === preset.value
-                        ? 'bg-indigo-600/30 text-indigo-300 font-semibold'
-                        : 'text-zinc-300 hover:bg-zinc-800 hover:text-white'
-                    }`}
+        <div className={touchDevice ? 'flex min-w-0 items-center justify-between gap-1.5' : 'contents'}>
+          {/* Title & Page Info & Series Switcher */}
+          <div className="flex items-center space-x-2 sm:space-x-3 min-w-0 shrink">
+            <div className="p-1.5 rounded-lg bg-indigo-600/20 text-indigo-400 shrink-0 hidden xs:block">
+              <Icon icon="carbon:book" className="w-4 h-4 sm:w-5 sm:h-5" />
+            </div>
+            <div className="min-w-0">
+              {seriesNavigation && series ? (
+                <label className="flex items-center min-w-0">
+                  <span className="sr-only">Manga in series</span>
+                  <select
+                    aria-label="Manga in series"
+                    value={mangaId || mangaTitle}
+                    disabled={isLoadingManga}
+                    onChange={(event) => {
+                      const member = series.members.find((entry) => entry.id === event.target.value);
+                      if (member) void onSelectManga?.(member);
+                    }}
+                    className="max-w-[120px] xs:max-w-[160px] sm:max-w-xs md:max-w-md truncate bg-zinc-800 border border-zinc-700/80 rounded-md px-1.5 py-0.5 font-semibold text-xs text-zinc-100 focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
                   >
-                    <span>{preset.label}</span>
-                    <span className="text-xs font-mono text-zinc-400">{preset.value}</span>
-                  </button>
-                ))}
+                    {series.members.map((member) => (
+                      <option key={member.id} value={member.id} className="bg-zinc-900 text-zinc-100">
+                        {member.position}. {member.title}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <h2 id="manga-reader-title" className="font-semibold text-xs sm:text-sm text-zinc-100 truncate max-w-[100px] xs:max-w-[150px] sm:max-w-xs md:max-w-md" title={getReaderTitle(mangaTitle, touchDevice)}>
+                  {mangaTitle}
+                </h2>
+              )}
+              <p className={`${touchDevice ? 'hidden' : ''} text-[10px] sm:text-xs text-zinc-300 font-mono truncate`}>
+                Page {currentPage} of {images.length}
+              </p>
+            </div>
+          </div>
 
-                {readerMode === 'single' && (
-                  <>
-                    <div className="my-1 border-t border-zinc-800" />
-                    <div className="px-2.5 py-1 text-xs font-semibold text-zinc-300 uppercase tracking-wider">
-                      Single Page Fit
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => handleSetSinglePageFit('height')}
-                      className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
-                        singlePageFit === 'height'
-                          ? 'bg-indigo-600/30 text-indigo-300 font-semibold'
-                          : 'text-zinc-300 hover:bg-zinc-800 hover:text-white'
-                      }`}
-                    >
-                      <div className="flex items-center space-x-1.5">
-                        <Icon icon="carbon:fit-to-screen" className="w-3.5 h-3.5" />
-                        <span>Fit Screen Height</span>
-                      </div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleSetSinglePageFit('width')}
-                      className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
-                        singlePageFit === 'width'
-                          ? 'bg-indigo-600/30 text-indigo-300 font-semibold'
-                          : 'text-zinc-300 hover:bg-zinc-800 hover:text-white'
-                      }`}
-                    >
-                      <div className="flex items-center space-x-1.5">
-                        <Icon icon="carbon:fit-to-width" className="w-3.5 h-3.5" />
-                        <span>Fit Page Width</span>
-                      </div>
-                    </button>
-                  </>
-                )}
-                <div className="my-1 border-t border-zinc-800" />
-                <button
-                  type="button"
-                  onClick={handleStartOver}
-                  className="w-full flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg text-xs text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors"
-                >
-                  <Icon icon="carbon:rewind-10" className="w-3.5 h-3.5" />
-                  <span>Start over</span>
-                </button>
-              </div>
+          {/* Center Controls: Reading Mode Toggle & Page Width */}
+          <div className="flex items-center space-x-1 sm:space-x-2.5 shrink-0">
+            {readerMode === 'single' && !touchDevice && (
+              <button
+                type="button"
+                onClick={() => handleJumpToPage(1)}
+                className="min-h-9 sm:min-h-10 flex items-center space-x-1 px-2 sm:px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs border border-zinc-700/60 transition-colors"
+                title={getReaderTitle('Go to top', touchDevice)}
+                aria-label="Go to top"
+              >
+                <Icon icon="carbon:arrow-up" className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                <span className="hidden md:inline">Top</span>
+              </button>
             )}
+
+            {!touchDevice && renderPageJumpForm()}
+
+            {/* Mode Switcher: Infinite Scroll vs Single Page */}
+            <div className="flex items-center rounded-lg bg-zinc-800/90 p-0.5 border border-zinc-700/60 shadow-inner">
+              <button
+                type="button"
+                onClick={() => handleSetMode('infinite')}
+                className={`min-h-8 sm:min-h-10 flex items-center space-x-1 px-2 sm:px-2.5 py-1 text-xs font-medium rounded-md transition-all ${
+                  readerMode === 'infinite'
+                    ? 'bg-indigo-600 text-white shadow-xs'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+                title={getReaderTitle('Continuous infinite vertical scroll', touchDevice)}
+                aria-label="Continuous scroll mode"
+              >
+                <Icon icon="carbon:page-break" className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Infinite Scroll</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSetMode('single')}
+                className={`min-h-8 sm:min-h-10 flex items-center space-x-1 px-2 sm:px-2.5 py-1 text-xs font-medium rounded-md transition-all ${
+                  readerMode === 'single'
+                    ? 'bg-indigo-600 text-white shadow-xs'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+                title={getReaderTitle('Single page pagination mode', touchDevice)}
+                aria-label="Single page mode"
+              >
+                <Icon icon="carbon:document" className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Single Page</span>
+              </button>
+            </div>
+
+            {/* Page Width Dropdown Button */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowWidthMenu((prev) => !prev)}
+                className="min-h-8 sm:min-h-10 flex items-center space-x-1 px-2 sm:px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs border border-zinc-700/60 transition-colors"
+                title={getReaderTitle('Change page width', touchDevice)}
+                aria-label={`Change page width, currently ${readerWidth}`}
+              >
+                <Icon icon="carbon:fit-to-width" className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-indigo-400" />
+                <span className="font-mono text-xs hidden md:inline">{readerWidth}</span>
+                <Icon icon="carbon:chevron-down" className="w-3 h-3 text-zinc-400 hidden sm:inline" />
+              </button>
+
+              {showWidthMenu && (
+                <div
+                  className="absolute right-0 mt-1.5 w-44 rounded-xl bg-zinc-900 border border-zinc-700 shadow-2xl p-1 z-50 animate-in fade-in zoom-in-95"
+                  onMouseLeave={() => setShowWidthMenu(false)}
+                >
+                  <div className="px-2.5 py-1.5 text-xs font-semibold text-zinc-300 uppercase tracking-wider border-b border-zinc-800">
+                    Page Width
+                  </div>
+                  {widthPresets.map((preset) => (
+                    <button
+                      key={preset.value}
+                      type="button"
+                      onClick={() => handleSetWidth(preset.value)}
+                      className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
+                        readerWidth === preset.value
+                          ? 'bg-indigo-600/30 text-indigo-300 font-semibold'
+                          : 'text-zinc-300 hover:bg-zinc-800 hover:text-white'
+                      }`}
+                    >
+                      <span>{preset.label}</span>
+                      <span className="text-xs font-mono text-zinc-400">{preset.value}</span>
+                    </button>
+                  ))}
+
+                  {readerMode === 'single' && (
+                    <>
+                      <div className="my-1 border-t border-zinc-800" />
+                      <div className="px-2.5 py-1 text-xs font-semibold text-zinc-300 uppercase tracking-wider">
+                        Single Page Fit
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleSetSinglePageFit('height')}
+                        className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
+                          singlePageFit === 'height'
+                            ? 'bg-indigo-600/30 text-indigo-300 font-semibold'
+                            : 'text-zinc-300 hover:bg-zinc-800 hover:text-white'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-1.5">
+                          <Icon icon="carbon:fit-to-screen" className="w-3.5 h-3.5" />
+                          <span>Fit Screen Height</span>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSetSinglePageFit('width')}
+                        className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
+                          singlePageFit === 'width'
+                            ? 'bg-indigo-600/30 text-indigo-300 font-semibold'
+                            : 'text-zinc-300 hover:bg-zinc-800 hover:text-white'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-1.5">
+                          <Icon icon="carbon:fit-to-width" className="w-3.5 h-3.5" />
+                          <span>Fit Page Width</span>
+                        </div>
+                      </button>
+                    </>
+                  )}
+                  <div className="my-1 border-t border-zinc-800" />
+                  <button
+                    type="button"
+                    onClick={handleStartOver}
+                    className="w-full flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg text-xs text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors"
+                  >
+                    <Icon icon="carbon:rewind-10" className="w-3.5 h-3.5" />
+                    <span>Start over</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right Actions: Fullscreen & Close */}
+          <div className="flex items-center space-x-1 sm:space-x-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={toggleFullscreen}
+              className="min-h-8 min-w-8 sm:min-h-10 sm:min-w-10 p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors flex items-center justify-center"
+              title={getReaderTitle(isFullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)', touchDevice)}
+              aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            >
+              <Icon icon={isFullscreen ? 'carbon:minimize' : 'carbon:maximize'} className="w-4 h-4" />
+            </button>
+
+            <button
+              type="button"
+              onClick={handleCloseReader}
+              className="min-h-8 min-w-8 sm:min-h-10 sm:min-w-10 p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors flex items-center justify-center"
+              title={getReaderTitle('Close reader (Esc)', touchDevice)}
+              aria-label="Close reader"
+            >
+              <Icon icon="carbon:close" className="w-4 h-4 sm:w-5 sm:h-5" />
+            </button>
           </div>
         </div>
-
-        {/* Right Actions: Fullscreen & Close */}
-        <div className="flex items-center space-x-1 sm:space-x-1.5 shrink-0">
-          <button
-            type="button"
-            onClick={toggleFullscreen}
-            className="min-h-8 min-w-8 sm:min-h-10 sm:min-w-10 p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors flex items-center justify-center"
-            title={getReaderTitle(isFullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)', touchDevice)}
-            aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-          >
-            <Icon icon={isFullscreen ? 'carbon:minimize' : 'carbon:maximize'} className="w-4 h-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={handleCloseReader}
-            className="min-h-8 min-w-8 sm:min-h-10 sm:min-w-10 p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors flex items-center justify-center"
-            title={getReaderTitle('Close reader (Esc)', touchDevice)}
-            aria-label="Close reader"
-          >
-            <Icon icon="carbon:close" className="w-4 h-4 sm:w-5 sm:h-5" />
-          </button>
-        </div>
+        {touchDevice && renderPageJumpForm(true)}
       </header>
 
       {/* Main Reader Body */}

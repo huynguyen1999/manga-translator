@@ -2502,6 +2502,8 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
       setSelectedImageIds(new Set());
       lastSelectedGalleryIdRef.current = null;
       setConfirmDeleteSelectedPages(false);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Could not delete selected pages.');
     } finally {
       setIsDeletingSelectedPages(false);
     }

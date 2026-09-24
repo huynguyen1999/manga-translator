@@ -19,6 +19,8 @@ VARIANT_SPECS: dict[str, tuple[int, int]] = {
     "reader": (1600, 82),
 }
 
+READER_ASSET_VARIANTS = {"input-reader.webp": "input", "inpainted-reader.webp": "inpainted"}
+
 
 def source_file(folder_path: Path) -> Path | None:
     final = find_asset(folder_path, "final")
@@ -94,3 +96,33 @@ def generate_image_variants(
     except Exception as error:  # pragma: no cover - codec/runtime dependent
         logger.warning("Could not generate image variants for %s: %s", folder.name, error)
     return result
+
+
+def generate_reader_asset(folder_path: Path | str, variant_name: str) -> Path | None:
+    """Create a 1600px-or-smaller reader derivative of the source or clean image."""
+    asset = READER_ASSET_VARIANTS.get(variant_name)
+    if asset is None:
+        raise ValueError(f"Unknown reader image variant: {variant_name}")
+    folder = Path(folder_path)
+    source = find_asset(folder, asset)
+    if source is None:
+        return None
+    target = folder / variant_name
+    if target.is_file() and target.stat().st_size and target.stat().st_mtime_ns >= source.stat().st_mtime_ns:
+        return target
+
+    try:
+        from PIL import Image
+
+        with Image.open(source) as opened:
+            mode = "RGBA" if "A" in opened.getbands() else "RGB"
+            image = opened.convert(mode)
+            if image.width > 1600:
+                image = image.resize((1600, max(1, round(image.height * 1600 / image.width))), Image.Resampling.LANCZOS)
+            temporary = target.with_name(f".{target.name}.tmp")
+            image.save(temporary, format="WEBP", quality=82, method=2)
+            os.replace(temporary, target)
+        return target
+    except Exception as error:  # pragma: no cover - codec/runtime dependent
+        logger.warning("Could not generate reader image %s for %s: %s", variant_name, folder.name, error)
+        return None

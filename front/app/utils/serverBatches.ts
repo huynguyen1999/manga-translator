@@ -191,6 +191,54 @@ export const toTranslationBatch = (batch: ServerBatch | ServerBatchSummary): Tra
   })),
 });
 
+const sameValue = (left: unknown, right: unknown): boolean => {
+  if (left instanceof Date && right instanceof Date) return left.getTime() === right.getTime();
+  if (left && right && typeof left === "object" && typeof right === "object") {
+    if (Array.isArray(left) || Array.isArray(right)) {
+      return Array.isArray(left) && Array.isArray(right)
+        && left.length === right.length
+        && left.every((value, index) => sameValue(value, right[index]));
+    }
+    const leftRecord = left as Record<string, unknown>;
+    const rightRecord = right as Record<string, unknown>;
+    const keys = Object.keys(leftRecord);
+    return keys.length === Object.keys(rightRecord).length
+      && keys.every((key) => sameValue(leftRecord[key], rightRecord[key]));
+  }
+  return Object.is(left, right);
+};
+
+const sameQueuedImage = (left: QueuedImage, right: QueuedImage): boolean =>
+  left.file.name === right.file.name
+  && Object.keys(left).filter((key) => key !== "file").length === Object.keys(right).filter((key) => key !== "file").length
+  && Object.keys(left).every((key) => key === "file" || sameValue(
+    (left as unknown as Record<string, unknown>)[key],
+    (right as unknown as Record<string, unknown>)[key],
+  ));
+
+const sameBatch = (left: TranslationBatch, right: TranslationBatch): boolean =>
+  Object.keys(left).filter((key) => key !== "items").length === Object.keys(right).filter((key) => key !== "items").length
+  && Object.keys(left).every((key) => key === "items" || sameValue(
+    (left as unknown as Record<string, unknown>)[key],
+    (right as unknown as Record<string, unknown>)[key],
+  )) && left.items.length === right.items.length
+  && left.items.every((item, index) => item === right.items[index]);
+
+export const mergeServerBatchDetails = (
+  current: TranslationBatch,
+  remote: ServerBatch,
+): TranslationBatch => {
+  const translated = toTranslationBatch(remote);
+  const previousItems = new Map(current.items.map((item) => [item.id, item]));
+  const items = translated.items.map((item) => {
+    const previous = previousItems.get(item.id);
+    if (!previous) return item;
+    return sameQueuedImage(previous, item) ? previous : { ...item, file: previous.file };
+  });
+  const merged = { ...translated, items, detailsLoaded: true };
+  return sameBatch(current, merged) ? current : merged;
+};
+
 export const mergeServerBatches = (
   current: TranslationBatch[],
   remote: ServerBatchSummary[],
@@ -198,6 +246,7 @@ export const mergeServerBatches = (
   optimisticTranslators: ReadonlyMap<string, TranslatorKey> = new Map(),
 ): TranslationBatch[] => {
   const remoteIds = new Set(remote.map((batch) => batch.id));
+  const currentById = new Map(current.map((batch) => [batch.id, batch]));
   const localUploads = current.filter(
     (batch) => batch.status === "uploading" && !remoteIds.has(batch.id),
   );
@@ -205,17 +254,18 @@ export const mergeServerBatches = (
     ...localUploads,
     ...remote.map((batch) => {
       const translated = toTranslationBatch(batch);
-      const existing = current.find((candidate) => candidate.id === batch.id);
+      const existing = currentById.get(batch.id);
       const merged = existing?.detailsLoaded
         ? { ...translated, items: existing.items, detailsLoaded: true }
         : translated;
       const optimisticTranslator = optimisticTranslators.get(batch.id);
-      const withOptimisticTranslator = optimisticTranslator
+      const withOptimisticTranslator = optimisticTranslator && merged.settings.translator !== optimisticTranslator
         ? { ...merged, settings: { ...merged.settings, translator: optimisticTranslator } }
         : merged;
-      return locallyDismissed.has(batch.id)
+      const withDismissal = locallyDismissed.has(batch.id) && !withOptimisticTranslator.dismissed
         ? { ...withOptimisticTranslator, dismissed: true }
         : withOptimisticTranslator;
+      return existing && sameBatch(existing, withDismissal) ? existing : withDismissal;
     }),
   ];
 };

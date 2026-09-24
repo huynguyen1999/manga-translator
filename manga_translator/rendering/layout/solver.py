@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import re
+from bisect import bisect_left, bisect_right
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from time import perf_counter
@@ -44,6 +45,7 @@ from .geometry import (
 )
 from .models import (
     BandSlot,
+    RegionFontPolicy,
     BubbleLayoutGroup,
     CandidateRaster,
     FreeTextDamageTarget,
@@ -52,6 +54,7 @@ from .models import (
     LobeGraph,
     OriginalLayoutProfile,
     PageObstacleMap,
+    PanelConstraint,
     PlacementTarget,
     PlacementMode,
     PlacedLine,
@@ -179,12 +182,14 @@ class SolverProfileStats:
     row_slot_max_widths: Dict[Tuple[Any, ...], int] = field(default_factory=dict, repr=False)
     placement_targets: Dict[Tuple[Any, ...], Any] = field(default_factory=dict, repr=False)
     zone_shape_profiles: Dict[Tuple[Any, ...], Any] = field(default_factory=dict, repr=False)
+    safe_zone_edge_counts: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]] = field(default_factory=dict, repr=False)
 
     def clear_ephemeral_caches(self) -> None:
         self.row_slot_tables.clear()
         self.row_slot_max_widths.clear()
         self.placement_targets.clear()
         self.zone_shape_profiles.clear()
+        self.safe_zone_edge_counts.clear()
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -301,6 +306,17 @@ _WEIGHT_ASPECT = 18.0       # log aspect ratio matching penalty
 _WEIGHT_SILHOUETTE = 8.0    # width profile / silhouette match
 _JOINT_CANDIDATE_COUNT = 5
 _MAX_JOINT_LAYOUT_COMBINATIONS = 4096
+
+# Staged Font Policy & Hyphen Rescue Constants
+PAGE_FONT_FLOOR_RATIO = 0.85
+PREFERRED_FONT_MAX_DROP_PX = 3
+MAX_PAGE_UPLIFT = 3
+HYPHEN_RESCUE_TRIGGER_RATIO = 0.90
+HYPHEN_MIN_GAIN_RATIO = 1.08
+HYPHEN_MIN_GAIN_PX = 2
+MAX_AUTOMATIC_HYPHENS_PER_REGION = 1
+_WEIGHT_PAGE_FONT_OVER = 15.0
+_WEIGHT_PAGE_FONT_UNDER = 60.0
 
 # DP transition & continuity weights
 _WEIGHT_TRANS_XJUMP = 8.0       # quadratic penalty for normalized center jump
@@ -442,6 +458,23 @@ def _compact_vertical_rhythm(
         return lines
 
     cur_lines = list(lines)
+    feasible_y_cache = {}
+
+    def _candidate_ys(low: int, high: int, width: int, reverse: bool = False):
+        if row_slot_table is None:
+            return range(high, low - 1, -1) if reverse else range(low, high + 1)
+        feasible = feasible_y_cache.get(width)
+        if feasible is None:
+            feasible = [
+                y for y, slots in row_slot_table.items()
+                if any(slot.width >= width for slot in slots)
+            ]
+            feasible.sort()
+            feasible_y_cache[width] = feasible
+        start = bisect_left(feasible, low)
+        stop = bisect_right(feasible, high)
+        selected = feasible[start:stop]
+        return reversed(selected) if reverse else selected
 
     def _best_slot_at_y(target_y: int, line_obj: PlacedLine) -> Optional[BandSlot]:
         if target_y < y1_safe or target_y + font_size > y2_safe:
@@ -463,7 +496,7 @@ def _compact_vertical_rhythm(
         expected_y = prev_y + H
         cur_y = cur_lines[i].y
         if cur_y > expected_y:
-            for cand_y in range(expected_y, cur_y + 1):
+            for cand_y in _candidate_ys(expected_y, cur_y, cur_lines[i].width):
                 slot = _best_slot_at_y(cand_y, cur_lines[i])
                 if slot is not None:
                     ideal_x = int(round(slot.center - cur_lines[i].width / 2.0))
@@ -485,7 +518,7 @@ def _compact_vertical_rhythm(
         cur_y = cur_lines[i].y
         if cur_y < expected_y:
             min_bound = (cur_lines[i - 1].y + font_size) if i > 0 else y1_safe
-            for cand_y in range(expected_y, cur_y - 1, -1):
+            for cand_y in _candidate_ys(cur_y, expected_y, cur_lines[i].width, reverse=True):
                 if cand_y < min_bound:
                     break
                 slot = _best_slot_at_y(cand_y, cur_lines[i])
@@ -518,7 +551,7 @@ def _compact_vertical_rhythm(
             best_cand_slot = cur_lines[i].slot
             best_e = float("inf")
 
-            for cand_y in range(search_min, search_max + 1):
+            for cand_y in _candidate_ys(search_min, search_max, cur_lines[i].width):
                 slot = _best_slot_at_y(cand_y, cur_lines[i])
                 if slot is None:
                     continue
@@ -1012,8 +1045,21 @@ def _build_row_slot_table(
     safe = geom.safe_pixels(font_size, stroke_width, margin)
     h_mask, w_mask = safe.shape
     table: Dict[int, List[BandSlot]] = {}
-    for y in range(max(0, y1), min(h_mask - font_size + 1, y2 - font_size + 1)):
-        band_row = np.all(safe[y : y + font_size], axis=0)
+    first_y = max(0, y1)
+    stop_y = min(h_mask - font_size + 1, y2 - font_size + 1)
+    if stop_y <= first_y:
+        return table
+
+    # A row is safe only when its font-height window contains no unsafe pixels.
+    # Prefix counts preserve the original np.all rule while avoiding a full
+    # font-height scan for every possible y coordinate.
+    unsafe = ~safe[first_y : stop_y + font_size]
+    unsafe_prefix = np.empty((unsafe.shape[0] + 1, w_mask), dtype=np.uint32)
+    unsafe_prefix[0] = 0
+    np.cumsum(unsafe, axis=0, dtype=np.uint32, out=unsafe_prefix[1:])
+    row_count = stop_y - first_y
+    valid_rows = unsafe_prefix[font_size : font_size + row_count] == unsafe_prefix[:row_count]
+    for y, band_row in enumerate(valid_rows, start=first_y):
         intervals = _runs_from_row(band_row)
         slots = [
             BandSlot(left=iv.left, right=iv.right, y_start=y, y_end=y + font_size)
@@ -1337,6 +1383,9 @@ def _dp_word_break_rows(
     nr = len(rows)
     if nw == 0 or nr == 0:
         return []
+    word_width_prefix = [0]
+    for width in word_widths:
+        word_width_prefix.append(word_width_prefix[-1] + width)
 
     # Trailing whitespace needs no state: once all words are placed, the
     # paragraph ends and remaining rows are free.
@@ -1400,13 +1449,10 @@ def _dp_word_break_rows(
         # Option 1: place a run of words on one of this row's intervals.
         for slot in row.intervals:
             slot_w = slot.width
-            run_w = 0
             for end in range(wi + 1, nw + 1):
                 if forced_break_after is not None and wi <= forced_break_after < end - 1:
                     break
-                if end > wi + 1:
-                    run_w += space_w
-                run_w += word_widths[end - 1]
+                run_w = word_width_prefix[end] - word_width_prefix[wi] + space_w * (end - wi - 1)
                 if run_w > slot_w:
                     break
 
@@ -2021,6 +2067,7 @@ def _free_text_wrap_candidate(
     line_spacing: float,
     line_count: int,
     target_width: float,
+    max_line_width: Optional[float] = None,
 ) -> Optional[LayoutCandidate]:
     """Build one ordinary paragraph shape; every word stays atomic."""
     if not words or line_count < 1 or line_count > len(words):
@@ -2036,6 +2083,8 @@ def _free_text_wrap_candidate(
                 run_width += widths[end - 1]
                 if end - start > 1:
                     run_width += space_width
+                if max_line_width is not None and run_width > max_line_width:
+                    break
                 remaining = line_count - used - 1
                 remaining_words = len(words) - end
                 if remaining_words < remaining:
@@ -2088,12 +2137,14 @@ def _free_text_typography_score(
     candidate: LayoutCandidate,
     profile: OriginalLayoutProfile,
     target: Optional[FreeTextDamageTarget] = None,
+    target_width_override: Optional[float] = None,
+    target_height_override: Optional[float] = None,
 ) -> float:
     """Score real glyph footprint without page coordinates or obstacle geometry."""
     ink = _free_text_candidate_ink_metrics(candidate)
     widths = [float(line.width) for line in candidate.lines]
-    target_width = float(target.width if target is not None else profile.block_width)
-    target_height = float(target.height if target is not None else profile.block_height)
+    target_width = float(target_width_override or (target.width if target is not None else profile.block_width))
+    target_height = float(target_height_override or (target.height if target is not None else profile.block_height))
     target_width = max(1.0, target_width)
     target_height = max(1.0, target_height)
     target_ar = max(0.05, target_width / target_height)
@@ -2126,6 +2177,7 @@ def _free_text_typography_candidates(
     image_shape: Tuple[int, int],
     target: Optional[FreeTextDamageTarget] = None,
     target_height: Optional[int] = None,
+    panel_constraint: Optional[PanelConstraint] = None,
 ) -> List[LayoutCandidate]:
     """Generate frozen paragraph candidates; ``target_height`` is legacy-only."""
     # Keep the old keyword source-compatible, but never turn erased height into leading.
@@ -2157,6 +2209,18 @@ def _free_text_typography_candidates(
         line_height = _free_text_line_height(font_size, line_spacing)
         target_width = float(target.width if target is not None else profile.block_width)
         target_height_value = float(target.height if target is not None else profile.block_height)
+        max_width = max_height = None
+        panel_meta = None
+        if panel_constraint is not None:
+            left, top, right, bottom = panel_constraint.bounds
+            margin = max(0, int(panel_constraint.margin))
+            max_width = right - left - margin * 2
+            max_height = bottom - top - margin * 2
+            if max_width <= 0 or max_height <= 0:
+                continue
+            target_width = min(target_width, float(max_width))
+            target_height_value = min(target_height_value, float(max_height))
+            panel_meta = _panel_constraint_diagnostics(panel_constraint)
         target_ar = max(0.05, target_width / max(1.0, target_height_value))
         preferred_lines = int(round(math.sqrt(total_width / max(1.0, target_ar * line_height))))
         preferred_lines = max(1, min(len(words), preferred_lines))
@@ -2170,13 +2234,26 @@ def _free_text_typography_candidates(
                 total_width / line_count,
                 target_ar * line_count * line_height,
             )
+            if max_width is not None:
+                wrap_width = min(wrap_width, float(max_width))
             candidate = _free_text_wrap_candidate(
                 words, widths, space_width, font_size,
                 line_spacing, line_count, wrap_width,
+                max_line_width=float(max_width) if max_width is not None else None,
             )
             if candidate is None:
                 continue
-            candidate.penalty = _free_text_typography_score(candidate, profile, target)
+            candidate_width = max(line.x + line.width for line in candidate.lines) - min(line.x for line in candidate.lines)
+            candidate_height = max(line.y + line.height for line in candidate.lines) - min(line.y for line in candidate.lines)
+            if max_width is not None and candidate_width > max_width:
+                continue
+            if max_height is not None and candidate_height > max_height:
+                continue
+            candidate.penalty = _free_text_typography_score(
+                candidate, profile, target,
+                target_width_override=target_width,
+                target_height_override=target_height_value,
+            )
             ink = _free_text_candidate_ink_metrics(candidate)
             candidate.qa = {
                 "font_size": candidate.font_size,
@@ -2201,9 +2278,14 @@ def _free_text_typography_candidates(
                 "target_height": target_height_value,
                 "target_aspect_ratio": target_ar,
             }
+            if panel_meta is not None:
+                candidate.qa["panel_constraint"] = panel_meta
             candidates.append(candidate)
 
-    candidates.sort(key=lambda candidate: candidate.penalty)
+    if panel_constraint is not None and panel_constraint.source == "cv":
+        candidates.sort(key=lambda candidate: (abs(candidate.font_size - source_font), candidate.penalty))
+    else:
+        candidates.sort(key=lambda candidate: candidate.penalty)
     unique: List[LayoutCandidate] = []
     seen = set()
     for candidate in candidates:
@@ -2271,12 +2353,45 @@ def _free_text_offset_refine(center_dx: int, center_dy: int, step: int = 2) -> L
     return offsets
 
 
+def _panel_constraint_diagnostics(panel: Optional[PanelConstraint]) -> Optional[Dict[str, Any]]:
+    if panel is None:
+        return None
+    return {
+        "id": panel.panel_id,
+        "bounds": list(panel.bounds),
+        "confidence": float(panel.confidence),
+        "source": panel.source,
+        "margin": int(panel.margin),
+    }
+
+
+def _clamp_free_text_translation(
+    block_bbox: Tuple[int, int, int, int],
+    dx: int,
+    dy: int,
+    panel: Optional[PanelConstraint],
+) -> Optional[Tuple[int, int]]:
+    """Keep the full paragraph box inside its panel while preserving its desired center when possible."""
+    if panel is None:
+        return dx, dy
+    left, top, right, bottom = panel.bounds
+    margin = max(0, int(panel.margin))
+    left, top, right, bottom = left + margin, top + margin, right - margin, bottom - margin
+    bx1, by1, bx2, by2 = block_bbox
+    if bx2 - bx1 > right - left or by2 - by1 > bottom - top:
+        return None
+    min_dx, max_dx = left - bx1, right - bx2
+    min_dy, max_dy = top - by1, bottom - by2
+    return min(max(dx, min_dx), max_dx), min(max(dy, min_dy), max_dy)
+
+
 def _free_text_hard_valid(
     crop_box: Tuple[int, int, int, int],
     visual_crop: np.ndarray,
     zone: FreeTextZone,
     obstacles: PageObstacleMap,
     other_text: np.ndarray,
+    block_bbox: Optional[Tuple[int, int, int, int]] = None,
 ) -> bool:
     """Reject page, bubble, and foreign-text collisions for a free-text block.
 
@@ -2289,6 +2404,26 @@ def _free_text_hard_valid(
         return False
     if not visual_crop.any():
         return False
+
+    panel = zone.panel_constraint
+    if panel is not None:
+        left, top, right, bottom = panel.bounds
+        margin = max(0, int(panel.margin))
+        safe_bounds = (left + margin, top + margin, right - margin, bottom - margin)
+        if block_bbox is not None:
+            bx1, by1, bx2, by2 = block_bbox
+            if bx1 < safe_bounds[0] or by1 < safe_bounds[1] or bx2 > safe_bounds[2] or by2 > safe_bounds[3]:
+                return False
+        ys, xs = np.nonzero(visual_crop)
+        if len(xs):
+            vx1, vy1 = x1 + int(xs.min()), y1 + int(ys.min())
+            vx2, vy2 = x1 + int(xs.max()) + 1, y1 + int(ys.max()) + 1
+            if vx1 < safe_bounds[0] or vy1 < safe_bounds[1] or vx2 > safe_bounds[2] or vy2 > safe_bounds[3]:
+                return False
+        if panel.mask is not None and panel.mask.shape == obstacles.panel_mask.shape:
+            panel_crop = panel.mask[y1:y2, x1:x2] > 0
+            if np.any(visual_crop & ~panel_crop):
+                return False
 
     # Quick check: if the entire crop_box has no obstacles, it's valid immediately
     bubble_sub = obstacles.protected_bubble_mask[y1:y2, x1:x2]
@@ -2418,8 +2553,10 @@ def _free_text_search_result(
     dx, dy = ideal_dx + relative_dx, ideal_dy + relative_dy
     x1, y1, x2, y2 = base_box
     crop_box = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
+    bx1, by1, bx2, by2 = _candidate_bbox(typography_candidate)
+    block_bbox = (bx1 + dx, by1 + dy, bx2 + dx, by2 + dy)
     started = perf_counter()
-    valid = _free_text_hard_valid(crop_box, visual_crop, zone, obstacles, other_text)
+    valid = _free_text_hard_valid(crop_box, visual_crop, zone, obstacles, other_text, block_bbox)
     stats.ft_offset_search_ms += (perf_counter() - started) * 1000.0
     if not valid:
         return None
@@ -2497,7 +2634,7 @@ def _materialize_free_text_search_result(
         "layout_width": candidate_bbox[2] - candidate_bbox[0],
         "layout_height": candidate_bbox[3] - candidate_bbox[1],
         "expansion_ratio": (result.ink_bbox[2] - result.ink_bbox[0]) * (result.ink_bbox[3] - result.ink_bbox[1]) / max(1.0, original_profile.block_width * original_profile.block_height),
-        "hard_constraints": ["bubble_mask", "ownership_zone", "page_bounds", "other_text"],
+        "hard_constraints": ["bubble_mask", "ownership_zone", "page_bounds", "other_text", "panel_bounds"],
         "free_text_score": result.score,
     })
     candidate.status = status
@@ -2571,6 +2708,10 @@ def _layout_env_enabled(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _layout_env_disabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"0", "false", "no", "off"}
+
+
 def _solve_free_text_region(
     region: Any,
     zone: FreeTextZone,
@@ -2581,6 +2722,7 @@ def _solve_free_text_region(
     solver_max_y_trials: int,
     allow_early_accept: bool = False,
     shadow_compare: bool = False,
+    force_exhaustive: bool = False,
 ) -> Optional[Tuple[LayoutCandidate, OriginalLayoutProfile, Dict[str, Any]]]:
     """Solve FREE_TEXT as frozen typography followed by rigid placement.
 
@@ -2610,6 +2752,7 @@ def _solve_free_text_region(
         config,
         image_shape,
         target=target,
+        panel_constraint=zone.panel_constraint,
     )
     prof.ft_typography_ms += (perf_counter() - t_topo0) * 1000.0
     if not typography:
@@ -2660,6 +2803,12 @@ def _solve_free_text_region(
         )
         ideal_dx = int(round(damage_centroid[0] - base_centroid[0]))
         ideal_dy = int(round(damage_centroid[1] - base_centroid[1]))
+        clamped = _clamp_free_text_translation(
+            _candidate_bbox(typography_candidate), ideal_dx, ideal_dy, zone.panel_constraint
+        )
+        if clamped is None:
+            return None
+        ideal_dx, ideal_dy = clamped
         max_radius = max(16, min(64, int(max(target_width, target_height, profile.block_width, profile.block_height))))
         prepared = (
             raster, base_box, ink_crop, visual_crop, block_crop, base_centroid,
@@ -2668,14 +2817,18 @@ def _solve_free_text_region(
         prepared_candidates[cid] = prepared
         return prepared
 
-    fast_requested = shadow_compare or (allow_early_accept and _layout_env_enabled("LAYOUT_FAST_FREE_TEXT"))
-    try_local_stage = shadow_compare or _layout_env_enabled("LAYOUT_LAZY_CANDIDATES")
+    fast_requested = shadow_compare or (
+        allow_early_accept and not force_exhaustive and not _layout_env_disabled("LAYOUT_FAST_FREE_TEXT")
+    )
+    try_local_stage = shadow_compare or (
+        not force_exhaustive and _layout_env_enabled("LAYOUT_LAZY_CANDIDATES")
+    )
     fast_result: Optional[SearchResult] = None
     fast_overflow: Optional[float] = None
     fast_status = "free_text_ideal"
-    if fast_requested and eval_candidates:
+    if (fast_requested or try_local_stage) and eval_candidates:
         first = eval_candidates[0]
-        prepared = prepare_candidate(first)
+        prepared = prepare_candidate(first) if fast_requested else None
         if prepared is not None:
             raster, base_box, ink_crop, visual_crop, block_crop, base_centroid, base_ink_bbox, ideal_dx, ideal_dy, _ = prepared
             prof.free_text_ideal_attempts += 1
@@ -2726,14 +2879,14 @@ def _solve_free_text_region(
                 if fast_result is not None:
                     break
 
-        if fast_result is not None and not shadow_compare:
+        if fast_result is not None and (fast_requested or try_local_stage) and not shadow_compare:
             candidate = _materialize_free_text_search_result(
                 fast_result, profile, target, damage_centroid, obstacles, other_text,
                 status=fast_status, overflow=fast_overflow,
             )
             region._free_text_candidate_pool = [candidate]
             return candidate, profile, candidate.qa
-        if fast_result is None:
+        if fast_result is None and (fast_requested or try_local_stage):
             prof.free_text_full_search_fallbacks += 1
 
     prof.free_text_full_search_runs += 1
@@ -2948,6 +3101,56 @@ def _select_free_text_joint_candidates(
             occupied.append((crop_box, glyph_mask))
             break
     return selected
+
+
+def _free_text_fast_conflict_regions(
+    regions: List[Any],
+    plans: Dict[int, List[LayoutCandidate]],
+    image_shape: Tuple[int, int],
+) -> set[int]:
+    """Return fast-only placements that collide and need exhaustive alternatives."""
+    fast_regions = [
+        region for region in regions
+        if len(plans.get(id(region), [])) == 1
+        and plans[id(region)][0].status in {"free_text_ideal", "free_text_local"}
+    ]
+    if not fast_regions:
+        return set()
+
+    candidate_data = {}
+
+    def masks_for(candidate):
+        data = candidate_data.get(id(candidate))
+        if data is None:
+            crop_box, glyph_mask, _, _ = _candidate_data(candidate, image_shape)
+            data = (crop_box, glyph_mask)
+            candidate_data[id(candidate)] = data
+        return data
+
+    conflicts: set[int] = set()
+    for first_region in fast_regions:
+        first_id = id(first_region)
+        first_candidate = plans[first_id][0]
+        first_box, first_mask = masks_for(first_candidate)
+        for second_region in regions:
+            second_id = id(second_region)
+            if first_id == second_id:
+                continue
+            second_candidates = plans.get(second_id, [])
+            if not second_candidates:
+                continue
+            all_collide = True
+            for second_candidate in second_candidates:
+                second_box, second_mask = masks_for(second_candidate)
+                if not _cropped_masks_overlap(first_box, first_mask, second_box, second_mask):
+                    all_collide = False
+                    break
+            if not all_collide:
+                continue
+            conflicts.add(first_id)
+            if len(second_candidates) == 1 and second_candidates[0].status in {"free_text_ideal", "free_text_local"}:
+                conflicts.add(second_id)
+    return conflicts
 
 
 def _apply_free_text_candidate(
@@ -3209,7 +3412,20 @@ def _composite_penalty(
     # C. Whitespace & Balance (Phase 8 & 9)
     #    Measure usable free space from the safe mask around the rendered block.
     safe_zone = target_geom.mask if target_geom is not None else geom.safe_pixels(font_size, stroke_width, margin)
-    zone_area = float(np.count_nonzero(safe_zone)) if np.any(safe_zone) else mask_area
+    profile = get_solver_profile()
+    edge_counts = profile.safe_zone_edge_counts.get(id(safe_zone))
+    if edge_counts is None or edge_counts[0] is not safe_zone:
+        row_counts = np.count_nonzero(safe_zone, axis=1)
+        col_counts = np.count_nonzero(safe_zone, axis=0)
+        row_prefix = np.empty(row_counts.size + 1, dtype=np.int64)
+        col_prefix = np.empty(col_counts.size + 1, dtype=np.int64)
+        row_prefix[0] = col_prefix[0] = 0
+        np.cumsum(row_counts, out=row_prefix[1:])
+        np.cumsum(col_counts, out=col_prefix[1:])
+        edge_counts = (safe_zone, row_prefix, col_prefix)
+        profile.safe_zone_edge_counts[id(safe_zone)] = edge_counts
+    _, row_prefix, col_prefix = edge_counts
+    zone_area = float(row_prefix[-1]) if row_prefix[-1] else mask_area
 
     block_left = min(line.x for line in lines)
     block_right = max(line.x + line.width for line in lines)
@@ -3230,10 +3446,10 @@ def _composite_penalty(
         left_clamped = max(0, min(w_mask, block_left))
         right_clamped = max(0, min(w_mask, block_right))
 
-        a_above = float(np.count_nonzero(safe_zone[:top_clamped, :]))
-        a_below = float(np.count_nonzero(safe_zone[bottom_clamped:, :]))
-        a_left = float(np.count_nonzero(safe_zone[:, :left_clamped]))
-        a_right = float(np.count_nonzero(safe_zone[:, right_clamped:]))
+        a_above = float(row_prefix[top_clamped])
+        a_below = float(row_prefix[-1] - row_prefix[bottom_clamped])
+        a_left = float(col_prefix[left_clamped])
+        a_right = float(col_prefix[-1] - col_prefix[right_clamped])
 
         top_free_ratio = a_above / zone_area
         bottom_free_ratio = a_below / zone_area
@@ -3516,6 +3732,22 @@ def _shared_bubble_groups(regions: List[Any]) -> List[BubbleLayoutGroup]:
     return groups
 
 
+def _page_dialogue_font_baseline(groups: List[BubbleLayoutGroup], minimum: int) -> Optional[int]:
+    estimates = []
+    for group in groups:
+        texts = []
+        for region in group.regions:
+            text = _render_text(region).strip()
+            if text and not is_preserved_region(region):
+                texts.append(text)
+        text = "\n".join(texts)
+        if text and group.interior is not None and np.any(group.interior):
+            estimate = _estimate_adaptive_font_size(group.interior, text, minimum)
+            if estimate > minimum:
+                estimates.append(estimate)
+    return int(round(np.percentile(estimates, 70))) if estimates else None
+
+
 def partition_bubble_zones(
     regions: List[Any],
     interior: np.ndarray,
@@ -3686,7 +3918,10 @@ def _choose_joint_layout(
                 profile.joint_layout_collisions_rejected += 1
                 continue
 
-            score = sum(candidate.penalty for candidate in combination)
+            score = sum(
+                candidate.penalty + _page_font_penalty(candidate.font_size, getattr(plan.region, "_font_policy_diagnostics", {}).get("page_baseline") if plan.region else None)
+                for plan, candidate in zip(plans, combination)
+            )
             for first in range(len(combination)):
                 first_cand = combination[first]
                 _, _, first_bbox, first_centroid = candidate_cache[id(first_cand)]
@@ -3723,6 +3958,14 @@ def _choose_joint_layout(
         profile.joint_layout_ms += (perf_counter() - started) * 1000.0
 
 
+def _page_font_penalty(font_size: int, page_baseline: Optional[int]) -> float:
+    if not page_baseline or page_baseline <= 0:
+        return 0.0
+    ratio = font_size / float(page_baseline)
+    if ratio >= 1.0:
+        return ((ratio - 1.0) ** 2) * _WEIGHT_PAGE_FONT_OVER
+    return ((1.0 - ratio) ** 2) * _WEIGHT_PAGE_FONT_UNDER
+
 def _compression_severity(font_ratio: float) -> str:
     if font_ratio >= 0.90:
         return "satisfactory"
@@ -3744,19 +3987,32 @@ def _long_word_pressure(
     longest_width = widths[longest_index] if longest_index is not None else 0
     bottlenecks = [
         i for i, (word, width) in enumerate(zip(words, widths))
-        if len(word) > 6 and width > max_row_width
+        if len(word) >= 8 and width > max_row_width
     ]
     split_candidates = [
         i for i in bottlenecks
-        if re.fullmatch(r"[A-Za-z]{7,}[.,!?;:…'\"”’)]*", words[i])
+        if re.fullmatch(r"[A-Za-z]{8,}[.,!?;:…'\"”’)]*", words[i])
+        and "-" not in words[i] and "/" not in words[i] and not any(ch.isdigit() for ch in words[i])
     ]
     bottleneck_index = max(split_candidates, key=lambda i: widths[i], default=None)
     pressured_width = max((widths[i] for i in bottlenecks), default=0)
+    width_pressure_ratio = round(pressured_width / max_row_width, 4) if max_row_width else 0.0
+    dominant_bottleneck_index = bottleneck_index
+    single_word_dominant = (len(bottlenecks) == 1 and bottleneck_index is not None)
+
+    total_text_width = sum(widths)
+    paragraph_density_pressure = round(total_text_width / float(max(1, max_row_width * 3)), 4) if max_row_width else 0.0
+
     return ({
         "longest_word": words[longest_index] if longest_index is not None else "",
         "longest_word_width": longest_width,
         "max_usable_row_width": max_row_width,
-        "word_pressure_ratio": round(pressured_width / max_row_width, 4) if max_row_width else 0.0,
+        "word_pressure_ratio": width_pressure_ratio,
+        "width_pressure_ratio": width_pressure_ratio,
+        "bottleneck_indices": bottlenecks,
+        "dominant_bottleneck_index": dominant_bottleneck_index,
+        "single_word_dominant": single_word_dominant,
+        "paragraph_density_pressure": paragraph_density_pressure,
         "long_word_bottleneck": bool(bottlenecks),
         "bottleneck_word": words[bottleneck_index] if bottleneck_index is not None else (
             words[max(bottlenecks, key=lambda i: widths[i])] if bottlenecks else None
@@ -3764,25 +4020,39 @@ def _long_word_pressure(
     }, bottleneck_index)
 
 
-def _hyphenation_variant(
+@dataclass
+class HyphenVariant:
+    words: List[str]
+    word: str
+    left: str
+    right: str
+    breakpoint: int
+    split_str: str
+
+
+def _hyphenation_variants(
     words: List[str],
     word_index: int,
     language: str,
     font_size: int,
-) -> Optional[List[str]]:
-    match = re.fullmatch(r"([A-Za-z]{7,})([.,!?;:…'\"”’)]*)", words[word_index])
+    max_variants: int = 3,
+) -> List[HyphenVariant]:
+    match = re.fullmatch(r"([A-Za-z]{8,})([.,!?;:…'\"”’)]*)", words[word_index])
     if not match:
-        return None
+        return []
+    raw_word = words[word_index]
+    if "-" in raw_word or "/" in raw_word or any(ch.isdigit() for ch in raw_word):
+        return []
     word, punctuation = match.groups()
     hyphenator = text_render.select_hyphenator(language)
     if hyphenator is None:
-        return None
+        return []
     try:
         syllables = hyphenator.syllables(word.lower())
     except Exception:
-        return None
+        return []
     if len(syllables) < 2 or "".join(syllables).lower() != word.lower():
-        return None
+        return []
 
     split_points = []
     offset = 0
@@ -3791,15 +4061,116 @@ def _hyphenation_variant(
         if offset >= 3 and len(word) - offset >= 3:
             split_points.append(offset)
     if not split_points:
-        return None
+        return []
 
-    variants = []
+    variants: List[Tuple[int, int, int, str, str]] = []
     for split in split_points:
         left, right = word[:split] + "-", word[split:] + punctuation
         widths, _ = _precompute_widths([left, right], font_size)
         variants.append((max(widths), abs(widths[0] - widths[1]), split, left, right))
-    _, _, _, left, right = min(variants)
-    return words[:word_index] + [left, right] + words[word_index + 1:]
+
+    variants.sort(key=lambda item: (item[0], item[1]))
+    selected = variants[:max_variants]
+
+    res = []
+    for max_w, diff, split, left, right in selected:
+        cand_words = words[:word_index] + [left, right] + words[word_index + 1:]
+        res.append(HyphenVariant(
+            words=cand_words,
+            word=word,
+            left=left,
+            right=right,
+            breakpoint=split,
+            split_str=f"{word[:split]}-/{word[split:]}",
+        ))
+    return res
+
+
+def _hyphenation_variant(
+    words: List[str],
+    word_index: int,
+    language: str,
+    font_size: int,
+) -> Optional[List[str]]:
+    variants = _hyphenation_variants(words, word_index, language, font_size, max_variants=1)
+    return variants[0].words if variants else None
+
+
+def build_region_font_policy(
+    region: Any,
+    adaptive_target: int,
+    page_baseline: Optional[int],
+    minimum: int,
+    render_config: Any,
+) -> RegionFontPolicy:
+    source_font = getattr(region, "source_font_size", None)
+    if source_font is None:
+        source_font = int(getattr(region, "font_size", 0) or 0)
+        region.source_font_size = source_font
+
+    if is_preserved_region(region) and source_font and source_font > 0:
+        preferred_size = max(minimum, int(source_font))
+        consistency_floor = preferred_size
+        mild_compression_floor = preferred_size
+        return RegionFontPolicy(
+            region_target=preferred_size,
+            page_baseline=None,
+            preferred_size=preferred_size,
+            consistency_floor=consistency_floor,
+            mild_compression_floor=mild_compression_floor,
+            absolute_minimum=minimum,
+            hyphenation_trigger_size=preferred_size,
+            source_font_size=source_font,
+        )
+
+    if getattr(render_config, "font_size", None) is not None and render_config.font_size > 0:
+        preferred_size = max(minimum, int(render_config.font_size))
+        consistency_floor = max(minimum, preferred_size - PREFERRED_FONT_MAX_DROP_PX)
+        mild_compression_floor = max(minimum, int(round(preferred_size * 0.80)))
+        return RegionFontPolicy(
+            region_target=preferred_size,
+            page_baseline=page_baseline,
+            preferred_size=preferred_size,
+            consistency_floor=consistency_floor,
+            mild_compression_floor=mild_compression_floor,
+            absolute_minimum=minimum,
+            hyphenation_trigger_size=consistency_floor,
+            source_font_size=source_font,
+        )
+
+    offset = getattr(render_config, "font_size_offset", 0) or 0
+    region_target = max(minimum, adaptive_target + offset)
+
+    if page_baseline:
+        preferred_size = max(
+            region_target,
+            page_baseline,
+        )
+    else:
+        preferred_size = region_target
+
+    consistency_floor = max(
+        minimum,
+        preferred_size - PREFERRED_FONT_MAX_DROP_PX,
+        round(page_baseline * PAGE_FONT_FLOOR_RATIO) if page_baseline else minimum,
+    )
+    mild_compression_floor = max(
+        minimum,
+        round(preferred_size * 0.80),
+        round(page_baseline * 0.75) if page_baseline else minimum,
+    )
+    hyphenation_trigger_size = consistency_floor
+
+    return RegionFontPolicy(
+        region_target=region_target,
+        page_baseline=page_baseline,
+        preferred_size=preferred_size,
+        consistency_floor=consistency_floor,
+        mild_compression_floor=mild_compression_floor,
+        absolute_minimum=minimum,
+        hyphenation_trigger_size=hyphenation_trigger_size,
+        source_font_size=source_font,
+    )
 
 
 def _build_region_layout_plan(
@@ -3813,6 +4184,7 @@ def _build_region_layout_plan(
     top_k: int,
     zone_geometry_mask: Optional[np.ndarray] = None,
     lobe_graph: Optional[LobeGraph] = None,
+    page_font_baseline: Optional[int] = None,
 ) -> Optional[_RegionLayoutPlan]:
     text = (
         region.get_translation_for_rendering()
@@ -3828,28 +4200,23 @@ def _build_region_layout_plan(
         minimum = round(sum(image_shape) / 200)
     minimum = max(1, minimum)
 
-    source_font = getattr(region, "source_font_size", None)
-    if source_font is None:
-        source_font = int(getattr(region, "font_size", 0) or 0)
-        region.source_font_size = source_font
+    adaptive_target = _estimate_adaptive_font_size(interior, text, minimum)
+    effective_baseline = None if is_preserved_region(region) else page_font_baseline
 
-    if is_preserved_region(region) and source_font and source_font > 0:
-        calibrated_target = max(minimum, int(source_font))
-    elif render_cfg.font_size is not None and render_cfg.font_size > 0:
-        calibrated_target = max(minimum, int(render_cfg.font_size))
-    else:
-        # Two-stage calibration: calculate feasible translated font target directly from bubble interior
-        adaptive_target = _estimate_adaptive_font_size(interior, text, minimum)
-        offset = getattr(render_cfg, "font_size_offset", 0) or 0
-        calibrated_target = max(minimum, adaptive_target + offset)
+    font_policy = build_region_font_policy(
+        region=region,
+        adaptive_target=adaptive_target,
+        page_baseline=effective_baseline,
+        minimum=minimum,
+        render_config=render_cfg,
+    )
 
-    region.calibrated_font_size = calibrated_target
-    target = calibrated_target
+    region.calibrated_font_size = font_policy.preferred_size
+    target = font_policy.preferred_size
 
     fg, bg = fg_bg_compare(*region.get_font_colors())
     stroke_width = max(1, int(target * 0.07)) if bg is not None else 0
 
-    # If an explicit placement zone is provided, use it as the region's BubbleGeometry
     active_mask = zone_geometry_mask if zone_geometry_mask is not None and np.any(zone_geometry_mask) else interior
     geom = BubbleGeometry(active_mask)
     source_profile = build_original_layout_profile(region, interior)
@@ -3858,11 +4225,15 @@ def _build_region_layout_plan(
         y1, y2 = geom.y_offset, geom.y_offset + geom.shape[0]
         x1, x2 = geom.x_offset, geom.x_offset + geom.shape[1]
         zone_local = preferred_mask[y1:y2, x1:x2]
-    result = solve_layout(
+
+    # ---------------------------------------------------------
+    # Stage A — Preferred search (first preferred_size -> consistency_floor, then full search if needed)
+    # ---------------------------------------------------------
+    stage_a_result = solve_layout(
         geom=geom,
         words=text.split(),
-        font_size_max=target,
-        font_size_min=minimum,
+        font_size_max=font_policy.preferred_size,
+        font_size_min=font_policy.absolute_minimum,
         language=getattr(region, "target_lang", "en_US") or "en_US",
         hyphenate=False,
         line_spacing=render_cfg.line_spacing or 0.0,
@@ -3876,69 +4247,108 @@ def _build_region_layout_plan(
         is_single_region=(preferred_mask is None or not np.any(preferred_mask)),
         lobe_graph=lobe_graph,
     )
-    candidates = result if isinstance(result, list) else ([result] if result is not None else [])
-    if candidates:
-        normal = candidates[0]
-        normal_ratio = normal.font_size / float(max(1, target))
-        diagnostics: Dict[str, Any] = {
-            "calibrated_target": target,
-            "normal_font_size": normal.font_size,
-            "font_ratio": round(normal_ratio, 4),
-            "font_ratio_before_rescue": round(normal_ratio, 4),
-            "compression_severity": _compression_severity(normal_ratio),
-            "hyphenation_rescue_attempted": False,
-            "hyphenation_reason": "satisfactory_font_ratio",
-            "longest_word": None,
-            "longest_word_width": 0,
-            "max_usable_row_width": 0,
-            "word_pressure_ratio": 0.0,
-            "long_word_bottleneck": False,
-            "bottleneck_word": None,
-            "rescue_candidate_font_size": None,
-            "introduced_hyphen_count": 0,
-            "introduced_hyphen_words": [],
-        }
-        rescue = None
-        rescue_word = None
-        render_mode = getattr(region, "placement_mode", None)
-        is_bubble = render_mode is PlacementMode.BUBBLE or render_mode == PlacementMode.BUBBLE.value
+    candidates_a = stage_a_result if isinstance(stage_a_result, list) else ([stage_a_result] if stage_a_result is not None else [])
+    normal = candidates_a[0] if candidates_a else None
 
-        if normal_ratio < 0.90:
-            if getattr(render_cfg, "no_hyphenation", False):
-                diagnostics["hyphenation_reason"] = "disabled_by_config"
-            elif not is_bubble:
-                diagnostics["hyphenation_reason"] = "not_bubble_placement"
-            else:
-                normal_words = normalize_words(text.split())
-                pressure, bottleneck_index = _long_word_pressure(
-                    geom, normal_words, target, stroke_width, solver_margin
+    # Normal search outcome
+    normal_font_size = normal.font_size if normal else None
+    normal_ratio = (normal.font_size / float(max(1, font_policy.region_target))) if normal else None
+
+    diagnostics: Dict[str, Any] = {
+        "region_target": font_policy.region_target,
+        "region_geometric_target": font_policy.region_target,
+        "calibrated_target": font_policy.preferred_size,
+        "page_font_baseline": font_policy.page_baseline,
+        "page_baseline": font_policy.page_baseline,
+        "preferred_size": font_policy.preferred_size,
+        "consistency_floor": font_policy.consistency_floor,
+        "mild_compression_floor": font_policy.mild_compression_floor,
+        "absolute_minimum": font_policy.absolute_minimum,
+        "normal_font_size": normal_font_size,
+        "normal_ratio": round(normal_ratio, 4) if normal_ratio is not None else None,
+        "font_ratio": round(normal_ratio, 4) if normal_ratio is not None else None,
+        "font_ratio_before_rescue": round(normal_ratio, 4) if normal_ratio is not None else None,
+        "compression_from_page_ratio": round(
+            normal.font_size / float(max(1, font_policy.page_baseline)), 4
+        ) if font_policy.page_baseline and normal else None,
+        "compression_severity": _compression_severity(normal_ratio) if normal_ratio is not None else "infeasible",
+        "hyphenation_rescue_attempted": False,
+        "hyphenation_attempted": False,
+        "hyphenation_selected": False,
+        "hyphenation_rescue_selected": False,
+        "hyphenation_reason": "satisfactory_font_ratio" if normal is not None else "stage_a_failed",
+        "longest_word": None,
+        "longest_word_width": 0,
+        "max_usable_row_width": 0,
+        "word_pressure_ratio": 0.0,
+        "width_pressure_ratio": 0.0,
+        "long_word_bottleneck": False,
+        "bottleneck_word": None,
+        "rescue_candidate_font_size": None,
+        "rescue_font_size": None,
+        "final_font_size": normal.font_size if normal else None,
+        "introduced_hyphen_count": 0,
+        "introduced_hyphen_words": [],
+        "font_policy_status": "preferred" if normal is not None else "infeasible",
+    }
+
+    render_mode = getattr(region, "placement_mode", None)
+    is_bubble = render_mode is PlacementMode.BUBBLE or render_mode == PlacementMode.BUBBLE.value
+
+    # Evaluate if hyphenation rescue is needed or permitted
+    needs_rescue = (normal is None or normal.font_size < font_policy.hyphenation_trigger_size)
+    rescue = None
+    rescue_word = None
+    rescue_variant_obj = None
+
+    if needs_rescue:
+        if getattr(render_cfg, "no_hyphenation", False):
+            diagnostics["hyphenation_reason"] = "disabled_by_config"
+        elif not is_bubble:
+            diagnostics["hyphenation_reason"] = "not_bubble_placement"
+        elif is_preserved_region(region):
+            diagnostics["hyphenation_reason"] = "preserved_region"
+        else:
+            normal_words = normalize_words(text.split())
+            pressure, bottleneck_index = _long_word_pressure(
+                geom, normal_words, font_policy.preferred_size, stroke_width, solver_margin
+            )
+            diagnostics.update(pressure)
+            diagnostics["hyphenation_reason"] = "no_long_word_bottleneck"
+            if bottleneck_index is not None:
+                variants = _hyphenation_variants(
+                    normal_words, bottleneck_index,
+                    getattr(region, "target_lang", "en_US") or "en_US", font_policy.preferred_size,
+                    max_variants=3,
                 )
-                diagnostics.update(pressure)
-                diagnostics["hyphenation_reason"] = "no_long_word_bottleneck"
-                if bottleneck_index is not None:
-                    variant = _hyphenation_variant(
-                        normal_words, bottleneck_index,
-                        getattr(region, "target_lang", "en_US") or "en_US", target,
-                    )
-                    diagnostics["hyphenation_reason"] = "no_dictionary_breakpoint"
-                    if variant is not None:
-                        diagnostics["hyphenation_rescue_attempted"] = True
-                        diagnostics["hyphenation_reason"] = "long_word_width_bottleneck"
-                        rescue_word = normal_words[bottleneck_index]
-                        variant_widths, _ = _precompute_widths(variant, target)
-                        original_width = _precompute_widths([rescue_word], target)[0][0]
-                        parts_fit = max(variant_widths[bottleneck_index:bottleneck_index + 2], default=0) <= pressure["max_usable_row_width"]
+                single_var = _hyphenation_variant(
+                    normal_words, bottleneck_index,
+                    getattr(region, "target_lang", "en_US") or "en_US", font_policy.preferred_size,
+                )
+                if not single_var:
+                    variants = []
+                diagnostics["hyphenation_reason"] = "no_dictionary_breakpoint"
+                if variants:
+                    diagnostics["hyphenation_rescue_attempted"] = True
+                    diagnostics["hyphenation_attempted"] = True
+                    diagnostics["hyphenation_reason"] = "long_word_width_bottleneck"
+                    rescue_word = normal_words[bottleneck_index]
+
+                    best_rescue_cand = None
+                    best_rescue_variant = None
+
+                    for v_obj in variants:
+                        variant = v_obj.words
+                        variant_widths, _ = _precompute_widths(variant, font_policy.preferred_size)
+                        original_width = _precompute_widths([rescue_word], font_policy.preferred_size)[0][0]
                         materially_narrower = max(variant_widths[bottleneck_index:bottleneck_index + 2], default=original_width) < original_width
-                        can_reach_gain = (
-                            target / float(max(1, normal.font_size)) >= 1.08
-                            or normal_ratio < 0.85
-                        )
-                        if parts_fit and materially_narrower and can_reach_gain:
-                            rescue_result = solve_layout(
+
+                        if materially_narrower:
+                            v_res = solve_layout(
                                 geom=geom,
                                 words=variant,
-                                font_size_max=target,
-                                font_size_min=max(minimum, target - 3),
+                                font_size_max=font_policy.preferred_size,
+                                font_size_min=max(font_policy.absolute_minimum, font_policy.consistency_floor - 3),
                                 language=getattr(region, "target_lang", "en_US") or "en_US",
                                 hyphenate=False,
                                 line_spacing=render_cfg.line_spacing or 0.0,
@@ -3953,49 +4363,89 @@ def _build_region_layout_plan(
                                 lobe_graph=lobe_graph,
                                 forced_break_after=bottleneck_index,
                             )
-                            rescue = rescue_result[0] if isinstance(rescue_result, list) and rescue_result else (
-                                rescue_result if isinstance(rescue_result, LayoutCandidate) else None
+                            cand = v_res[0] if isinstance(v_res, list) and v_res else (
+                                v_res if isinstance(v_res, LayoutCandidate) else None
                             )
-                        if rescue is not None:
-                            diagnostics["rescue_candidate_font_size"] = rescue.font_size
-                            rescue_gain = rescue.font_size / float(max(1, normal.font_size))
-                            diagnostics["font_gain_ratio"] = round(rescue_gain, 4)
-                            meaningful = (
-                                rescue_gain >= 1.08
-                                or (normal_ratio < 0.85 and rescue.font_size >= target * 0.92)
-                            )
-                            if meaningful:
-                                diagnostics["hyphenation_reason"] = "long_word_width_bottleneck"
-                                rescue.qa.update(diagnostics)
-                                rescue.qa["hyphenation_rescue_selected"] = True
-                                rescue.qa["final_font_size"] = rescue.font_size
-                                rescue.qa["font_ratio_after_rescue"] = round(
-                                    rescue.font_size / float(max(1, target)), 4
-                                )
-                                rescue.qa["introduced_hyphen_count"] = 1
-                                rescue.qa["introduced_hyphen_words"] = [rescue_word]
-                                # Keep the accepted font-gain decision separate from the normal composite score.
-                                rescue.penalty = min(rescue.penalty, normal.penalty - 1e-3)
-                                candidates.insert(0, rescue)
-                                del candidates[top_k:]
-                            else:
-                                diagnostics["hyphenation_reason"] = "insufficient_font_gain"
-                        else:
-                            diagnostics["hyphenation_reason"] = "no_valid_rescue_layout"
-                elif diagnostics["long_word_bottleneck"]:
-                    diagnostics["hyphenation_reason"] = "no_hyphenatable_bottleneck"
+                            if cand is not None:
+                                if best_rescue_cand is None or cand.font_size > best_rescue_cand.font_size or (
+                                    cand.font_size == best_rescue_cand.font_size and len(cand.lines) < len(best_rescue_cand.lines)
+                                ) or (
+                                    cand.font_size == best_rescue_cand.font_size and len(cand.lines) == len(best_rescue_cand.lines) and cand.penalty < best_rescue_cand.penalty
+                                ):
+                                    best_rescue_cand = cand
+                                    best_rescue_variant = v_obj
 
-        for candidate in candidates:
-            if candidate is rescue and candidate.qa.get("hyphenation_rescue_selected"):
-                continue
-            candidate.qa.update(diagnostics)
-            candidate.qa["hyphenation_rescue_selected"] = False
-            candidate.qa["final_font_size"] = candidate.font_size
-            candidate.qa["font_ratio_after_rescue"] = round(
-                candidate.font_size / float(max(1, target)), 4
-            )
-            candidate.qa["introduced_hyphen_count"] = 0
-            candidate.qa["introduced_hyphen_words"] = []
+                    rescue = best_rescue_cand
+                    rescue_variant_obj = best_rescue_variant
+
+                    if rescue is not None:
+                        diagnostics["rescue_candidate_font_size"] = rescue.font_size
+                        diagnostics["rescue_font_size"] = rescue.font_size
+                        rescue_gain = (
+                            rescue.font_size / float(max(1, normal.font_size))
+                            if normal else None
+                        )
+                        diagnostics["font_gain_ratio"] = round(rescue_gain, 4) if rescue_gain is not None else None
+                        gain_px = (rescue.font_size - normal.font_size) if normal else rescue.font_size
+                        
+                        meaningful = (
+                            normal is None
+                            or (gain_px >= HYPHEN_MIN_GAIN_PX and (rescue_gain >= HYPHEN_MIN_GAIN_RATIO or rescue.font_size >= font_policy.consistency_floor))
+                        )
+                        if meaningful:
+                            diagnostics["hyphenation_reason"] = "long_word_width_bottleneck"
+                            diagnostics["hyphenation_selected"] = True
+                            diagnostics["hyphenation_rescue_selected"] = True
+                            diagnostics["final_font_size"] = rescue.font_size
+                            diagnostics["font_policy_status"] = "hyphen_rescue"
+                        else:
+                            diagnostics["hyphenation_reason"] = "insufficient_font_gain"
+                    else:
+                        diagnostics["hyphenation_reason"] = "no_valid_rescue_layout"
+            elif diagnostics["long_word_bottleneck"]:
+                diagnostics["hyphenation_reason"] = "no_hyphenatable_bottleneck"
+
+    candidates: List[LayoutCandidate] = []
+    if rescue is not None and diagnostics["hyphenation_rescue_selected"]:
+        rescue.qa.update(diagnostics)
+        rescue.qa["hyphenation_rescue_selected"] = True
+        rescue.qa["hyphenation_selected"] = True
+        rescue.qa["final_font_size"] = rescue.font_size
+        rescue.qa["font_policy_status"] = "hyphen_rescue"
+        rescue.qa["font_ratio_after_rescue"] = round(
+            rescue.font_size / float(max(1, target)), 4
+        )
+        rescue.qa["introduced_hyphen_count"] = 1
+        rescue.qa["introduced_hyphen_words"] = [rescue_word]
+        if normal is not None:
+            rescue.penalty = min(rescue.penalty, normal.penalty - 1e-3)
+        candidates.append(rescue)
+    elif normal is not None:
+        candidates = list(candidates_a)
+        if normal.font_size >= font_policy.consistency_floor:
+            diagnostics["font_policy_status"] = "preferred"
+        elif normal.font_size >= font_policy.mild_compression_floor:
+            diagnostics["font_policy_status"] = "mild_compression"
+        else:
+            diagnostics["font_policy_status"] = "emergency_compression"
+        diagnostics["final_font_size"] = normal.font_size
+
+    for candidate in candidates:
+        if candidate is rescue and candidate.qa.get("hyphenation_rescue_selected"):
+            continue
+        candidate.qa.update(diagnostics)
+        candidate.qa["hyphenation_rescue_selected"] = False
+        candidate.qa["hyphenation_selected"] = False
+        candidate.qa["final_font_size"] = candidate.font_size
+        candidate.qa["font_ratio_after_rescue"] = round(
+            candidate.font_size / float(max(1, target)), 4
+        )
+        candidate.qa["introduced_hyphen_count"] = 0
+        candidate.qa["introduced_hyphen_words"] = []
+
+    # Store policy diagnostics on region
+    region._font_policy_diagnostics = dict(diagnostics)
+
     return _RegionLayoutPlan(
         region=region,
         text=text,
@@ -4065,6 +4515,7 @@ def _apply_layout_candidate(
             "introduced_hyphen_words",
         ) if key in candidate.qa
     }
+    region._font_policy_diagnostics = dict(getattr(region, "_font_policy_diagnostics", {}) or candidate.qa)
     if layout_debug and "calibrated_target" in candidate.qa:
         qa = candidate.qa
         logger.info(
@@ -4303,6 +4754,19 @@ def apply_shape_aware_bubble_layout(
         if getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
     ]
     bubble_groups = _shared_bubble_groups(bubble_regions)
+    minimum = render_cfg.font_size_minimum
+    if minimum == -1:
+        minimum = round(sum(img.shape[:2]) / 200)
+    minimum = max(1, minimum)
+    page_font_baseline = (
+        _page_dialogue_font_baseline(bubble_groups, minimum)
+        if render_cfg.font_size is None or render_cfg.font_size <= 0 else None
+    )
+    if page_font_baseline is not None:
+        page_font_baseline = max(
+            minimum,
+            page_font_baseline + (getattr(render_cfg, "font_size_offset", 0) or 0),
+        )
 
     if legacy_only:
         unplaced_regions.extend(regions)
@@ -4345,6 +4809,7 @@ def apply_shape_aware_bubble_layout(
                 preferred_mask=zone_mask if len(active) > 1 else None,
                 top_k=_JOINT_CANDIDATE_COUNT if len(active) > 1 else 1,
                 zone_geometry_mask=zone_mask if len(active) > 1 else None,
+                page_font_baseline=page_font_baseline,
             )
             if plan is not None:
                 plans.append(plan)
@@ -4380,7 +4845,9 @@ def apply_shape_aware_bubble_layout(
             inpaint_mask = getattr(ctx, "mask_raw", None)
         if inpaint_mask is None:
             inpaint_mask = getattr(ctx, "mask", None)
-        free_zones = build_free_text_ownership_zones(free_regions, obstacles, inpaint_mask=inpaint_mask)
+        free_zones = build_free_text_ownership_zones(
+            free_regions, obstacles, inpaint_mask=inpaint_mask, image=img, other_regions=regions
+        )
         free_plans: Dict[int, List[LayoutCandidate]] = {}
         free_profiles: Dict[int, OriginalLayoutProfile] = {}
         for region in free_regions:
@@ -4395,7 +4862,7 @@ def apply_shape_aware_bubble_layout(
                 image_shape=img.shape[:2],
                 solver_margin=solver_margin,
                 solver_max_y_trials=solver_max_y_trials,
-                allow_early_accept=(len(free_regions) == 1),
+                allow_early_accept=True,
                 shadow_compare=bool(getattr(ctx, "_layout_shadow_compare", False)),
             )
             if result is None:
@@ -4403,13 +4870,42 @@ def apply_shape_aware_bubble_layout(
                 region._solver_status = "no_valid_layout"
                 region._solver_qa = {
                     "placement_mode": PlacementMode.FREE_TEXT.value,
-                    "hard_constraints": ["bubble_mask", "ownership_zone", "page_bounds", "other_text"],
+                    "hard_constraints": ["bubble_mask", "ownership_zone", "page_bounds", "other_text", "panel_bounds"],
+                    "panel_constraint": _panel_constraint_diagnostics(ft_zone.panel_constraint),
                 }
                 region._render_suppressed = True
                 continue
             candidate, profile, _qa = result
             free_plans[id(region)] = getattr(region, "_free_text_candidate_pool", [candidate])
             free_profiles[id(region)] = profile
+
+        if len(free_regions) > 1:
+            conflict_ids = _free_text_fast_conflict_regions(free_regions, free_plans, img.shape[:2])
+            for region in free_regions:
+                if id(region) not in conflict_ids:
+                    continue
+                ft_zone = free_zones.get(id(region))
+                if ft_zone is None:
+                    continue
+                result = _solve_free_text_region(
+                    region=region,
+                    zone=ft_zone,
+                    obstacles=obstacles,
+                    config=config,
+                    image_shape=img.shape[:2],
+                    solver_margin=solver_margin,
+                    solver_max_y_trials=solver_max_y_trials,
+                    allow_early_accept=False,
+                    shadow_compare=False,
+                    force_exhaustive=True,
+                )
+                if result is None:
+                    free_plans.pop(id(region), None)
+                    free_profiles.pop(id(region), None)
+                    continue
+                candidate, profile, _qa = result
+                free_plans[id(region)] = getattr(region, "_free_text_candidate_pool", [candidate])
+                free_profiles[id(region)] = profile
 
         chosen_free = _select_free_text_joint_candidates(
             free_regions, free_plans, img.shape[:2], free_profiles=free_profiles
@@ -4422,6 +4918,13 @@ def apply_shape_aware_bubble_layout(
                     region._solver_path = "free_text"
                     region._solver_status = "no_joint_layout"
                     region._render_suppressed = True
+                    region._solver_qa = {
+                        "placement_mode": PlacementMode.FREE_TEXT.value,
+                        "hard_constraints": ["bubble_mask", "ownership_zone", "page_bounds", "other_text", "panel_bounds"],
+                        "panel_constraint": _panel_constraint_diagnostics(
+                            getattr(region, "_panel_constraint", None)
+                        ),
+                    }
                 continue
             if not _apply_free_text_candidate(
                 region, candidate, profile, config, img.shape[:2], layout_debug=layout_debug
@@ -4429,6 +4932,13 @@ def apply_shape_aware_bubble_layout(
                 region._solver_path = "free_text"
                 region._solver_status = "rasterization_failed"
                 region._render_suppressed = True
+                region._solver_qa = {
+                    "placement_mode": PlacementMode.FREE_TEXT.value,
+                    "hard_constraints": ["bubble_mask", "ownership_zone", "page_bounds", "other_text", "panel_bounds"],
+                    "panel_constraint": _panel_constraint_diagnostics(
+                        getattr(region, "_panel_constraint", None)
+                    ),
+                }
 
         for region in free_regions:
             logger.info(
@@ -4470,6 +4980,7 @@ def apply_shape_aware_bubble_layout(
             font_path=active_font,
             render_config=render_cfg,
             group=group_regions,
+            page_target_font=page_font_baseline,
         )
         by_id = {
             str(getattr(r, "region_id", "")): r

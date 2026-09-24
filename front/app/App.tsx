@@ -78,6 +78,7 @@ import {
   fetchServerBatch,
   fetchServerBatches,
   getBatchKind,
+  mergeServerBatchDetails,
   mergeServerBatches,
   subscribeServerBatches,
   removeBatchItem,
@@ -991,15 +992,15 @@ export const App: React.FC = () => {
           }
         }, () => console.warn("Batch event stream disconnected; retrying..."), (serverBatch) => {
           const optimisticTranslator = optimisticBatchTranslatorsRef.current.get(serverBatch.id);
-          const detailed = toTranslationBatch(serverBatch);
-          const updated = optimisticTranslator && optimisticTranslator !== serverBatch.settings.translator
-            ? { ...detailed, settings: { ...detailed.settings, translator: optimisticTranslator } }
-            : detailed;
-          setTranslationBatches((current) => current.map((batch) =>
-            batch.id === serverBatch.id && (
+          setTranslationBatches((current) => current.map((batch) => {
+            if (batch.id !== serverBatch.id || !(
               batch.detailsLoaded || batch.items.length > 0 || serverBatch.status === "completed"
-            ) ? updated : batch
-          ));
+            )) return batch;
+            const detailed = mergeServerBatchDetails(batch, serverBatch);
+            return optimisticTranslator && optimisticTranslator !== serverBatch.settings.translator
+              ? { ...detailed, settings: { ...detailed.settings, translator: optimisticTranslator } }
+              : detailed;
+          }));
         });
       }
     };
@@ -1932,16 +1933,12 @@ export const App: React.FC = () => {
     galleryPageCacheRef.current.clear();
     const folders = [...new Set(images.map((img) => img.folder).filter(Boolean) as string[])];
     if (folders.length > 0) {
-      try {
-        const response = await fetch(apiUrl("/api/results/batch-delete"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ folders }),
-        });
-        if (!response.ok) console.warn(`Failed to batch delete results (${response.status})`);
-      } catch (err) {
-        console.warn("Failed to batch delete results:", err);
-      }
+      const response = await fetch(apiUrl("/api/results/batch-delete"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folders }),
+      });
+      if (!response.ok) throw new Error(`Could not delete selected pages (${response.status}).`);
     }
     const deletedIds = new Set(images.map((img) => img.id));
     const titleCounts = new Map<string, number>();

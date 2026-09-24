@@ -1,11 +1,13 @@
 import os
 import sys
 import unittest
+import asyncio
 import numpy as np
 import cv2
 from PIL import ImageFont
 from shapely.geometry import Polygon
 from shapely import affinity
+from unittest.mock import AsyncMock
 
 # Add repository root to sys.path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -14,8 +16,9 @@ if repo_root not in sys.path:
 
 from manga_translator.utils import TextBlock, rotate_polygons
 from manga_translator.rendering import text_render
-from manga_translator.rendering import resize_regions_to_font_size, render
+from manga_translator.rendering import resize_regions_to_font_size, render, render_page
 from manga_translator.rendering.ballon_extractor import safe_ballon_bounds
+from manga_translator.config import Config, Renderer
 from manga_translator.rendering.text_render_pillow_eng import merge_seg_eng
 
 class TestRenderMitigations(unittest.TestCase):
@@ -369,6 +372,108 @@ class TestRenderMitigations(unittest.TestCase):
         # Rendered output contains rendered text pixels and differs from original
         self.assertFalse(np.array_equal(output[selected > 0], original[selected > 0]))
         self.assertTrue(all(getattr(region, "review_required", False) for region in regions))
+
+    def _render_lifecycle_fixture(self, region):
+        original = np.zeros((40, 40, 3), dtype=np.uint8)
+        original[10:30, 10:30] = (0, 0, 255)
+        inpainted = np.full_like(original, 255)
+        ctx = type("RenderContext", (), {})()
+        ctx.img_rgb = original
+        ctx.img_inpainted = inpainted
+        ctx.text_regions = [region]
+        ctx.render_mask = None
+        config = Config()
+        config.render.renderer = Renderer.default
+        return ctx, config, original
+
+    def _lifecycle_region(self, translation="TRANSLATED", region_id="lifecycle"):
+        return TextBlock(
+            lines=[[[10, 10], [30, 10], [30, 30], [10, 30]]],
+            texts=["原文"],
+            translation=translation,
+            font_size=12,
+            target_lang="ENG",
+            region_id=region_id,
+        )
+
+    def test_render_page_restores_suppressed_free_text_without_dispatching_it(self):
+        region = self._lifecycle_region()
+        region._render_suppressed = True
+        ctx, config, original = self._render_lifecycle_fixture(region)
+        draw = AsyncMock(side_effect=lambda canvas, regions, *args, **kwargs: canvas)
+
+        with unittest.mock.patch("manga_translator.rendering.dispatch", draw):
+            output = asyncio.run(render_page(ctx, config))
+
+        draw.assert_awaited_once()
+        self.assertEqual(draw.await_args.args[1], [])
+        np.testing.assert_array_equal(output[10:30, 10:30], original[10:30, 10:30])
+
+    def test_render_page_keeps_suppressed_bubble_source_and_never_draws_translation(self):
+        region = self._lifecycle_region(region_id="suppressed-bubble")
+        region._render_suppressed = True
+        region._bubble_restore = np.zeros((40, 40), dtype=np.uint8)
+        region._bubble_restore[10:30, 10:30] = 1
+        ctx, config, original = self._render_lifecycle_fixture(region)
+        draw = AsyncMock(side_effect=lambda canvas, regions, *args, **kwargs: canvas)
+
+        with unittest.mock.patch("manga_translator.rendering.dispatch", draw):
+            output = asyncio.run(render_page(ctx, config))
+
+        self.assertEqual(draw.await_args.args[1], [])
+        np.testing.assert_array_equal(output[10:30, 10:30], original[10:30, 10:30])
+
+    def test_render_page_still_draws_review_required_legacy_fallback(self):
+        region = self._lifecycle_region(region_id="review-fallback")
+        region.review_required = True
+        region._render_suppressed = False
+        ctx, config, _original = self._render_lifecycle_fixture(region)
+
+        async def draw(canvas, regions, *args, **kwargs):
+            self.assertEqual(regions, [region])
+            canvas[15, 15] = (0, 255, 0)
+            return canvas
+
+        with unittest.mock.patch("manga_translator.rendering.dispatch", AsyncMock(side_effect=draw)) as mocked:
+            output = asyncio.run(render_page(ctx, config))
+
+        self.assertEqual(mocked.await_count, 1)
+        np.testing.assert_array_equal(output[15, 15], (0, 255, 0))
+
+    def test_render_page_restores_untranslated_review_region(self):
+        region = self._lifecycle_region(translation="", region_id="untranslated-review")
+        region.review_required = True
+        ctx, config, original = self._render_lifecycle_fixture(region)
+        draw = AsyncMock(side_effect=lambda canvas, regions, *args, **kwargs: canvas)
+
+        with unittest.mock.patch("manga_translator.rendering.dispatch", draw):
+            output = asyncio.run(render_page(ctx, config))
+
+        self.assertEqual(draw.await_args.args[1], [])
+        np.testing.assert_array_equal(output[10:30, 10:30], original[10:30, 10:30])
+
+    def test_render_page_renders_frozen_free_text_once(self):
+        region = self._lifecycle_region(region_id="frozen-free-text")
+        region._layout_frozen = True
+        region.layout_segments = [{"x": 10, "y": 10, "width": 20, "height": 20, "lines": []}]
+        ctx, config, _original = self._render_lifecycle_fixture(region)
+        dispatch_mock = AsyncMock(side_effect=lambda canvas, regions, *args, **kwargs: canvas)
+        frozen_calls = []
+
+        def draw_frozen(canvas, rendered_region, _font):
+            frozen_calls.append(rendered_region)
+            canvas[15, 15] = (255, 0, 0)
+            return canvas
+
+        with (
+            unittest.mock.patch("manga_translator.rendering.dispatch", dispatch_mock),
+            unittest.mock.patch("manga_translator.rendering._render_frozen_region", draw_frozen),
+        ):
+            output = asyncio.run(render_page(ctx, config))
+
+        self.assertEqual(dispatch_mock.await_args.args[1], [])
+        self.assertEqual(frozen_calls, [region])
+        np.testing.assert_array_equal(output[15, 15], (255, 0, 0))
 
     def test_speech_bubble_blank_space_utilization_and_ellipse_containment(self):
         """Verify that text rendered into a tall speech bubble makes good use of blank space and fits elliptical bounds."""
