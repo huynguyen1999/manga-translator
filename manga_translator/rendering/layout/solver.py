@@ -33,6 +33,7 @@ from ..bubble_layout import (
     render_positioned_lines,
 )
 from ...geometry.bubbles import PageGeometry, prepare_page_geometry
+from ...utils import is_preserved_region
 from .geometry import (
     BubbleGeometry,
     build_lobe_graph,
@@ -508,19 +509,22 @@ def solve_layout(
     top_k: int = 1,
     is_single_region: bool = True,
     lobe_graph: Optional["LobeGraph"] = None,
+    forced_break_after: Optional[int] = None,
 ) -> Union[Optional[LayoutCandidate], List[LayoutCandidate]]:
     """Generate and rank layout candidates; return one or the best ``top_k``.
 
     The mask determines *where text may exist* (hard validation); language,
     typography, and the original page's layout profile shape the soft score.
     ``hyphenate`` is accepted for API compatibility — normalized words are
-    treated as atomic and hyphenation is never introduced by the DP.
+    treated as atomic unless an explicit rescue break is supplied.
     """
     if not words:
         return None
 
     # Phase 2: repair OCR hyphen splits so ordinary words are atomic.
-    norm_words = normalize_words(words)
+    norm_words = list(words) if forced_break_after is not None else normalize_words(words)
+    if forced_break_after is not None and not 0 <= forced_break_after < len(norm_words) - 1:
+        return None
 
     if line_spacing_options is None:
         line_spacing_options = [line_spacing]
@@ -638,6 +642,7 @@ def solve_layout(
                     zone_profile=zone_profile,
                     max_per_bucket=2,
                     row_slot_table=row_slot_table,
+                    forced_break_after=forced_break_after,
                 )
                 prof.dp_search_ms += (perf_counter() - t_dp0) * 1000.0
                 if not cand_wrappings:
@@ -666,6 +671,7 @@ def solve_layout(
                                 zone_profile=zone_profile,
                                 max_per_bucket=2,
                                 row_slot_table=row_slot_table,
+                                forced_break_after=forced_break_after,
                             )
                             prof.dp_search_ms += (perf_counter() - t_dp0) * 1000.0
                             if cand_wrappings:
@@ -968,6 +974,7 @@ def _try_placement_rows(
     zone_profile: Optional[ZoneShapeProfile] = None,
     max_per_bucket: int = 2,
     row_slot_table: Optional[Dict[int, List[BandSlot]]] = None,
+    forced_break_after: Optional[int] = None,
 ) -> List[List[PlacedLine]]:
     _, y1, _, y2 = geom.safe_bounding_box(font_size, stroke_width, margin)
     if y2 <= y1:
@@ -994,6 +1001,7 @@ def _try_placement_rows(
         words, word_widths, space_w, rows, font_size,
         max_per_bucket=max_per_bucket, zone_profile=zone_profile,
         normal_gap=max(0, line_h - font_size),
+        forced_break_after=forced_break_after,
     )
 
 
@@ -1157,6 +1165,7 @@ def _dp_word_break_rows(
     max_per_bucket: int = 2,
     zone_profile: Optional[ZoneShapeProfile] = None,
     normal_gap: int = 0,
+    forced_break_after: Optional[int] = None,
 ) -> List[List[PlacedLine]]:
     """Break words into a continuous paragraph stack across the safe rows.
 
@@ -1233,6 +1242,8 @@ def _dp_word_break_rows(
             slot_w = slot.width
             run_w = 0
             for end in range(wi + 1, nw + 1):
+                if forced_break_after is not None and wi <= forced_break_after < end - 1:
+                    break
                 if end > wi + 1:
                     run_w += space_w
                 run_w += word_widths[end - 1]
@@ -3310,6 +3321,86 @@ def _choose_joint_layout(
     return best[1] if best is not None and math.isfinite(best[0]) else None
 
 
+def _compression_severity(font_ratio: float) -> str:
+    if font_ratio >= 0.90:
+        return "satisfactory"
+    return "mild" if font_ratio >= 0.85 else "substantial"
+
+
+def _long_word_pressure(
+    geom: BubbleGeometry,
+    words: List[str],
+    font_size: int,
+    stroke_width: int,
+    margin: float,
+) -> Tuple[Dict[str, Any], Optional[int]]:
+    widths, _ = _precompute_widths(words, font_size)
+    slots = _build_row_slot_table(
+        geom, font_size, stroke_width, margin, min_width=max(font_size, 8)
+    )
+    max_row_width = max((slot.width for row in slots.values() for slot in row), default=0)
+    longest_index = max(range(len(words)), key=lambda i: widths[i], default=None)
+    longest_width = widths[longest_index] if longest_index is not None else 0
+    bottlenecks = [
+        i for i, (word, width) in enumerate(zip(words, widths))
+        if len(word) > 6 and width > max_row_width
+    ]
+    split_candidates = [
+        i for i in bottlenecks
+        if re.fullmatch(r"[A-Za-z]{7,}[.,!?;:…'\"”’)]*", words[i])
+    ]
+    bottleneck_index = max(split_candidates, key=lambda i: widths[i], default=None)
+    pressured_width = max((widths[i] for i in bottlenecks), default=0)
+    return ({
+        "longest_word": words[longest_index] if longest_index is not None else "",
+        "longest_word_width": longest_width,
+        "max_usable_row_width": max_row_width,
+        "word_pressure_ratio": round(pressured_width / max_row_width, 4) if max_row_width else 0.0,
+        "long_word_bottleneck": bool(bottlenecks),
+        "bottleneck_word": words[bottleneck_index] if bottleneck_index is not None else (
+            words[max(bottlenecks, key=lambda i: widths[i])] if bottlenecks else None
+        ),
+    }, bottleneck_index)
+
+
+def _hyphenation_variant(
+    words: List[str],
+    word_index: int,
+    language: str,
+    font_size: int,
+) -> Optional[List[str]]:
+    match = re.fullmatch(r"([A-Za-z]{7,})([.,!?;:…'\"”’)]*)", words[word_index])
+    if not match:
+        return None
+    word, punctuation = match.groups()
+    hyphenator = text_render.select_hyphenator(language)
+    if hyphenator is None:
+        return None
+    try:
+        syllables = hyphenator.syllables(word.lower())
+    except Exception:
+        return None
+    if len(syllables) < 2 or "".join(syllables).lower() != word.lower():
+        return None
+
+    split_points = []
+    offset = 0
+    for syllable in syllables[:-1]:
+        offset += len(syllable)
+        if offset >= 3 and len(word) - offset >= 3:
+            split_points.append(offset)
+    if not split_points:
+        return None
+
+    variants = []
+    for split in split_points:
+        left, right = word[:split] + "-", word[split:] + punctuation
+        widths, _ = _precompute_widths([left, right], font_size)
+        variants.append((max(widths), abs(widths[0] - widths[1]), split, left, right))
+    _, _, _, left, right = min(variants)
+    return words[:word_index] + [left, right] + words[word_index + 1:]
+
+
 def _build_region_layout_plan(
     region: Any,
     interior: np.ndarray,
@@ -3341,7 +3432,9 @@ def _build_region_layout_plan(
         source_font = int(getattr(region, "font_size", 0) or 0)
         region.source_font_size = source_font
 
-    if render_cfg.font_size is not None and render_cfg.font_size > 0:
+    if is_preserved_region(region) and source_font and source_font > 0:
+        calibrated_target = max(minimum, int(source_font))
+    elif render_cfg.font_size is not None and render_cfg.font_size > 0:
         calibrated_target = max(minimum, int(render_cfg.font_size))
     else:
         # Two-stage calibration: calculate feasible translated font target directly from bubble interior
@@ -3383,6 +3476,116 @@ def _build_region_layout_plan(
         lobe_graph=lobe_graph,
     )
     candidates = result if isinstance(result, list) else ([result] if result is not None else [])
+    if candidates:
+        normal = candidates[0]
+        normal_ratio = normal.font_size / float(max(1, target))
+        diagnostics: Dict[str, Any] = {
+            "calibrated_target": target,
+            "normal_font_size": normal.font_size,
+            "font_ratio": round(normal_ratio, 4),
+            "font_ratio_before_rescue": round(normal_ratio, 4),
+            "compression_severity": _compression_severity(normal_ratio),
+            "hyphenation_rescue_attempted": False,
+            "hyphenation_reason": "satisfactory_font_ratio",
+            "longest_word": None,
+            "longest_word_width": 0,
+            "max_usable_row_width": 0,
+            "word_pressure_ratio": 0.0,
+            "long_word_bottleneck": False,
+            "bottleneck_word": None,
+            "rescue_candidate_font_size": None,
+            "introduced_hyphen_count": 0,
+            "introduced_hyphen_words": [],
+        }
+        rescue = None
+        rescue_word = None
+        render_mode = getattr(region, "placement_mode", None)
+        is_bubble = render_mode is PlacementMode.BUBBLE or render_mode == PlacementMode.BUBBLE.value
+
+        if normal_ratio < 0.90:
+            if getattr(render_cfg, "no_hyphenation", False):
+                diagnostics["hyphenation_reason"] = "disabled_by_config"
+            elif not is_bubble:
+                diagnostics["hyphenation_reason"] = "not_bubble_placement"
+            else:
+                normal_words = normalize_words(text.split())
+                pressure, bottleneck_index = _long_word_pressure(
+                    geom, normal_words, target, stroke_width, solver_margin
+                )
+                diagnostics.update(pressure)
+                diagnostics["hyphenation_reason"] = "no_long_word_bottleneck"
+                if bottleneck_index is not None:
+                    variant = _hyphenation_variant(
+                        normal_words, bottleneck_index,
+                        getattr(region, "target_lang", "en_US") or "en_US", target,
+                    )
+                    diagnostics["hyphenation_reason"] = "no_dictionary_breakpoint"
+                    if variant is not None:
+                        diagnostics["hyphenation_rescue_attempted"] = True
+                        diagnostics["hyphenation_reason"] = "long_word_width_bottleneck"
+                        rescue_word = normal_words[bottleneck_index]
+                        rescue_result = solve_layout(
+                            geom=geom,
+                            words=variant,
+                            font_size_max=target,
+                            font_size_min=max(minimum, target - 3),
+                            language=getattr(region, "target_lang", "en_US") or "en_US",
+                            hyphenate=False,
+                            line_spacing=render_cfg.line_spacing or 0.0,
+                            stroke_width=stroke_width,
+                            margin=solver_margin,
+                            y_origin_step=max(2, target // 8),
+                            max_y_origin_trials=solver_max_y_trials,
+                            source_profile=source_profile,
+                            preferred_mask=zone_local,
+                            top_k=1,
+                            is_single_region=(preferred_mask is None or not np.any(preferred_mask)),
+                            lobe_graph=lobe_graph,
+                            forced_break_after=bottleneck_index,
+                        )
+                        rescue = rescue_result[0] if isinstance(rescue_result, list) and rescue_result else (
+                            rescue_result if isinstance(rescue_result, LayoutCandidate) else None
+                        )
+                        if rescue is not None:
+                            diagnostics["rescue_candidate_font_size"] = rescue.font_size
+                            rescue_gain = rescue.font_size / float(max(1, normal.font_size))
+                            diagnostics["font_gain_ratio"] = round(rescue_gain, 4)
+                            meaningful = (
+                                rescue_gain >= 1.08
+                                or (normal_ratio < 0.85 and rescue.font_size >= target * 0.92)
+                            )
+                            if meaningful:
+                                diagnostics["hyphenation_reason"] = "long_word_width_bottleneck"
+                                rescue.qa.update(diagnostics)
+                                rescue.qa["hyphenation_rescue_selected"] = True
+                                rescue.qa["final_font_size"] = rescue.font_size
+                                rescue.qa["font_ratio_after_rescue"] = round(
+                                    rescue.font_size / float(max(1, target)), 4
+                                )
+                                rescue.qa["introduced_hyphen_count"] = 1
+                                rescue.qa["introduced_hyphen_words"] = [rescue_word]
+                                # Keep the accepted font-gain decision separate from the normal composite score.
+                                rescue.penalty = min(rescue.penalty, normal.penalty - 1e-3)
+                                candidates.insert(0, rescue)
+                                del candidates[top_k:]
+                            else:
+                                diagnostics["hyphenation_reason"] = "insufficient_font_gain"
+                        else:
+                            diagnostics["hyphenation_reason"] = "no_valid_rescue_layout"
+                elif diagnostics["long_word_bottleneck"]:
+                    diagnostics["hyphenation_reason"] = "no_hyphenatable_bottleneck"
+
+        for candidate in candidates:
+            if candidate is rescue and candidate.qa.get("hyphenation_rescue_selected"):
+                continue
+            candidate.qa.update(diagnostics)
+            candidate.qa["hyphenation_rescue_selected"] = False
+            candidate.qa["final_font_size"] = candidate.font_size
+            candidate.qa["font_ratio_after_rescue"] = round(
+                candidate.font_size / float(max(1, target)), 4
+            )
+            candidate.qa["introduced_hyphen_count"] = 0
+            candidate.qa["introduced_hyphen_words"] = []
     return _RegionLayoutPlan(
         region=region,
         text=text,
@@ -3400,6 +3603,7 @@ def _apply_layout_candidate(
     plan: _RegionLayoutPlan,
     candidate: LayoutCandidate,
     image_shape: Tuple[int, int],
+    layout_debug: bool = False,
 ) -> bool:
     region = plan.region
     all_x1 = min(line.x for line in candidate.lines)
@@ -3438,6 +3642,31 @@ def _apply_layout_candidate(
     region._solver_score = candidate.penalty
     region._solver_status = candidate.status
     region._solver_qa = candidate.qa
+    region._hyphenation_diagnostics = {
+        key: candidate.qa[key]
+        for key in (
+            "calibrated_target", "normal_font_size", "font_ratio",
+            "font_ratio_before_rescue", "font_ratio_after_rescue",
+            "compression_severity", "longest_word", "longest_word_width",
+            "max_usable_row_width", "word_pressure_ratio", "long_word_bottleneck",
+            "bottleneck_word", "hyphenation_rescue_attempted", "hyphenation_reason",
+            "rescue_candidate_font_size", "font_gain_ratio", "final_font_size",
+            "hyphenation_rescue_selected", "introduced_hyphen_count",
+            "introduced_hyphen_words",
+        ) if key in candidate.qa
+    }
+    if layout_debug and "calibrated_target" in candidate.qa:
+        qa = candidate.qa
+        logger.info(
+            "Bubble %s target=%spx normal=%spx bottleneck=%r rescue_attempted=%s "
+            "rescue=%spx gain=%s selected=%s hyphens=%s reason=%s lines=%s",
+            getattr(region, "region_id", ""), qa["calibrated_target"],
+            qa["normal_font_size"], qa.get("bottleneck_word"),
+            qa["hyphenation_rescue_attempted"], qa.get("rescue_candidate_font_size"),
+            qa.get("font_gain_ratio"), qa["hyphenation_rescue_selected"],
+            qa["introduced_hyphen_count"], qa["hyphenation_reason"],
+            " / ".join(line.text for line in candidate.lines),
+        )
     return True
 
 
@@ -3717,7 +3946,9 @@ def apply_shape_aware_bubble_layout(
 
             if chosen is not None and len(chosen) == len(plans) == len(active):
                 for plan, candidate in zip(plans, chosen):
-                    if not _apply_layout_candidate(plan, candidate, img.shape[:2]):
+                    if not _apply_layout_candidate(
+                        plan, candidate, img.shape[:2], layout_debug=layout_debug
+                    ):
                         unplaced_regions.append(plan.region)
                 active_ids = {id(region) for region in active}
                 unplaced_regions.extend(region for region in group.regions if id(region) not in active_ids)

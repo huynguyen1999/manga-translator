@@ -21,6 +21,8 @@ from .stages import PipelineStage, downstream_stages
 from .cpu import CPU_PRIORITY_BACKGROUND, run_cpu_stage
 from ..utils import Context, Quadrilateral, TextBlock, dump_image, load_image
 from ..utils.image_storage import find_asset, save_jpeg
+from ..utils.device_memory import log_memory_stats
+from ..utils.log import get_logger
 
 
 STAGES = [
@@ -71,6 +73,8 @@ STAGE_ARTIFACTS = {
     "rendering": ("final.jpg", "final.png", "text_regions.json"),
 }
 
+logger = get_logger("pipeline")
+
 CHECKPOINT_STAGE_IDS = {
     PipelineStage.UPSCALE.value: "upscaling",
     PipelineStage.TEXT_GROUPING.value: "textline_merge",
@@ -108,7 +112,8 @@ def serialize_regions(regions) -> list[dict[str, Any]]:
             "calibrated_font_size", "angle", "direction", "alignment", "target_lang", "source_lang",
             "bubble_bounds", "layout_bounds", "layout_segments", "review_required", "review_reason",
             "placement_mode", "line_spacing", "letter_spacing", "font_family", "bold", "italic",
-            "provenance", "source_style", "source_line_styles",
+            "provenance", "source_style", "source_line_styles", "retention", "retention_reason",
+            "translation_policy",
         ):
             value = getattr(region, key, None)
             if value is None and key == "confidence":
@@ -269,6 +274,7 @@ def deserialize_textblocks(data: list[dict[str, Any]]) -> list[TextBlock]:
             "source_font_size", "calibrated_font_size", "placement_mode",
             "bubble_bounds", "layout_bounds", "layout_segments",
             "bubble_safe_shape", "review_required", "review_reason",
+            "retention", "retention_reason", "translation_policy",
         ):
             if key in item and item[key] is not None:
                 setattr(tb, key, item[key])
@@ -287,6 +293,9 @@ class PipelineRun:
         self.documents: dict[str, Any] = {}
         self.ctx: Context | None = None
         self.translator: Any = None
+        self.memory_batch_id: str | None = None
+        self.memory_page_id: str | None = folder
+        self._memory_starts: dict[str, dict[str, Any]] = {}
         self.config: Any = config
         colorizer = getattr(getattr(config, "colorizer", None), "colorizer", None)
         colorization_enabled = getattr(colorizer, "value", colorizer) != "none"
@@ -351,6 +360,9 @@ class PipelineRun:
         run.path = Path(result_root).resolve() / folder
         run.active_stage = None
         run.started = {}
+        run.memory_batch_id = None
+        run.memory_page_id = folder
+        run._memory_starts = {}
         run.manifest = manifest
         stages = {stage.get("id"): stage for stage in manifest.get("stages", [])}
         manifest["stages"] = [
@@ -389,6 +401,42 @@ class PipelineRun:
     def _stage(self, stage_id: str) -> dict[str, Any]:
         return next(item for item in self.manifest["stages"] if item["id"] == stage_id)
 
+    def _memory_identity(self) -> tuple[str | None, str | None]:
+        ctx = self.ctx
+        image_context = getattr(ctx, "image_context", None) if ctx is not None else None
+        page_id = getattr(self, "memory_page_id", None) or (
+            image_context.get("file_md5") if isinstance(image_context, dict) else None
+        ) or getattr(self, "manifest", {}).get("folder")
+        batch_id = getattr(self, "memory_batch_id", None) or (getattr(ctx, "batch_id", None) if ctx is not None else None)
+        return batch_id, page_id
+
+    def _memory_begin(self, stage_id: str) -> None:
+        starts = getattr(self, "_memory_starts", None)
+        if starts is None:
+            starts = self._memory_starts = {}
+        if stage_id not in starts:
+            batch_id, page_id = self._memory_identity()
+            starts[stage_id] = log_memory_stats(
+                f"{stage_id}:start",
+                device=getattr(getattr(self, "translator", None), "device", None),
+                batch_id=batch_id,
+                page_id=page_id,
+            )
+
+    def _memory_end(self, stage_id: str) -> None:
+        starts = getattr(self, "_memory_starts", {})
+        before = starts.pop(stage_id, None) if starts else None
+        if before is None:
+            return
+        batch_id, page_id = self._memory_identity()
+        log_memory_stats(
+            f"{stage_id}:end",
+            device=getattr(getattr(self, "translator", None), "device", None),
+            batch_id=batch_id,
+            page_id=page_id,
+            before=before,
+        )
+
     def _document(self, name: str) -> Any | None:
         return self.documents.get(name)
 
@@ -399,6 +447,7 @@ class PipelineRun:
         ]
 
     def _finish(self, stage_id: str, status: str = "completed", reason: str | None = None):
+        self._memory_end(stage_id)
         stage = self._stage(stage_id)
         if stage.get("status") == "pending":
             stage["startedAt"] = _now()
@@ -422,6 +471,7 @@ class PipelineRun:
         stage["status"] = "running"
         stage["startedAt"] = _now()
         self.started[stage_id] = time.monotonic()
+        self._memory_begin(stage_id)
         self.refresh()
         await self.checkpoint()
 
@@ -439,6 +489,7 @@ class PipelineRun:
         stage["startedAt"] = _now()
         self.started[stage_id] = time.monotonic()
         self.active_stage = stage_id
+        self._memory_begin(stage_id)
 
     def stage_for_progress(self, state: str) -> str | None:
         stage_id = PROGRESS_TO_STAGE.get(state)
@@ -549,8 +600,25 @@ class PipelineRun:
         ):
             (self.path / name).unlink(missing_ok=True)
 
-    def release_runtime(self):
+    def release_runtime(self, preserve_output: bool = False):
         translator = getattr(self, "translator", None)
+        batch_id, page_id = self._memory_identity()
+        before = log_memory_stats(
+            "run.release_runtime:before",
+            device=getattr(translator, "device", None),
+            batch_id=batch_id,
+            page_id=page_id,
+        )
+        ctx = getattr(self, "ctx", None)
+        if ctx is not None and hasattr(ctx, "cleanup_runtime"):
+            ctx.cleanup_runtime(preserve_output=preserve_output)
+        log_memory_stats(
+            "run.release_runtime:after",
+            device=getattr(translator, "device", None),
+            batch_id=batch_id,
+            page_id=page_id,
+            before=before,
+        )
         self.ctx = None
         self.translator = None
         if translator is not None and getattr(translator, "_pipeline_run", None) is self:
@@ -629,8 +697,9 @@ class PipelineRun:
                 raise RuntimeError(f"Stage {stage_id} was not marked running before batched inference")
         else:
             stage["status"] = "running"
-            stage["startedAt"] = _now()
-            self.started[stage_id] = time.monotonic()
+        stage["startedAt"] = _now()
+        self.started[stage_id] = time.monotonic()
+        self._memory_begin(stage_id)
         self.refresh()
 
         ctx = self._ensure_context()
@@ -684,13 +753,15 @@ class PipelineRun:
                     if detection is not None:
                         ctx.textlines = deserialize_textlines(detection)
                 if not getattr(ctx, "textlines", None):
-                    raise RuntimeError("No textlines available to perform OCR")
-                ctx.textlines = (
-                    precomputed_ocr
-                    if precomputed_ocr is not None
-                    else await translator._run_ocr(config, ctx)
-                )
-                self.write_json("ocr.json", serialize_regions(ctx.textlines))
+                    ctx.textlines = []
+                    self.write_json("ocr.json", [])
+                else:
+                    ctx.textlines = (
+                        precomputed_ocr
+                        if precomputed_ocr is not None
+                        else await translator._run_ocr(config, ctx)
+                    )
+                    self.write_json("ocr.json", serialize_regions(ctx.textlines))
 
             elif stage_id == "textline_merge":
                 if ctx.img_rgb is None:
@@ -807,7 +878,7 @@ class PipelineRun:
                 ctx.bubble_residual_mask = bundle.bubble_residual_mask
                 ctx.protected_edge_mask = bundle.protected_edge_mask
                 ctx.mask = bundle.final_inpaint_mask
-                ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
+                ctx.inpaint_mask = bundle.final_inpaint_mask
                 cv2.imwrite(str(self.path / "text_mask.png"), ctx.text_mask)
                 cv2.imwrite(str(self.path / "bubble_mask.png"), ctx.bubble_mask)
                 cv2.imwrite(str(self.path / "mask_final.png"), ctx.mask)
@@ -815,6 +886,8 @@ class PipelineRun:
                 cv2.imwrite(str(self.path / "bubble_residual_mask.png"), ctx.bubble_residual_mask)
                 cv2.imwrite(str(self.path / "protected_bubble_edge.png"), ctx.protected_edge_mask)
                 self.write_json("profiling.json", bundle.profile)
+                ctx.cleanup_mask_diagnostics()
+                bundle = None
 
             elif stage_id == "layout":
                 from ..rendering.layout import layout_page

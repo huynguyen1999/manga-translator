@@ -11,7 +11,9 @@ from .inpainting_sd import StableDiffusionInpainter
 from .none import NoneInpainter
 from .original import OriginalInpainter
 from ..config import Inpainter, InpainterConfig
-from ..utils.model_cache import get_model_cache, model_operation
+from ..utils.model_cache import (
+    get_cached_model, model_operation, remove_cached_model,
+)
 
 INPAINTERS = {
     Inpainter.default: AotInpainter,
@@ -26,11 +28,7 @@ inpainter_cache = {}
 def get_inpainter(key: Inpainter, *args, **kwargs) -> CommonInpainter:
     if key not in INPAINTERS:
         raise ValueError(f'Could not find inpainter for: "{key}". Choose from the following: %s' % ','.join(INPAINTERS))
-    cache = get_model_cache('inpainter', inpainter_cache)
-    if not cache.get(key):
-        inpainter = INPAINTERS[key]
-        cache[key] = inpainter(*args, **kwargs)
-    return cache[key]
+    return get_cached_model('inpainter', inpainter_cache, key, lambda: INPAINTERS[key](*args, **kwargs))
 
 @model_operation
 async def prepare(inpainter_key: Inpainter, device: str = 'cpu'):
@@ -67,4 +65,4 @@ async def dispatch(inpainter_key: Inpainter, image: np.ndarray, mask: np.ndarray
 
 @model_operation
 async def unload(inpainter_key: Inpainter):
-    get_model_cache('inpainter', inpainter_cache).pop(inpainter_key, None)
+    remove_cached_model('inpainter', inpainter_cache, inpainter_key)

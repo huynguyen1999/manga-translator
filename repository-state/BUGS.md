@@ -2,6 +2,69 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-23 — Recent titles appeared as existing manga groups
+
+- Symptom: A title with no manga in the library, such as `6`, was labeled as an existing group in the assignment dialog.
+- Root cause: The Studio merged saved recent titles and unfinished batch titles with library groups, and the dialog treated any exact title match as existing.
+- Fix: Build Studio assignment options from library manga only; show matching names after a search and render each full title.
+- Prevention: Keep persisted manga and recent or in-progress titles separate when presenting existing-group choices.
+
+## 2026-09-23 — Pipeline release left page arrays reachable
+
+- Symptom: RSS could remain high after a page stage or grow across legacy batch preparation even after checkpoints were saved.
+- Root cause: `PipelineRun.release_runtime()` detached only its own context reference, `Context.cleanup_intermediate()` did not cover mask/layout workspace fields, and `translate_batch()` prepared every page before translating. AOT inpainting also ran full-resolution float32 on MPS when the configured 2048px limit exceeded a normal page, creating a large transient activation peak that stage-boundary telemetry missed.
+- Fix: Clear page-owned buffers explicitly at run release, persist then drop bubble detector masks before translation, free mask diagnostics before layout, reuse the final mask alias, and prepare legacy calls in bounded chunks. Cap MPS inpainting at 1024px and clear batch-scoped translator history at completion.
+- Prevention: Keep Context cleanup lists aligned with new stage-owned pixel fields, retain bounded preparation, and account for inference peaks as well as stage-boundary memory when reviewing MPS workloads.
+
+## 2026-09-23 — Paired MPS detection raised batch memory peaks
+
+- Symptom: Two-page text detection reached 5.86 GB of MPS driver memory in the second repeated batch, compared with 2.51 GB for fresh single-page detection; batch cleanup returned live tensor memory near its prior level.
+- Root cause: The default detector pads paired pages into one 2048px model tensor, increasing the MPS working set. The shared in-process executor also allowed two local model calls, which could compound peaks, though the recorded repeated nine-page runs themselves had one GPU slot.
+- Fix: On MPS, cap shared model calls and scheduler GPU work at one, and route default/DBNet detection through the single-page checkpoint path.
+- Prevention: Keep scheduler and executor limits aligned with the selected device, and compare sampled process footprint with live and driver MPS metrics across repeated batches.
+
+## 2026-09-23 — Concurrent offline translation mixed per-request settings
+
+- Symptom: Concurrent requests through the shared offline translator could both return the second request's settings.
+- Root cause: `SugoiTranslator` is cached as one mutable instance, and concurrent `parse_args()` calls overwrote its request-specific configuration during translation.
+- Fix: Serialize the complete offline translator operation while leaving other local model calls concurrent.
+- Prevention: Protect mutable settings for cached singleton models across the full configure-and-infer operation.
+
+## 2026-09-23 — Numeric OCR annotations were discarded
+
+- Symptom: OCR regions such as `(48)` disappeared from the translated page.
+- Root cause: Text grouping used translation eligibility (`is_valuable_text`) as its retention rule, and that helper intentionally excludes digits.
+- Fix: Retain Unicode letters and numbers independently, mark number-only regions for source preservation, and omit them from fast and professional translation requests.
+- Prevention: Test punctuation-only rejection, numeric retention, mixed linguistic numbers, provider payloads, checkpoint round trips, masking, source-sized layout, and rendering separately.
+
+## 2026-09-23 — Batch stage timers included resource wait time
+
+- Symptom: A page's stage timer advanced while that stage was waiting for a scheduler resource slot.
+- Root cause: Claiming an item marked its step started before the worker acquired the stage semaphore.
+- Fix: Clear the timer when claiming and start it after resource acquisition, when stage execution begins; leave queued/reserved steps untimed.
+- Prevention: Keep the timer transition on the execution side of resource acquisition.
+
+## 2026-09-23 — Checkpointed OCR treated empty detection as a failure
+
+- Symptom: Pages with no detected textlines failed their OCR checkpoint instead of completing as textless pages.
+- Root cause: Checkpoint retry raised when OCR input textlines were empty, and grouped OCR treated the same state as a batch error.
+- Fix: Persist an empty OCR result and use the existing textless completion path for empty pages in both retry flows.
+- Prevention: Cover empty detector output in direct and grouped checkpoint retry tests.
+
+## 2026-09-23 — A single long dialogue word could force severe font shrinkage
+
+- Symptom: Shape-aware bubble layout reduced an otherwise readable line to tiny text when one word could not fit any safe row.
+- Root cause: The canonical solver intentionally treats normalized words as atomic and had no controlled rescue path for dictionary-valid breaks.
+- Fix: After a compressed bubble result, try one dictionary-valid split of the bottleneck word near the calibrated target and keep it only for a material font-size gain.
+- Prevention: Keep the normal solve first and test healthy layouts, non-bottleneck paragraphs, and `no_hyphenation` as hard gates.
+
+## 2026-09-23 — MangaOCR returned regions below the OCR confidence threshold
+
+- Symptom: The `mocr` backend could emit text for regions below `OCR Min Confidence`.
+- Root cause: Low-confidence predictions were skipped before confidence aggregation, but auxiliary MangaOCR text was later attached and every merged region was returned.
+- Fix: Aggregate confidence across all source regions and apply the threshold before returning each OCR region.
+- Prevention: Apply confidence gates to the final text regions that leave a backend, after model-specific merging.
+
 ## 2026-09-23 — Group reruns used stale page metadata for group identity
 
 - Symptom: Saving a rerun batch warned that its item's group differed from the page's PostgreSQL group.
@@ -57,6 +120,13 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 - Root cause: Their normal-priority requests were routed to the interactive lane, while the background lane remained idle.
 - Fix: Run checkpoint mask/layout stages at background priority; retain normal priority for interactive and direct work.
 - Prevention: Assign priority at the batch scheduler boundary, not from the stage's resource class alone.
+
+## 2026-09-23 — CPU-heavy page stages were serialized by two independent limits
+
+- Symptom: Layout and mask generation ran one page at a time even when multiple pipeline workers were available.
+- Root cause: The batch scheduler fixed CPU-heavy slots at one, and each event-loop CPU lane also had one consumer; independently increasing per-worker consumers could multiply process-wide CPU work.
+- Fix: Derive the scheduler's CPU-heavy limit from `--workers` and one configurable process-wide background pool; keep one separate interactive slot and GPU capacity at one.
+- Prevention: Configure the scheduler and shared CPU pool from the same budget, and keep a cross-event-loop capacity regression test.
 
 ## 2026-09-23 — Concurrent batch detail refreshes caused redundant API reads
 
@@ -596,3 +666,10 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 - Root cause: Post-translation mask generation was skipped when an inpainted image existed, even if the corresponding final mask was missing or stale.
 - Fix: Treat a missing mask as an incomplete artifact pair: discard the cached inpainted image, rebuild the translation-dependent mask, and rerun inpainting.
 - Prevention: Cover the cached-image/no-mask state and require mask generation before inpainting.
+
+## 2026-09-23 — Pipeline timing overview showed wall-clock duration
+
+- Symptom: Total duration did not match the sum of the displayed processing stages.
+- Root cause: The timing resolver preferred the page-level duration or started-to-finished interval over the stage durations.
+- Fix: Sum available stage durations first, retaining existing metadata and timestamp fallbacks when stage timing is absent.
+- Prevention: Keep timing resolution based on recorded processing stages when they are available.

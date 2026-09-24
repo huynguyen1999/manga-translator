@@ -6,7 +6,7 @@ from time import perf_counter
 from typing import Any, Dict, Optional
 from .. import get_default_eng_font
 from .models import PageLayoutResult, PlacedLine, RegionLayout
-from .obstacles import build_page_obstacle_map, classify_placement_modes
+from .obstacles import classify_placement_modes
 from .regions import prepare_regions
 from .validation import validate_layout
 
@@ -30,11 +30,6 @@ def _region_layout(region: Any, font_path: Optional[str]) -> RegionLayout:
         calibrated_font_size=int(getattr(region, "calibrated_font_size", 0) or getattr(region, "font_size", 0) or 0),
         font_size=int(getattr(region, "font_size", 0) or 0),
         lines=lines,
-        target_geometry=(
-            getattr(region, "_free_text_zone", None)
-            if getattr(region, "_free_text_zone", None) is not None
-            else getattr(region, "_bubble_interior", None)
-        ),
         source_geometry=getattr(region, "lines", None),
         solver_path=getattr(region, "_solver_path", None) or "legacy",
         solver_status=getattr(region, "_solver_status", None) or "prepared",
@@ -70,7 +65,6 @@ def layout_page(ctx: Any, config: Any, font_path: Optional[str] = None, options:
     regions = ctx.text_regions
     prepare_regions(regions)
     classify_placement_modes(regions)
-    ctx._layout_obstacles = build_page_obstacle_map(regions, ctx.img_rgb.shape[:2])
 
     for region in regions:
         region_layout = _region_layout(region, active_font)
@@ -81,4 +75,6 @@ def layout_page(ctx: Any, config: Any, font_path: Optional[str] = None, options:
     validate_layout(ctx, result)
     ctx.layout = result
     ctx._bubble_layout_ready = True
+    if hasattr(ctx, "cleanup_layout_workspace"):
+        ctx.cleanup_layout_workspace()
     return result

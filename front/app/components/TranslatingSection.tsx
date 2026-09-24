@@ -109,6 +109,12 @@ const ItemRow: React.FC<{
   const isProcessing = item.status === "processing";
   const isError = item.status === "error";
   const isAwaitingTranslation = item.step === "awaiting_translation";
+  const queuedStatus =
+    item.step && !["reserved", "initialize", "starting"].includes(item.step)
+      ? `Waiting · Next: ${formatStage(item.step)}`
+      : item.step === "reserved"
+        ? "Waiting · Batch slot"
+        : "Waiting to start";
   const needsReview = isFinished && item.needsReview;
   const previewFile = item.inputUrl || item.file;
   const previewSource = item.inputUrl || (item.file.size > 0 ? item.file : null);
@@ -197,6 +203,8 @@ const ItemRow: React.FC<{
               ? "Needs review"
               : isAwaitingTranslation
               ? "Awaiting translation"
+              : item.status === "queued"
+              ? queuedStatus
               : itemStatusLabel[item.status]}
           </span>
         </div>

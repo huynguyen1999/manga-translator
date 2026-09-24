@@ -1,3 +1,5 @@
+import asyncio
+import threading
 from typing import Optional, List
 
 try:
@@ -52,6 +54,7 @@ TRANSLATORS = {
     **OFFLINE_TRANSLATORS,
 }
 translator_cache = {}
+_OFFLINE_TRANSLATOR_LOCK = threading.Lock()
 
 def get_translator(key: Translator, *args, **kwargs) -> CommonTranslator:
     if key not in TRANSLATORS:
@@ -88,7 +91,7 @@ async def prepare(chain: TranslatorChain):
             if isinstance(translator, OfflineTranslator):
                 await translator.download()
         if key in OFFLINE_TRANSLATORS:
-            await _offline_operation(prepare_one)
+            await _run_offline_operation(prepare_one)
         else:
             await prepare_one()
 
@@ -96,6 +99,21 @@ async def prepare(chain: TranslatorChain):
 @model_operation
 async def _offline_operation(operation):
     return await operation()
+
+
+async def _run_offline_operation(operation):
+    # ponytail: one lock covers the current sole offline backend; split by model if more need parallelism.
+    acquire = asyncio.create_task(asyncio.to_thread(_OFFLINE_TRANSLATOR_LOCK.acquire))
+    try:
+        await asyncio.shield(acquire)
+    except asyncio.CancelledError:
+        await acquire
+        _OFFLINE_TRANSLATOR_LOCK.release()
+        raise
+    try:
+        return await _offline_operation(operation)
+    finally:
+        _OFFLINE_TRANSLATOR_LOCK.release()
 
 
 async def _dispatch_one(key, tgt_lang, queries, translator_config, use_mtpe, args, device, unload=False):
@@ -122,7 +140,7 @@ async def _dispatch_one(key, tgt_lang, queries, translator_config, use_mtpe, arg
 
     # API clients keep worker-local state and never hold the shared model lane.
     if key in OFFLINE_TRANSLATORS:
-        return await _offline_operation(translate_one)
+        return await _run_offline_operation(translate_one)
     return await translate_one()
 
 # TODO: Optionally take in strings instead of TranslatorChain for simplicity

@@ -33,6 +33,7 @@ from ..utils import (
     get_logger,
     rotate_polygons,
     LANGUAGE_ORIENTATION_PRESETS,
+    is_preserved_region,
 )
 
 logger = get_logger('render')
@@ -998,7 +999,9 @@ async def render_page(
 
     transform_text_case = getattr(getattr(config, "render", None), "transform_text_case", None)
     for region in (ctx.text_regions or []):
-        if transform_text_case and getattr(region, "translation", None) and isinstance(region.translation, str):
+        if is_preserved_region(region):
+            region.translation = region.text
+        elif transform_text_case and getattr(region, "translation", None) and isinstance(region.translation, str):
             region.translation = transform_text_case(region.translation)
 
     render_regions = [

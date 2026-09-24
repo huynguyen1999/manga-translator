@@ -254,6 +254,7 @@ class FrozenRegionLayout:
     italic: bool = False
     solver_path: Optional[str] = None
     solver_status: Optional[str] = None
+    hyphenation: Dict[str, Any] = field(default_factory=dict)
     render_suppressed: bool = False
     bubble_safe_shape: Optional[Any] = None
 

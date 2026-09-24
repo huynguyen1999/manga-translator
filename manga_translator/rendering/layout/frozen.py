@@ -205,6 +205,7 @@ def serialize_frozen_layout(ctx, config, font_path, bubble_detections=None) -> d
             italic=bool(getattr(region, "italic", False)),
             solver_path=getattr(region, "_solver_path", None),
             solver_status=getattr(region, "_solver_status", None),
+            hyphenation=dict(getattr(region, "_hyphenation_diagnostics", {}) or {}),
             render_suppressed=bool(getattr(region, "_render_suppressed", False)),
             bubble_safe_shape=encode_safe_shape(interior) if interior is not None else getattr(region, "bubble_safe_shape", None),
         ))
@@ -254,6 +255,7 @@ def hydrate_layout(ctx, persisted_layout, expected_fingerprint: str | None = Non
         region.placement_mode = PlacementMode(item["placement_mode"]) if item.get("placement_mode") in {mode.value for mode in PlacementMode} else item.get("placement_mode")
         region._solver_path = item.get("solver_path")
         region._solver_status = item.get("solver_status")
+        region._hyphenation_diagnostics = item.get("hyphenation") or {}
         region._render_suppressed = bool(item.get("render_suppressed", False))
         if item.get("fg_color") is not None:
             region.fg_colors = item["fg_color"]

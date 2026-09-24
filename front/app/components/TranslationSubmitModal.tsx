@@ -450,18 +450,22 @@ export const TranslationSubmitModal: React.FC<Props> = ({
                 />
               </div>
               <div className="max-h-64 space-y-1 overflow-y-auto rounded-xl border border-zinc-200 p-1 dark:border-zinc-700">
-                {filteredGroups.map((group) => (
+                {!searchQuery.trim() ? (
+                  <p className="px-3 py-5 text-center text-sm text-zinc-500">
+                    Search to show matching manga groups.
+                  </p>
+                ) : filteredGroups.map((group) => (
                   <button
                     type="button"
                     key={`${group.id || group.title}`}
                     onClick={() => chooseGroup(group)}
                     className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm hover:bg-indigo-50 dark:hover:bg-indigo-950/40"
                   >
-                    <span className="truncate">{group.title}</span>
+                    <span className="min-w-0 whitespace-normal break-all">{group.title}</span>
                     <span className="text-xs text-indigo-700 dark:text-indigo-300">{group.count ?? ""}</span>
                   </button>
                 ))}
-                {!filteredGroups.length && (
+                {searchQuery.trim() && !filteredGroups.length && (
                   <p className="px-3 py-5 text-center text-sm text-zinc-500">
                     No matching groups. A new group will be created.
                   </p>

@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 
 from .config import Translator, TranslatorConfig
 from .translators import GPT_TRANSLATORS, get_translator
+from .utils import is_preserved_region
 
 
 REFUSAL_MARKERS = (
@@ -582,11 +583,25 @@ async def translate_professionally(
     pages = []
     for number, (ctx, _) in enumerate(ordered, 1):
         regions = []
+        all_regions = []
         for region in ctx.text_regions or []:
             if not getattr(region, "region_id", None):
                 region.region_id = uuid.uuid4().hex
-            regions.append({"id": region.region_id, "source": region.text})
-        pages.append({"number": number, "ctx": ctx, "regions": regions})
+            item = {"id": region.region_id, "source": region.text}
+            if is_preserved_region(region):
+                item.update(
+                    draft=region.text,
+                    final=region.text,
+                    confidence=1.0,
+                    review_reasons=[],
+                    translation_policy="preserve",
+                    retention=getattr(region, "retention", "kept"),
+                    retention_reason=getattr(region, "retention_reason", "numeric_content"),
+                )
+            else:
+                regions.append(item)
+            all_regions.append(item)
+        pages.append({"number": number, "ctx": ctx, "regions": regions, "all_regions": all_regions})
 
     analysis = await engine.analyze(pages, config.story_plan or config.story_page_ranges)
     story_count = len(analysis["stories"])
@@ -606,6 +621,10 @@ async def translate_professionally(
         ctx.result_documents = ctx.result_documents or {}
         render_cfg = getattr(config, "render", None)
         for region in ctx.text_regions or []:
+            if is_preserved_region(region):
+                region.translation = region.text
+                region.target_lang = "ENG"
+                continue
             item = by_id[region.region_id]
             final_text = item["final"]
             if render_cfg and hasattr(render_cfg, "transform_text_case"):
@@ -621,6 +640,6 @@ async def translate_professionally(
             ctx.manual_review_required = bool(getattr(ctx, "manual_review_required", False) or region.review_required)
         ctx.result_documents["professional_translation.json"] = {
             "mode": "professional", "storyPlan": config.story_plan, "analysis": analysis, "storyIndex": page.get("story_index"),
-            "regions": page["regions"], "provenance": engine.provenance,
+            "regions": page["all_regions"], "provenance": engine.provenance,
         }
     return ordered

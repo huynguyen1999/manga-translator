@@ -52,8 +52,6 @@ import {
   loadSettings,
   saveRememberSettings,
   saveSettings,
-  loadRecentGroups,
-  saveRecentGroup,
 } from "@/utils/localStorage";
 import {
   saveStudioStateToIDB,
@@ -539,7 +537,6 @@ export const App: React.FC = () => {
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [pendingTranslationTargets, setPendingTranslationTargets] = useState<StudioFile[]>([]);
   const [pendingFiles, setPendingFiles] = useState<PendingStudioFile[]>([]);
-  const [recentGroups, setRecentGroups] = useState<string[]>([]);
   const [translationBatchError, setTranslationBatchError] = useState<string | null>(null);
   const [isStudioMangaUploadModalOpen, setIsStudioMangaUploadModalOpen] = useState(false);
   const [pendingStudioMangaFiles, setPendingStudioMangaFiles] = useState<StudioFile[]>([]);
@@ -769,7 +766,6 @@ export const App: React.FC = () => {
   // Effects
   /** Load saved settings, fetch finished images from server, and restore persisted files from IDB */
   useEffect(() => {
-    setRecentGroups(loadRecentGroups());
     const savedSettings = loadSettings();
     const shouldRememberSettings = savedSettings.rememberSettings ?? loadRememberSettings();
     setRememberSettings(shouldRememberSettings);
@@ -1123,7 +1119,7 @@ export const App: React.FC = () => {
     settingsHydrated,
   ]);
 
-  // Existing and recent manga groups for suggestion in modal
+  // Only library manga count as existing assignment targets.
   const existingGroups = useMemo<ExistingGroupEntry[]>(() => {
     const byTitle = new Map<string, ExistingGroupItem>();
     serverGroupTitles.forEach((title) => {
@@ -1153,29 +1149,10 @@ export const App: React.FC = () => {
         }
       }
     });
-    recentGroups.forEach((title) => {
-      const clean = title.trim();
-      if (clean && clean.toLocaleLowerCase() !== "ungrouped") {
-        const key = clean.toLocaleLowerCase();
-        if (!byTitle.has(key)) {
-          byTitle.set(key, { title: clean });
-        }
-      }
-    });
-    translationBatches.forEach((batch) => {
-      if (!activeBatchStatuses.has(batch.status)) return;
-      const title = batch.mangaTitle.trim();
-      if (title && title.toLocaleLowerCase() !== "ungrouped") {
-        const key = title.toLocaleLowerCase();
-        if (!byTitle.has(key)) {
-          byTitle.set(key, { id: batch.mangaGroupId || undefined, title });
-        }
-      }
-    });
     return Array.from(byTitle.values()).sort((a, b) =>
       a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" })
     );
-  }, [serverGroupTitles, mangaSummaries, finishedImages, recentGroups, translationBatches]);
+  }, [serverGroupTitles, mangaSummaries, finishedImages]);
 
   const isMangaTitleTaken = useCallback((title: string) => {
     const normalizedTitle = title.trim().toLocaleLowerCase();
@@ -1509,10 +1486,6 @@ export const App: React.FC = () => {
           toTranslationBatch(serverBatch),
           ...prev.filter((batchItem) => batchItem.id !== uploadBatch.id && batchItem.id !== serverBatch.id),
         ]);
-        if (batch.mangaTitle && batch.mangaTitle !== "Ungrouped") {
-          saveRecentGroup(batch.mangaTitle);
-          setRecentGroups(loadRecentGroups());
-        }
       } catch (error) {
         await failStudioTranslationUpload(uploadBatch, error);
         console.warn(`Failed to submit translation batch ${uploadBatch.id}:`, error);
@@ -2099,10 +2072,6 @@ export const App: React.FC = () => {
       ...(storyPlan ? { storyPlan } : {}),
     };
     setCurrentMangaTitle(cleanGroup);
-    if (cleanGroup !== "Ungrouped") {
-      saveRecentGroup(cleanGroup);
-      setRecentGroups(loadRecentGroups());
-    }
     const targetIds = new Set(targets.map((entry) => entry.id));
     setIsGroupModalOpen(false);
     setPendingTranslationTargets([]);

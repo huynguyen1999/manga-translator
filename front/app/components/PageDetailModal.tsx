@@ -461,18 +461,20 @@ export const resolveTranslationTiming = (
   const endAt = finishedAt || manifest?.updatedAt || null;
   const startMs = startAt instanceof Date ? startAt.getTime() : startAt ? Date.parse(String(startAt)) : NaN;
   const endMs = endAt instanceof Date ? endAt.getTime() : endAt ? Date.parse(String(endAt)) : NaN;
-  const stageDuration = manifest?.stages?.reduce(
-    (total, stage) => total + (Number.isFinite(stage.durationMs) ? stage.durationMs || 0 : 0),
-    0,
-  ) || 0;
+  const stageDuration = manifest?.stages?.reduce<number | null>(
+    (total, stage) => Number.isFinite(stage.durationMs)
+      ? (total ?? 0) + (stage.durationMs || 0)
+      : total,
+    null,
+  ) ?? null;
   return {
     startAt,
     endAt,
-    durationMs: durationMs != null && Number.isFinite(durationMs)
+    durationMs: stageDuration ?? (durationMs != null && Number.isFinite(durationMs)
       ? durationMs
       : Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs
       ? endMs - startMs
-      : stageDuration || null,
+      : null),
   };
 };
 
@@ -599,7 +601,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   titlePrefix = "Page Detail",
 }) => {
   const [zoomLevel, setZoomLevel] = useState(1);
-  const [viewMode, setViewMode] = useState<"split" | "translated" | "inpainted" | "original" | "bubble-mask">("translated");
+  const [viewMode, setViewMode] = useState<"split" | "translated" | "inpainted" | "original" | "speech-bubbles">("translated");
   const [showBubbleBoxes, setShowBubbleBoxes] = useState(false);
   const [showOriginalRegions, setShowOriginalRegions] = useState(false);
   const [isHoldingOriginal, setIsHoldingOriginal] = useState(false);
@@ -768,27 +770,24 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
       onDownload(image);
       return;
     }
-    const targetSource =
-      viewMode === "original"
-        ? resolvedOriginalUrl
-        : viewMode === "inpainted"
-        ? resolvedInpaintedUrl
-        : viewMode === "bubble-mask"
-        ? resolvedBubbleMaskUrl
-        : resolvedResultUrl;
+    const targetSource = viewMode === "original" || viewMode === "speech-bubbles"
+      ? resolvedOriginalUrl
+      : viewMode === "inpainted"
+      ? resolvedInpaintedUrl
+      : resolvedResultUrl;
     if (!targetSource) return;
     const isBlob = targetSource instanceof Blob;
     const url = isBlob ? URL.createObjectURL(targetSource) : apiUrl(targetSource);
     const anchor = document.createElement("a");
     anchor.href = url;
-    const prefix = isOriginal || viewMode === "original" ? "original" : viewMode === "inpainted" ? "inpainted" : viewMode === "bubble-mask" ? "bubble-mask" : "translated";
+    const prefix = isOriginal || viewMode === "original" || viewMode === "speech-bubbles" ? "original" : viewMode === "inpainted" ? "inpainted" : "translated";
     const safeName = (image.originalName && image.originalName !== "Unknown") ? image.originalName : `${image.folder || "page"}.png`;
     anchor.download = `${prefix}_${safeName}`;
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
     if (isBlob) setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, [image, onDownload, resolvedResultUrl, resolvedOriginalUrl, resolvedInpaintedUrl, resolvedBubbleMaskUrl, viewMode, isOriginal]);
+  }, [image, onDownload, resolvedResultUrl, resolvedOriginalUrl, resolvedInpaintedUrl, viewMode, isOriginal]);
 
   const handleRetry = useCallback(async () => {
     if (!onRetry || isRetrying || retryStatus === "queued") return;
@@ -1033,15 +1032,19 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
               {resolvedBubbleMaskUrl && (
                 <button
                   type="button"
-                  onClick={() => setViewMode("bubble-mask")}
+                  onClick={() => {
+                    setShowBubbleBoxes(false);
+                    setShowOriginalRegions(false);
+                    setViewMode("speech-bubbles");
+                  }}
                   className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${
-                    viewMode === "bubble-mask"
+                    viewMode === "speech-bubbles"
                       ? "bg-violet-600 text-white shadow-xs"
                       : "text-zinc-300 hover:bg-white/10 hover:text-white"
                   }`}
-                  title="Show the detected speech-bubble mask"
+                  title="Show detected speech bubbles over the original page"
                 >
-                  Bubble mask
+                  Speech bubbles
                 </button>
               )}
 
@@ -1282,37 +1285,35 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
               onClick={(event) => event.stopPropagation()}
             >
               <div
-                className="flex h-[calc(100vh-12rem)] w-full max-w-6xl items-center justify-center transition-transform duration-100 sm:h-[calc(100vh-13rem)]"
+                className="relative flex h-[calc(100vh-12rem)] w-full max-w-6xl items-center justify-center transition-transform duration-100 sm:h-[calc(100vh-13rem)]"
                 style={{ transform: `scale(${zoomLevel})` }}
               >
-                {viewMode === "bubble-mask" && resolvedBubbleMaskUrl ? (
+                <PreviewImage
+                  key={image.id}
+                  file={resolvedOriginalUrl}
+                  result={isOriginal ? null : resolvedResultUrl}
+                  inpainted={isOriginal ? null : resolvedInpaintedUrl}
+                  folder={resolvedFolder}
+                  textRegionsUrl={image.textRegionsUrl}
+                  viewMode={isOriginal ? "original" : viewMode === "speech-bubbles" ? "original" : viewMode}
+                  onViewModeChange={isOriginal ? undefined : setViewMode}
+                  showBubbleBoxes={showBubbleBoxes}
+                  showOriginalRegions={showOriginalRegions}
+                  onToggleBubbleBoxes={setShowBubbleBoxes}
+                  isHoldingOriginal={isOriginal ? false : isHoldingOriginal}
+                  showFloatingToolbar={false}
+                  onTextRegionsLoaded={(blocks) => {
+                    setBubbleCount(blocks.length);
+                    setOriginalRegionCount(countOriginalTextRegions(blocks));
+                  }}
+                  showComparisonControls={isOriginal ? originalTextAvailable : true}
+                  className="max-h-full max-w-full rounded-lg shadow-2xl"
+                />
+                {viewMode === "speech-bubbles" && resolvedBubbleMaskUrl && (
                   <img
-                    key={`${image.id}-bubble-mask`}
                     src={resolvedBubbleMaskUrl}
-                    alt="Detected speech-bubble mask"
-                    className="max-h-full max-w-full rounded-lg shadow-2xl object-contain"
-                  />
-                ) : (
-                  <PreviewImage
-                    key={image.id}
-                    file={resolvedOriginalUrl}
-                    result={isOriginal ? null : resolvedResultUrl}
-                    inpainted={isOriginal ? null : resolvedInpaintedUrl}
-                    folder={resolvedFolder}
-                    textRegionsUrl={image.textRegionsUrl}
-                    viewMode={isOriginal ? "original" : viewMode === "bubble-mask" ? "translated" : viewMode}
-                    onViewModeChange={isOriginal ? undefined : setViewMode}
-                    showBubbleBoxes={showBubbleBoxes}
-                    showOriginalRegions={showOriginalRegions}
-                    onToggleBubbleBoxes={setShowBubbleBoxes}
-                    isHoldingOriginal={isOriginal ? false : isHoldingOriginal}
-                    showFloatingToolbar={false}
-                    onTextRegionsLoaded={(blocks) => {
-                      setBubbleCount(blocks.length);
-                      setOriginalRegionCount(countOriginalTextRegions(blocks));
-                    }}
-                    showComparisonControls={isOriginal ? originalTextAvailable : true}
-                    className="max-h-full max-w-full rounded-lg shadow-2xl"
+                    alt="Detected speech bubbles highlighted over the original page"
+                    className="pointer-events-none absolute inset-0 z-10 h-full w-full rounded-lg object-contain opacity-40 mix-blend-screen"
                   />
                 )}
               </div>

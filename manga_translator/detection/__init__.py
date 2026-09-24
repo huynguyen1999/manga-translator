@@ -9,7 +9,9 @@ from .none import NoneDetector
 from .common import CommonDetector, OfflineDetector
 from .common_rust import RustDetector
 from ..config import Detector
-from ..utils.model_cache import get_model_cache, model_operation
+from ..utils.model_cache import (
+    get_cached_model, model_operation, remove_cached_model,
+)
 
 DETECTORS = {
     Detector.default: DefaultDetector,
@@ -29,11 +31,7 @@ def get_detector(key: Detector | str, *args, **kwargs) -> CommonDetector:
             pass
     if key not in DETECTORS:
         raise ValueError(f'Could not find detector for: "{key}". Choose from the following: %s' % ','.join(DETECTORS))
-    cache = get_model_cache('detector', detector_cache)
-    if not cache.get(key):
-        detector = DETECTORS[key]
-        cache[key] = detector(*args, **kwargs)
-    return cache[key]
+    return get_cached_model('detector', detector_cache, key, lambda: DETECTORS[key](*args, **kwargs))
 
 @model_operation
 async def prepare(detector_key: Detector | str):
@@ -71,4 +69,4 @@ async def unload(detector_key: Detector | str):
             detector_key = Detector(detector_key)
         except ValueError:
             pass
-    get_model_cache('detector', detector_cache).pop(detector_key, None)
+    remove_cached_model('detector', detector_cache, detector_key)

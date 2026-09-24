@@ -6,7 +6,9 @@ from .waifu2x import Waifu2xUpscaler
 from .esrgan import ESRGANUpscaler
 from .esrgan_pytorch import ESRGANUpscalerPytorch
 from ..config import Upscaler
-from ..utils.model_cache import get_model_cache, model_operation
+from ..utils.model_cache import (
+    get_cached_model, model_operation, remove_cached_model,
+)
 
 UPSCALERS = {
     Upscaler.waifu2x: Waifu2xUpscaler,
@@ -18,11 +20,7 @@ upscaler_cache = {}
 def get_upscaler(key: Upscaler, *args, **kwargs) -> CommonUpscaler:
     if key not in UPSCALERS:
         raise ValueError(f'Could not find upscaler for: "{key}". Choose from the following: %s' % ','.join(UPSCALERS))
-    cache = get_model_cache('upscaler', upscaler_cache)
-    if not cache.get(key):
-        upscaler = UPSCALERS[key]
-        cache[key] = upscaler(*args, **kwargs)
-    return cache[key]
+    return get_cached_model('upscaler', upscaler_cache, key, lambda: UPSCALERS[key](*args, **kwargs))
 
 @model_operation
 async def prepare(upscaler_key: Upscaler):
@@ -41,4 +39,4 @@ async def dispatch(upscaler_key: Upscaler, image_batch: List[Image.Image], upsca
 
 @model_operation
 async def unload(upscaler_key: Upscaler):
-    get_model_cache('upscaler', upscaler_cache).pop(upscaler_key, None)
+    remove_cached_model('upscaler', upscaler_cache, upscaler_key)

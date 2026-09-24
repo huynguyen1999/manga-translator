@@ -528,6 +528,27 @@ class BubbleLayoutTests(unittest.TestCase):
         self.assertIsNotNone(ungrouped[0]._bubble_mask)
         self.assertIsNotNone(ungrouped[1]._bubble_mask)
 
+    def test_bubble_grouping_keeps_preserved_numeric_regions_separate(self):
+        from manga_translator.detection.bubble import BubbleDetection
+
+        mask = np.full((100, 100), 255, np.uint8)
+        dialogue_a = TextBlock([[[10, 10], [40, 10], [40, 30], [10, 30]]], texts=["中本"])
+        numeric = TextBlock([[[10, 35], [30, 35], [30, 50], [10, 50]]], texts=["(48)"], translation="(48)")
+        dialogue_b = TextBlock([[[10, 55], [40, 55], [40, 75], [10, 75]]], texts=["こんにちは"])
+        numeric.translation_policy = "preserve"
+
+        grouped = group_regions_by_bubbles(
+            [dialogue_a, numeric, dialogue_b], [BubbleDetection(mask, 0.9)], group=True
+        )
+
+        self.assertEqual(len(grouped), 2)
+        preserved = next(item for item in grouped if getattr(item, "translation_policy", None) == "preserve")
+        dialogue = next(item for item in grouped if item is not preserved)
+        self.assertEqual(preserved.text, "(48)")
+        self.assertEqual(preserved.translation, "(48)")
+        self.assertEqual(len(dialogue.source_region_ids), 2)
+        self.assertNotIn("(48)", dialogue.text)
+
     def test_open_boundary_is_flagged(self):
         image = np.full((260, 300, 3), 255, np.uint8)
         cv2.rectangle(image, (50,20), (250,235), (0,0,0), 3)

@@ -10,7 +10,7 @@ from manga_translator.utils.model_cache import (
     SharedModelExecutor, finish_before_cancelling,
     reset_model_cache, set_model_cache, reset_model_executor, set_model_executor,
 )
-from manga_translator.utils.device_memory import empty_device_cache
+from manga_translator.utils.device_memory import empty_device_cache, log_memory_stats
 from manga_translator.utils.log import get_correlation_id, correlation_id_ctx
 from server.sent_data_internal import NotifyType
 
@@ -95,9 +95,27 @@ class InProcessExecutorInstance:
 
     async def reclaim_memory(self):
         async def cleanup():
-            empty_device_cache(self.translator.device)
+            batch_id = getattr(self.translator, "_memory_batch_id", None)
+            before = log_memory_stats(
+                "batch_cleanup:start",
+                device=self.translator.device,
+                batch_id=batch_id,
+            )
+            empty_device_cache(
+                self.translator.device,
+                collect_twice=True,
+                memory_label="batch_cleanup",
+                batch_id=batch_id,
+            )
+            log_memory_stats(
+                "batch_end",
+                device=self.translator.device,
+                batch_id=batch_id,
+                before=before,
+            )
+            self.translator._memory_batch_id = None
 
-        await self._model_executor.run(cleanup)
+        await self._model_executor.run_exclusive(cleanup)
 
     async def sent(self, image: Image.Image, config: Config) -> Context:
         self.translator._is_streaming_mode = getattr(config, '_web_frontend_optimized', False)

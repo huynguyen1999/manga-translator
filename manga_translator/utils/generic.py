@@ -75,19 +75,78 @@ class Context(dict):
         """Release large image arrays and intermediate pixel buffers to reclaim memory."""
         intermediate_keys = [
             "img_rgb", "img_alpha", "upscaled", "img_colorized",
-            "mask_raw", "mask", "img_inpainted", "gimp_mask",
+            "mask_raw", "mask", "inpaint_mask", "text_mask", "bubble_mask",
+            "detector_rescue_mask", "bubble_residual_mask", "protected_edge_mask",
+            "mask_bundle", "mask_profile", "img_inpainted", "img_rendered", "gimp_mask",
         ]
         if not keep_input:
             intermediate_keys.append("input")
         for key in intermediate_keys:
             if key in self:
                 self[key] = None
+        self.cleanup_layout_workspace()
+
+    def cleanup_detection_workspace(self):
+        """Drop decoded detector and OCR work after its checkpoint has been saved."""
+        for key in ("mask_raw", "textlines", "bubble_detections"):
+            if key in self:
+                self[key] = None
+        for region in self.get("text_regions", []) or []:
+            if isinstance(region, dict):
+                region.pop("_bubble_mask", None)
+            elif hasattr(region, "_bubble_mask"):
+                region._bubble_mask = None
+
+    def cleanup_mask_workspace(self):
+        """Drop mask-generation buffers while retaining page and translation metadata."""
+        for key in (
+            "mask_raw", "mask", "inpaint_mask", "text_mask", "bubble_mask",
+            "detector_rescue_mask", "bubble_residual_mask", "protected_edge_mask",
+            "mask_bundle", "mask_profile", "page_geometry",
+        ):
+            if key in self:
+                self[key] = None
+
+    def cleanup_mask_diagnostics(self):
+        """Drop mask diagnostics after their artifacts are saved, keeping the final mask."""
+        for key in (
+            "text_mask", "bubble_mask", "detector_rescue_mask",
+            "bubble_residual_mask", "protected_edge_mask", "mask_bundle",
+        ):
+            if key in self:
+                self[key] = None
+
+    def cleanup_layout_workspace(self):
+        """Drop page-sized layout scratch while keeping frozen region placements."""
+        for key in ("_layout_obstacles", "_free_text_zones", "page_geometry"):
+            if key in self:
+                self[key] = None
+        for region in self.get("text_regions", []) or []:
+            for key in (
+                "_free_text_source_mask", "_free_text_inpaint_mask",
+                "_free_text_ownership_mask", "_free_text_zone",
+            ):
+                if isinstance(region, dict):
+                    region.pop(key, None)
+                elif hasattr(region, key):
+                    setattr(region, key, None)
+
+    def cleanup_runtime(self, preserve_output: bool = False):
+        """Release runtime page buffers, optionally keeping API output images."""
+        output = {
+            key: self.get(key)
+            for key in ("result", "img_inpainted")
+        } if preserve_output else {}
+        self.cleanup_intermediate(keep_input=False)
+        self.cleanup_detection_workspace()
+        if not preserve_output and "result" in self:
+            self["result"] = None
+        else:
+            self.update(output)
 
     def cleanup_all_images(self):
         """Release all image buffers including input and result."""
-        self.cleanup_intermediate(keep_input=False)
-        if "result" in self:
-            self["result"] = None
+        self.cleanup_runtime()
 
 # TODO: Add TranslationContext for type linting
 

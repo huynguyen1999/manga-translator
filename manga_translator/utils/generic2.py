@@ -70,6 +70,22 @@ def is_valuable_text(text):
     return False
 
 
+def is_meaningful_ocr_text(text):
+    return any(
+        not is_control(ch) and not is_whitespace(ch)
+        and unicodedata.category(ch)[0] in ("L", "N")
+        for ch in text
+    )
+
+
+def contains_linguistic_ocr_text(text):
+    return any(unicodedata.category(ch).startswith("L") for ch in text)
+
+
+def is_preserved_region(region):
+    return getattr(region, "translation_policy", None) == "preserve"
+
+
 def dist(x1, y1, x2, y2):
     return np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
 

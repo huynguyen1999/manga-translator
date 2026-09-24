@@ -300,7 +300,7 @@ export const GroupSelectionModal: React.FC<GroupSelectionModalProps> = ({
           {(normalizedGroups.length > 0 || isLoadingGroups) && (
             <div className="space-y-2 pt-1">
               <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
-                <span className="font-medium">Existing & Recent Groups:</span>
+                <span className="font-medium">Existing Manga:</span>
                 <span className="text-[11px] text-zinc-400 dark:text-zinc-500 flex items-center space-x-1">
                   {isLoadingGroups && (
                     <Icon icon="carbon:renew" className="h-3 w-3 animate-spin inline-block mr-1" />
@@ -310,7 +310,7 @@ export const GroupSelectionModal: React.FC<GroupSelectionModalProps> = ({
                       ? 'Loading…'
                       : searchQuery.trim()
                       ? `${filteredGroups.length} of ${normalizedGroups.length}`
-                      : `${normalizedGroups.length} available`}
+                      : 'Search to find a manga'}
                   </span>
                 </span>
               </div>
@@ -350,7 +350,7 @@ export const GroupSelectionModal: React.FC<GroupSelectionModalProps> = ({
                   <div className="w-full py-2.5 px-3 rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800 text-center">
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">Loading existing manga…</p>
                   </div>
-                ) : filteredGroups.length > 0 ? (
+                ) : searchQuery.trim() && filteredGroups.length > 0 ? (
                   filteredGroups.map((grp) => {
                     const isSelected =
                       groupName.trim().toLowerCase() === grp.title.toLowerCase();
@@ -359,7 +359,7 @@ export const GroupSelectionModal: React.FC<GroupSelectionModalProps> = ({
                         key={grp.id || grp.title}
                         type="button"
                         onClick={() => handleSelectGroup(grp)}
-                        className={`inline-flex items-center space-x-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all cursor-pointer ${
+                        className={`inline-flex max-w-full items-center space-x-1.5 rounded-lg px-2.5 py-1 text-left text-xs font-medium transition-all cursor-pointer ${
                           isSelected
                             ? 'bg-indigo-600 text-white shadow-xs'
                             : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
@@ -370,7 +370,7 @@ export const GroupSelectionModal: React.FC<GroupSelectionModalProps> = ({
                           icon={isSelected ? 'carbon:checkmark' : 'carbon:tag'}
                           className="h-3 w-3 shrink-0"
                         />
-                        <span className="truncate max-w-[200px]">{grp.title}</span>
+                        <span className="min-w-0 whitespace-normal break-all">{grp.title}</span>
                         {grp.count !== undefined && (
                           <span className={`text-[10px] rounded px-1 py-0.2 ${
                             isSelected ? 'bg-indigo-700 text-indigo-100' : 'bg-zinc-200 dark:bg-zinc-700 text-zinc-500 dark:text-zinc-400'
@@ -381,7 +381,13 @@ export const GroupSelectionModal: React.FC<GroupSelectionModalProps> = ({
                       </button>
                     );
                   })
-                ) : searchQuery.trim() ? (
+                ) : !searchQuery.trim() ? (
+                  <div className="w-full py-2.5 px-3 rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800 text-center">
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                      Search to show matching manga groups
+                    </p>
+                  </div>
+                ) : (
                   <div className="w-full py-2.5 px-3 rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800 text-center">
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">
                       {isLoadingGroups
@@ -400,12 +406,6 @@ export const GroupSelectionModal: React.FC<GroupSelectionModalProps> = ({
                       <Icon icon="carbon:add-alt" className="h-3.5 w-3.5" />
                       <span>Use &ldquo;{searchQuery.trim()}&rdquo; as new group name</span>
                     </button>
-                  </div>
-                ) : (
-                  <div className="w-full py-2.5 px-3 rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800 text-center">
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                      No existing manga groups found
-                    </p>
                   </div>
                 )}
               </div>

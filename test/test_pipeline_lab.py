@@ -115,6 +115,26 @@ def test_pipeline_ocr_retry_persists_precomputed_batch_result(tmp_path):
     assert run.documents["ocr.json"][0]["text"] == "source"
 
 
+def test_pipeline_ocr_retry_skips_when_detection_has_no_textlines(tmp_path):
+    config = Config()
+    image = Image.new("RGB", (8, 8))
+    run = PipelineRun(tmp_path, "run-empty-ocr", image, config)
+    run.ctx = Context(
+        input=image,
+        upscaled=image,
+        img_rgb=np.zeros((8, 8, 3), dtype=np.uint8),
+        textlines=[],
+    )
+    run.documents["detection.json"] = []
+    translator = SimpleNamespace(_run_ocr=AsyncMock(side_effect=AssertionError("ran OCR without textlines")))
+
+    asyncio.run(run.retry_stage("ocr", config, translator))
+
+    assert run.documents["ocr.json"] == []
+    assert run._stage("ocr")["status"] == "completed"
+    translator._run_ocr.assert_not_awaited()
+
+
 def test_pipeline_upscale_retry_persists_precomputed_batch_result(tmp_path):
     config = Config()
     image = Image.new("RGB", (8, 8))

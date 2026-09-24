@@ -11,6 +11,7 @@ class TestServerArgs(unittest.TestCase):
         self.assertTrue(args.use_gpu)
         self.assertFalse(args.use_gpu_limited)
         self.assertEqual(args.executor_mode, 'inprocess')
+        self.assertIsNone(args.cpu_stage_workers)
 
     def test_explicit_use_gpu(self):
         args = parse_arguments(['--use-gpu'])
@@ -36,6 +37,13 @@ class TestServerArgs(unittest.TestCase):
         args = parse_arguments(['--host', '127.0.0.1', '--workers', '5'])
         self.assertEqual(args.host, '127.0.0.1')
         self.assertEqual(args.workers, 5)
+
+    def test_cpu_stage_worker_budget(self):
+        args = parse_arguments(['--workers', '5', '--cpu-stage-workers', '4'])
+        self.assertEqual(args.cpu_stage_workers, 4)
+        self.assertIsNone(parse_arguments(['--cpu-stage-workers', 'auto']).cpu_stage_workers)
+        with self.assertRaises(SystemExit):
+            parse_arguments(['--cpu-stage-workers', '0'])
 
     def test_mutually_exclusive_gpu_flags(self):
         with self.assertRaises(SystemExit):

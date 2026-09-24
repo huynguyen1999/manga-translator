@@ -7,6 +7,8 @@ from functools import wraps
 
 _active_cache: ContextVar[dict | None] = ContextVar('active_model_cache', default=None)
 _active_executor = ContextVar('active_model_executor', default=None)
+MODEL_EXECUTOR_CONCURRENCY = 2
+_model_cache_lock = threading.RLock()
 
 
 def set_model_executor(executor):
@@ -39,52 +41,92 @@ async def finish_before_cancelling(future):
 
 
 class SharedModelExecutor:
-    """Own shared models and their entire load/infer/unload lifecycle on one thread."""
+    """Own shared models while bounding concurrent local model operations."""
 
-    def __init__(self):
-        # ponytail: serialize local models; add device-specific lanes only if profiling warrants it.
-        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='shared-models')
+    def __init__(self, max_concurrent_calls: int = MODEL_EXECUTOR_CONCURRENCY):
+        self.max_concurrent_calls = max_concurrent_calls
+        self._pool = ThreadPoolExecutor(
+            max_workers=max_concurrent_calls, thread_name_prefix='shared-models'
+        )
         self._cache = {}
-        self._loop = None
-        self._thread_id = None
+        self._worker = threading.local()
+        self._loops = {}
+        self._loops_lock = threading.Lock()
+        self._slots = threading.BoundedSemaphore(max_concurrent_calls)
+        self._exclusive_lock = threading.Lock()
 
-    def _call(self, operation, args, kwargs):
+    def _call(self, operation, args, kwargs, exclusive=False):
         import torch
         from .device_memory import DEVICE_MEMORY_LOCK
 
-        if self._loop is None:
-            self._thread_id = threading.get_ident()
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
-        with DEVICE_MEMORY_LOCK:
+        acquired_slots = 0
+        exclusive_acquired = False
+        try:
+            if exclusive:
+                self._exclusive_lock.acquire()
+                exclusive_acquired = True
+                for _ in range(self.max_concurrent_calls):
+                    self._slots.acquire()
+                    acquired_slots += 1
+            else:
+                self._slots.acquire()
+                acquired_slots = 1
+
+            loop = getattr(self._worker, 'loop', None)
+            if loop is None:
+                loop = asyncio.new_event_loop()
+                self._worker.loop = loop
+                with self._loops_lock:
+                    self._loops[threading.get_ident()] = loop
+                asyncio.set_event_loop(loop)
+            self._worker.active = True
             token = set_model_cache(self._cache)
             try:
-                return self._loop.run_until_complete(operation(*args, **kwargs))
+                return loop.run_until_complete(operation(*args, **kwargs))
             finally:
                 try:
-                    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                        torch.mps.synchronize()
+                    with DEVICE_MEMORY_LOCK:
+                        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                            torch.mps.synchronize()
                 except Exception:
                     pass
                 finally:
                     reset_model_cache(token)
+                    self._worker.active = False
+        finally:
+            for _ in range(acquired_slots):
+                self._slots.release()
+            if exclusive_acquired:
+                self._exclusive_lock.release()
 
     async def run(self, operation, *args, **kwargs):
-        if threading.get_ident() == self._thread_id:
+        if getattr(self._worker, 'active', False):
             return await operation(*args, **kwargs)
         context = copy_context()
         future = self._pool.submit(context.run, self._call, operation, args, kwargs)
         return await finish_before_cancelling(asyncio.wrap_future(future))
 
+    async def run_exclusive(self, operation, *args, **kwargs):
+        if getattr(self._worker, 'active', False):
+            raise RuntimeError('Exclusive model cleanup cannot run inside a model operation')
+        context = copy_context()
+        future = self._pool.submit(context.run, self._call, operation, args, kwargs, True)
+        return await finish_before_cancelling(asyncio.wrap_future(future))
+
     def close(self):
-        def cleanup():
-            self._cache.clear()
-            if self._loop is not None:
-                self._loop.run_until_complete(self._loop.shutdown_asyncgens())
-                self._loop.run_until_complete(self._loop.shutdown_default_executor())
-                self._loop.close()
-        self._pool.submit(cleanup).result()
-        self._pool.shutdown()
+        self._pool.shutdown(wait=True)
+
+        def close_loops():
+            for loop in self._loops.values():
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.run_until_complete(loop.shutdown_default_executor())
+                loop.close()
+
+        closer = threading.Thread(target=close_loops, name='shared-model-cleanup')
+        closer.start()
+        closer.join()
+        self._cache.clear()
 
 
 def model_operation(operation):
@@ -111,3 +153,22 @@ def get_model_cache(name: str, default: dict) -> dict:
     if cache is None:
         return default
     return cache.setdefault(name, {})
+
+
+def get_cached_model(name: str, default: dict, key, factory):
+    """Return one shared model instance, creating it once across executor threads."""
+    with _model_cache_lock:
+        cache = get_model_cache(name, default)
+        if key not in cache:
+            cache[key] = factory()
+        return cache[key]
+
+
+def remove_cached_model(name: str, default: dict, key):
+    with _model_cache_lock:
+        return get_model_cache(name, default).pop(key, None)
+
+
+def clear_model_cache(name: str, default: dict):
+    with _model_cache_lock:
+        get_model_cache(name, default).clear()

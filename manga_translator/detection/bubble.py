@@ -13,7 +13,9 @@ import shutil
 import cv2
 import numpy as np
 
-from ..utils.model_cache import get_model_cache, model_operation
+from ..utils.model_cache import (
+    clear_model_cache, get_cached_model, model_operation,
+)
 
 logger = logging.getLogger(__name__)
 _bubble_cache: dict[tuple[str, str, float, float, int], "BubbleDetector"] = {}
@@ -119,15 +121,15 @@ class BubbleDetector:
 
 
 def get_detector(model: str, confidence: float, mask_threshold: float, image_size: int, device: str = "cpu") -> BubbleDetector:
-    cache = get_model_cache('bubble_detector', _bubble_cache)
     key = (model, device, confidence, mask_threshold, image_size)
-    detector = cache.get(key)
-    if detector is None:
+
+    def create_detector():
         started = perf_counter()
         detector = BubbleDetector(model, confidence, mask_threshold, image_size, device)
-        cache[key] = detector
         logger.info("Loaded bubble detector %s in %.0fms", model, (perf_counter() - started) * 1000)
-    return detector
+        return detector
+
+    return get_cached_model('bubble_detector', _bubble_cache, key, create_detector)
 
 
 def detect(image: np.ndarray, config, device: str = "cpu") -> list[BubbleDetection]:
@@ -158,7 +160,7 @@ async def dispatch_batch(images: list[np.ndarray], config, device: str = "cpu") 
 
 @model_operation
 async def unload():
-    get_model_cache('bubble_detector', _bubble_cache).clear()
+    clear_model_cache('bubble_detector', _bubble_cache)
 
 
 def serialize_bubble_detections(

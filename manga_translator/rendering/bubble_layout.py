@@ -1273,13 +1273,23 @@ def group_regions_by_bubbles(regions, detections, minimum_overlap: float = 0.35,
                 region.bubble_id = f"bubble_{detection_index}"
                 region._bubble_detection_confidence = detections[detection_index].confidence
                 result.append(region)
-        elif len(members) == 1:
+            continue
+
+        preserved = [item for item in members if getattr(item[1], "translation_policy", None) == "preserve"]
+        for _, region in preserved:
+            region._bubble_mask = detections[detection_index].mask
+            region.bubble_id = f"bubble_{detection_index}"
+            region._bubble_detection_confidence = detections[detection_index].confidence
+            result.append(region)
+        members = [item for item in members if getattr(item[1], "translation_policy", None) != "preserve"]
+
+        if len(members) == 1:
             region = members[0][1]
             region._bubble_mask = detections[detection_index].mask
             region.bubble_id = f"bubble_{detection_index}"
             region._bubble_detection_confidence = detections[detection_index].confidence
             result.append(region)
-        else:
+        elif len(members) > 1:
             region = copy.copy(members[0][1])
             for name, descriptor in vars(type(region)).items():
                 if isinstance(descriptor, cached_property):

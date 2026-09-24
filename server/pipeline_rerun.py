@@ -580,7 +580,7 @@ async def execute_rerun_plan(
         ctx.mask_profile = bundle.profile
         ctx.page_geometry = bundle.page_geometry
         ctx.mask = bundle.final_inpaint_mask
-        ctx.inpaint_mask = bundle.final_inpaint_mask.copy()
+        ctx.inpaint_mask = bundle.final_inpaint_mask
 
         with open(staging_dir / "profiling.json", "w", encoding="utf-8") as profile_file:
             json.dump(bundle.profile, profile_file, indent=2)
@@ -589,11 +589,15 @@ async def execute_rerun_plan(
         cv2.imwrite(str(staging_dir / "bubble_mask.png"), ctx.bubble_mask)
         cv2.imwrite(str(staging_dir / "mask_final.png"), ctx.mask)
         cv2.imwrite(str(staging_dir / "inpaint_mask.png"), ctx.inpaint_mask)
+        ctx.cleanup_mask_diagnostics()
+        bundle = None
 
         # Inpainting
         await report("inpainting")
         ctx.img_inpainted = await translator._run_inpainting(config, ctx)
         save_jpeg(ctx.img_inpainted, staging_dir / "inpainted.jpg")
+        if getattr(ctx, "_bubble_layout_ready", False):
+            ctx.cleanup_mask_workspace()
 
         # Translation Remapping
         await report("translation_remap")

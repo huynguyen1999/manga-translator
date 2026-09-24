@@ -8,7 +8,8 @@ from unittest.mock import ANY, AsyncMock, patch
 
 from PIL import Image
 
-from server.batch_scheduler import BatchScheduler
+from manga_translator.pipeline.stages import ResourceClass
+from server.batch_scheduler import BatchScheduler, stage_resource_limits
 from server.batch_store import BatchStore
 
 
@@ -69,6 +70,34 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_mps_scheduler_keeps_default_detector_pages_single(self):
+        scheduler = BatchScheduler(
+            None, None, tempfile.gettempdir(), mps_memory_mode=True
+        )
+        batch = {"id": "manga-a", "settings": {}}
+        items = [
+            {"id": "p1", "status": "queued", "pipelineStage": "detection"},
+            {"id": "p2", "status": "queued", "pipelineStage": "detection"},
+        ]
+
+        self.assertIsNone(scheduler._find_page_inference_group(batch, items))
+
+        with patch.object(
+            BatchScheduler,
+            "_config_for",
+            return_value=SimpleNamespace(upscale=SimpleNamespace(dict=lambda: {})),
+        ):
+            stage, group = scheduler._find_page_inference_group(
+                batch,
+                [
+                    {"id": "p1", "status": "queued", "pipelineStage": "upscaling"},
+                    {"id": "p2", "status": "queued", "pipelineStage": "upscaling"},
+                ],
+            )
+
+        self.assertEqual(stage, "upscaling")
+        self.assertEqual(len(group), 2)
+
     async def test_ocr_group_claim_is_atomic_and_keeps_stage_checkpoint(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = Path(root)
@@ -89,6 +118,44 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(claimed), 2)
             self.assertTrue(all(item["pipelineStage"] == "ocr" for item in claimed))
             self.assertTrue(all(item["status"] == "processing" for item in saved["items"]))
+
+    async def test_checkpointed_ocr_group_skips_pages_without_textlines(self):
+        class Store:
+            async def get_batch(self, _batch_id):
+                return {"id": "manga-a", "items": []}
+
+            async def mutate(self, _batch_id, mutator):
+                mutator({"items": []})
+
+        run = SimpleNamespace(
+            manifest={"createdAt": "now"},
+            ctx=None,
+            _ensure_context=lambda: SimpleNamespace(input=None, textlines=[]),
+            _document=lambda _name: [],
+            release_runtime=lambda: None,
+        )
+        ocr_batch = AsyncMock(return_value=[])
+
+        translator = SimpleNamespace(_pipeline_run=None, _run_ocr_batch=ocr_batch)
+        instance = SimpleNamespace(
+            translator=translator,
+            _run_translation=AsyncMock(),
+        )
+        scheduler = BatchScheduler(Store(), SimpleNamespace(free_executor=AsyncMock()), tempfile.gettempdir())
+        scheduler._complete_checkpointed_textless = AsyncMock()
+
+        with (
+            patch.object(scheduler, "_checkpoint_run", AsyncMock(return_value=run)),
+            patch.object(BatchScheduler, "_config_for", return_value=object()),
+        ):
+            await scheduler._process_checkpointed_ocr_group(
+                "manga-a", [{"id": "p1", "resultFolder": "page-1"}], instance
+            )
+
+        scheduler._complete_checkpointed_textless.assert_awaited_once()
+        self.assertEqual(scheduler._complete_checkpointed_textless.await_args.args[3], "ocr")
+        instance._run_translation.assert_not_awaited()
+        ocr_batch.assert_not_awaited()
 
     async def test_model_group_claim_reports_the_claimed_stage(self):
         with tempfile.TemporaryDirectory() as root:
@@ -115,9 +182,9 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self, input_path):
                 self.input_file = input_path
                 self.manifest = {
-                    "id": "manga-a", "status": "processing", "items": [{
-                        "id": "p1", "name": "1.webp", "status": "processing",
-                        "stage": "detection", "pipelineStage": "initialize",
+                    "id": "manga-a", "status": "waiting", "items": [{
+                        "id": "p1", "name": "1.webp", "status": "queued",
+                        "stage": "layout", "pipelineStage": "layout",
                         "resultFolder": "page-1",
                     }],
                 }
@@ -138,18 +205,22 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
                     {"id": "input", "status": "completed"},
                     {"id": "colorization", "status": "skipped"},
                     {"id": "upscaling", "status": "skipped"},
-                    {"id": "detection", "status": "pending"},
-                    {"id": "ocr", "status": "pending"},
-                    {"id": "textline_merge", "status": "pending"},
-                    {"id": "bubble_detection", "status": "pending"},
-                    {"id": "mask_generation", "status": "pending"},
+                    {"id": "detection", "status": "completed"},
+                    {"id": "ocr", "status": "completed"},
+                    {"id": "textline_merge", "status": "completed"},
+                    {"id": "bubble_detection", "status": "completed"},
+                    {"id": "translation", "status": "completed"},
+                    {"id": "mask_generation", "status": "completed"},
+                    {"id": "layout", "status": "pending"},
                     {"id": "inpainting", "status": "pending"},
+                    {"id": "rendering", "status": "pending"},
                 ],
             }
             ctx = None
             translator = None
             called_on_executor = False
             called_stage = None
+            started_at = None
 
             def _document(self, name):
                 return [{"text": "text"}] if name == "detection.json" else None
@@ -160,6 +231,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             async def retry_stage(self, stage_id, *_args, **_kwargs):
                 self.called_on_executor = instance.in_executor_loop
                 self.called_stage = stage_id
+                self.started_at = store.manifest["items"][0].get("stageStartedAt")
                 self._stage(stage_id)["status"] = "completed"
 
             def _stage(self, stage_id):
@@ -177,7 +249,9 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             input_path = Path(root) / "1.webp"
             Image.new("RGB", (2, 2)).save(input_path, "WEBP")
             store = Store(input_path)
-            scheduler = BatchScheduler(store, Executors(), root)
+            scheduler = BatchScheduler(
+                store, Executors(), root, resource_limits={ResourceClass.CPU_HEAVY: 1}
+            )
             run = Run()
 
             class Translator:
@@ -199,29 +273,71 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
                         self.in_executor_loop = False
 
             instance = Instance()
+            claimed = await scheduler._claim_prepare_item("manga-a", "p1")
+            self.assertIsNotNone(claimed)
+            self.assertIsNone(claimed.get("stageStartedAt"))
+
+            slot = await scheduler._acquire_stage_resource("layout")
+            waiting_for_slot = asyncio.Event()
+            acquire = scheduler._acquire_stage_resource
+
+            async def tracked_acquire(stage_id):
+                waiting_for_slot.set()
+                return await acquire(stage_id)
+
+            scheduler._acquire_stage_resource = tracked_acquire
             with (
                 patch.object(scheduler, "_checkpoint_run", AsyncMock(return_value=run)),
                 patch.object(BatchScheduler, "_config_for", return_value=object()),
             ):
-                await scheduler._process_checkpointed_prepare_item("manga-a", "p1", instance)
+                process = asyncio.create_task(
+                    scheduler._process_checkpointed_prepare_item("manga-a", "p1", instance)
+                )
+                await waiting_for_slot.wait()
+                try:
+                    self.assertNotIn("stageStartedAt", store.manifest["items"][0])
+                finally:
+                    scheduler._release_stage_resource("layout", slot)
+                await process
 
             self.assertTrue(run.called_on_executor)
-            self.assertEqual(run.called_stage, "detection")
-            self.assertEqual(store.manifest["items"][0]["stage"], "ocr")
-            self.assertEqual(store.manifest["items"][0]["pipelineStage"], "ocr")
+            self.assertEqual(run.called_stage, "layout")
+            self.assertIsNotNone(run.started_at)
+            self.assertEqual(store.manifest["items"][0]["stage"], "inpainting")
+            self.assertEqual(store.manifest["items"][0]["pipelineStage"], "inpainting")
 
-    async def test_stage_resource_slots_serialize_gpu_and_allow_cpu_work(self):
-        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
+    async def test_stage_resource_slots_cap_gpu_at_two_and_allow_cpu_work(self):
+        limits = stage_resource_limits(4, 3)
+        limits[ResourceClass.GPU] = 4
+        scheduler = BatchScheduler(None, None, tempfile.gettempdir(), resource_limits=limits)
+        self.assertEqual(scheduler.resource_limits[ResourceClass.CPU_HEAVY], 3)
+        self.assertEqual(scheduler.resource_limits[ResourceClass.CPU_LIGHT], 3)
+        self.assertEqual(scheduler.resource_limits[ResourceClass.GPU], 2)
         gpu_slot = await scheduler._acquire_stage_resource("ocr")
+        second_gpu_slot = await scheduler._acquire_stage_resource("detection")
         try:
             with self.assertRaises(asyncio.TimeoutError):
-                await asyncio.wait_for(scheduler._acquire_stage_resource("detection"), 0.01)
-            cpu_slot = await asyncio.wait_for(
-                scheduler._acquire_stage_resource("mask_generation"), 0.01
-            )
-            cpu_slot.release()
+                await asyncio.wait_for(scheduler._acquire_stage_resource("bubble_detection"), 0.01)
         finally:
-            gpu_slot.release()
+            scheduler._release_stage_resource("ocr", gpu_slot)
+            scheduler._release_stage_resource("detection", second_gpu_slot)
+
+        cpu_slots = [
+            await scheduler._acquire_stage_resource("mask_generation")
+            for _ in range(3)
+        ]
+        try:
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    scheduler._acquire_stage_resource("layout"), 0.01
+                )
+        finally:
+            for cpu_slot in cpu_slots:
+                scheduler._release_stage_resource("mask_generation", cpu_slot)
+
+    def test_stage_resource_limits_accept_single_gpu_slot(self):
+        limits = stage_resource_limits(2, 2, gpu_concurrency=1)
+        self.assertEqual(limits[ResourceClass.GPU], 1)
 
     def test_group_progress_only_updates_current_page_outside_translation(self):
         translator = SimpleNamespace(_current_image_context={"request_id": "manga-a:page-2"})

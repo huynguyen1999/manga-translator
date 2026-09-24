@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from server.in_process_executor import InProcessExecutorInstance
-from server.main import _cpu_threads_per_worker
+from server.main import _cpu_stage_worker_count, _cpu_threads_per_worker
 from manga_translator.utils.inference import ModelWrapper
 from manga_translator.utils.model_cache import SharedModelExecutor, get_model_cache, model_operation
 
@@ -39,6 +39,13 @@ class FakeTranslator:
 
 
 class InProcessExecutorTest(unittest.IsolatedAsyncioTestCase):
+    def test_cpu_stage_budget_is_worker_and_cpu_bounded(self):
+        self.assertEqual(_cpu_stage_worker_count(1, cpu_count=8), 1)
+        self.assertEqual(_cpu_stage_worker_count(2, cpu_count=8), 2)
+        self.assertEqual(_cpu_stage_worker_count(4, cpu_count=8), 3)
+        self.assertEqual(_cpu_stage_worker_count(10, configured=4, cpu_count=8), 4)
+        self.assertEqual(_cpu_stage_worker_count(2, configured=4, cpu_count=8), 2)
+
     def test_cpu_budget_reserves_capacity_for_api(self):
         self.assertEqual(_cpu_threads_per_worker(8, 1), 7)
         self.assertEqual(_cpu_threads_per_worker(8, 3), 2)
@@ -76,11 +83,15 @@ class InProcessExecutorTest(unittest.IsolatedAsyncioTestCase):
         model = object()
         self.executor._model_executor._cache["ocr"] = {"default": model}
         self.executor.translator.device = "mps"
+        self.executor.translator._memory_batch_id = "manga-1"
 
         with patch("server.in_process_executor.empty_device_cache") as cleanup:
             await self.executor.reclaim_memory()
 
-        cleanup.assert_called_once_with("mps")
+        cleanup.assert_called_once_with(
+            "mps", collect_twice=True, memory_label="batch_cleanup", batch_id="manga-1"
+        )
+        self.assertIsNone(self.executor.translator._memory_batch_id)
         self.assertIs(self.executor._model_executor._cache["ocr"]["default"], model)
 
     async def test_stream_callbacks_return_to_api_event_loop(self):

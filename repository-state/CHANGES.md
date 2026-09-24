@@ -2,6 +2,56 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-23 — Overlay speech bubbles in page detail
+
+- Replaced the standalone bubble-mask view with a translucent bubble overlay on the original page.
+
+## 2026-09-23 — Search existing manga before showing assignment matches
+
+- Group assignment dialogs now show full matching manga titles only after a search. Studio suggestions come from manga already in the library, so recent titles and unfinished batches are not presented as existing groups.
+
+## 2026-09-23 — Allow two concurrent GPU model tasks
+
+- Raised the in-process GPU stage and shared model executor limits to two concurrent calls while retaining one shared instance per model.
+- Made model-cache creation thread-safe and device-cache reclamation exclusive with active model calls.
+
+## 2026-09-23 — Bound Apple Silicon batch detection memory
+
+- On MPS, limit the in-process model executor and scheduler to one GPU call and run default/DBNet detection one page at a time; other devices retain the existing two-call and paired-detection behavior.
+- Serialize the shared offline translator's mutable configure-and-infer operation so concurrent model lanes cannot mix request settings.
+
+## 2026-09-23 — Bound page memory and add pipeline telemetry
+
+- Added per-stage RSS, Python object, and MPS memory snapshots; Context and PipelineRun cleanup now release page image, mask, detector, and layout workspaces while retaining requested outputs. Mask diagnostics are freed before layout starts.
+- Reused the final mask buffer for both mask references, cleaned persisted bubble detections before translation, and processed the legacy batch API in bounded preparation chunks.
+- Capped MPS inpainting inputs at 1024px because the default 2048px limit left common full pages at full resolution and produced high float32 activation peaks.
+- Batch completion drops translator page-history references and performs a synchronized two-pass garbage/device-cache cleanup while keeping shared models loaded.
+- Added regressions for Context cleanup, batch-state clearing, and bounded legacy preparation.
+
+## 2026-09-23 — Preserve numeric-only OCR regions
+
+- OCR grouping now retains Unicode numeric annotations, preserves their source text and measured source font size, skips translator payloads in fast and professional modes, and records retention/policy metadata through checkpoints.
+- Added regressions covering Unicode numbers, provider exclusion, mask participation, and final rendering.
+
+## 2026-09-23 — Show queued batch stage
+
+- Queued page rows show the next scheduled pipeline step, with distinct labels for pages waiting to start or for a batch slot.
+
+## 2026-09-23 — Allow bounded CPU page-stage concurrency
+
+- Derived scheduler CPU-heavy/light limits from pipeline workers and added `--cpu-stage-workers` to override the automatic heavy-stage cap of three.
+- Shared one bounded background CPU pool across executor event loops; retained one interactive slot, two GPU slots, and single-threaded OpenCV.
+- Added regressions for CPU overlap and process-wide capacity, scheduler limits, and bounded GPU capacity.
+
+## 2026-09-23 — Rescue severely compressed speech-bubble text with one word break
+
+- Preserve the normal shape-aware layout, then consider one dictionary-valid split only when a long word causes compression below 90% of the calibrated target and the split materially improves font size. Freeze the chosen lines and persist rescue diagnostics through `layout.json`.
+- Added focused regressions for compression gates, single-break behavior, dictionary breakpoints, and diagnostic round trips.
+
+## 2026-09-23 — Honor OCR minimum confidence in MangaOCR output
+
+- `mocr` now applies the configured confidence threshold to the final OCR region after aggregating its source-region scores, matching the other OCR backends.
+
 ## 2026-09-23 — Freeze layout across stage checkpoints
 
 - Made versioned `layout.json` authoritative for selected fonts, positions, exact line strings, bubble geometry, and input fingerprints; rendering restores it by stable region ID and paints saved lines without reflow.
@@ -27,14 +77,14 @@ Record new features and large changes here. Keep implementation detail in code, 
 ## 2026-09-23 — Batch model inference across compatible pages
 
 - The stage scheduler now groups up to two compatible pages for upscaling, default/DBNet text detection, and YOLO bubble detection.
-- Each model batch routes through the serialized inference executor; page outputs keep independent stage checkpoints and artifacts. Other detector backends retain their existing per-page inference path.
+- Each model batch routes through the shared inference executor; up to two local model calls can be in flight, and page outputs keep independent stage checkpoints and artifacts. Other detector backends retain their existing per-page inference path.
 - Added batch mapping, stage-claim, and checkpoint persistence coverage.
 
 ## 2026-09-23 — Enforce stage resource limits
 
-- Applied canonical resource classes to in-process batch stage scheduling: GPU 1, heavy CPU 1, light CPU 2, network 2, and I/O 4 concurrent claims.
+- Applied canonical resource classes to in-process batch stage scheduling: GPU 2, heavy CPU 1, light CPU 2, network 2, and I/O 4 concurrent claims.
 - Kept preparation pages on disk until their stage slot is available; translation groups share the bounded network lane.
-- Added a scheduler regression check showing GPU stages serialize while heavy CPU work can run concurrently.
+- Added a scheduler regression check showing GPU stages stay within their configured capacity while heavy CPU work can run concurrently.
 
 ## 2026-09-23 — Batch OCR crops across ready pages
 

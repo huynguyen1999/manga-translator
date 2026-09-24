@@ -3,7 +3,6 @@ import type { TranslationSettings, FinishedImage } from '@/types';
 const SETTINGS_KEY = 'manga-translator-settings';
 const REMEMBER_SETTINGS_KEY = 'manga-translator-remember-settings';
 const FINISHED_IMAGES_KEY = 'manga-translator-finished-images';
-const RECENT_GROUPS_KEY = 'manga-translator-recent-groups';
 
 const isLocalStorageAvailable = (): boolean => {
   try {
@@ -81,30 +80,4 @@ export const saveFinishedImages = (_images: FinishedImage[]): void => {
 
 export const addFinishedImage = (_image: FinishedImage): void => {
   // No-op for localStorage to prevent quota exhaustion and Blob corruption
-};
-
-export const loadRecentGroups = (): string[] => {
-  if (!isLocalStorageAvailable()) return [];
-  try {
-    const stored = window.localStorage.getItem(RECENT_GROUPS_KEY);
-    if (!stored) return [];
-    const parsed = JSON.parse(stored);
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string' && item.trim() !== '' && item.trim() !== 'Ungrouped') : [];
-  } catch (error) {
-    console.warn('Failed to load recent groups from localStorage:', error);
-    return [];
-  }
-};
-
-export const saveRecentGroup = (groupName: string): void => {
-  const cleanName = groupName.trim();
-  if (!cleanName || cleanName === 'Ungrouped') return;
-  if (!isLocalStorageAvailable()) return;
-  try {
-    const existing = loadRecentGroups();
-    const updated = [cleanName, ...existing.filter((g) => g !== cleanName)].slice(0, 15);
-    window.localStorage.setItem(RECENT_GROUPS_KEY, JSON.stringify(updated));
-  } catch (error) {
-    console.warn('Failed to save recent group to localStorage:', error);
-  }
 };

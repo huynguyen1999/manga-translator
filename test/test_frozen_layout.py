@@ -49,8 +49,19 @@ def test_frozen_layout_survives_context_rebuild_without_reflow(monkeypatch):
     translation_checkpoint = serialize_regions(ctx.text_regions)
 
     layout_page(ctx, config, font_path)
+    region._hyphenation_diagnostics = {
+        "calibrated_target": 32,
+        "normal_font_size": 23,
+        "final_font_size": 30,
+        "font_ratio_before_rescue": 0.7188,
+        "font_ratio_after_rescue": 0.9375,
+        "hyphenation_rescue_selected": True,
+        "introduced_hyphen_count": 1,
+        "introduced_hyphen_words": ["UNCHARACTERISTICALLY"],
+    }
     bubble_doc = []
     layout_doc = serialize_frozen_layout(ctx, config, font_path, bubble_doc)
+    assert layout_doc["regions"][0]["hyphenation"] == region._hyphenation_diagnostics
     uninterrupted = asyncio.run(render_page(ctx, config, font_path))
 
     restored_region = deserialize_textblocks(translation_checkpoint)[0]
@@ -59,6 +70,7 @@ def test_frozen_layout_survives_context_rebuild_without_reflow(monkeypatch):
         resumed.text_regions, config, font_path, bubble_doc, image.shape
     )
     hydrate_layout(resumed, layout_doc, inputs["fingerprint"])
+    assert restored_region._hyphenation_diagnostics == region._hyphenation_diagnostics
     assert not hasattr(restored_region, "_bubble_box")
 
     def fail_if_reflow(*_args, **_kwargs):

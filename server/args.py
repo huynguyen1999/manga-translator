@@ -33,6 +33,15 @@ def dir_path(string):
         raise argparse.ArgumentTypeError(f'No such directory: "{string}"')
     return s
 
+def positive_int(string):
+    value = int(string)
+    if value < 1:
+        raise argparse.ArgumentTypeError('value must be at least 1')
+    return value
+
+def cpu_stage_workers(string):
+    return None if string.lower() == 'auto' else positive_int(string)
+
 def parse_arguments(args=None):
     parser = argparse.ArgumentParser(description="Specify host and port for the server.")
     parser.add_argument('--host', type=str, default='0.0.0.0', help='The host address (default: 0.0.0.0)')
@@ -47,8 +56,10 @@ def parse_arguments(args=None):
     parser.add_argument('--pre-dict', default=None, type=file_path, help='Path to the pre-translation dictionary file')
     parser.add_argument('--post-dict', default=None, type=file_path, help='Path to the post-translation dictionary file')    
     parser.add_argument('--executor-mode', choices=['inprocess', 'subprocess'], default='inprocess',
-                        help='Execution mode: "inprocess" overlaps image pipelines with shared, serialized models; "subprocess" spawns separate worker processes (default: inprocess)')
+                        help='Execution mode: "inprocess" shares models and allows up to two concurrent GPU tasks; "subprocess" spawns separate worker processes (default: inprocess)')
     parser.add_argument('--workers', type=int, default=3, help='Number of active image pipelines; in-process workers share models (default: 3)')
+    parser.add_argument('--cpu-stage-workers', type=cpu_stage_workers, default=None,
+                        help='Maximum concurrent background CPU stages (default: auto, capped at 3)')
     parser.add_argument('--inpainting-concurrency', type=int, default=0, help='Maximum concurrent inpainting passes to avoid VRAM spikes (0 = unlimited, default: 0)')
     parser.add_argument('--gpu-ids', type=str, default=None, help='Comma-separated list of GPU indices to distribute workers across, e.g. "0,1"')
     g = parser.add_mutually_exclusive_group()

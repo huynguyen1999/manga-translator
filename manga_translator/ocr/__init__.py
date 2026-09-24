@@ -7,7 +7,9 @@ from .model_48px_ctc import Model48pxCTCOCR
 from .model_manga_ocr import ModelMangaOCR
 from ..config import Ocr, OcrConfig
 from ..utils import Quadrilateral
-from ..utils.model_cache import get_model_cache, model_operation
+from ..utils.model_cache import (
+    get_cached_model, model_operation, remove_cached_model,
+)
 
 OCRS = {
     Ocr.ocr32px: Model32pxOCR,
@@ -20,11 +22,7 @@ ocr_cache = {}
 def get_ocr(key: Ocr, *args, **kwargs) -> CommonOCR:
     if key not in OCRS:
         raise ValueError(f'Could not find OCR for: "{key}". Choose from the following: %s' % ','.join(OCRS))
-    cache = get_model_cache('ocr', ocr_cache)
-    if not cache.get(key):
-        ocr = OCRS[key]
-        cache[key] = ocr(*args, **kwargs)
-    return cache[key]
+    return get_cached_model('ocr', ocr_cache, key, lambda: OCRS[key](*args, **kwargs))
 
 @model_operation
 async def prepare(ocr_key: Ocr, device: str = 'cpu'):
@@ -57,4 +55,4 @@ async def dispatch_batch(ocr_key: Ocr, pages: list[tuple[np.ndarray, List[Quadri
 
 @model_operation
 async def unload(ocr_key: Ocr):
-    get_model_cache('ocr', ocr_cache).pop(ocr_key, None)
+    remove_cached_model('ocr', ocr_cache, ocr_key)
