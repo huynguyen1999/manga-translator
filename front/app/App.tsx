@@ -297,6 +297,10 @@ export const App: React.FC = () => {
   }, [navigate, parsedRoute.galleryPageSize, parsedRoute.gallerySearch, parsedRoute.gallerySection, parsedRoute.gallerySort]);
 
   const handleCloseMangaDetail = useCallback(() => {
+    if (location.state?.from) {
+      navigate(-1);
+      return;
+    }
     navigate(validatePriorRoute(location.state?.from));
   }, [location.state, navigate]);
 
@@ -317,6 +321,8 @@ export const App: React.FC = () => {
 
   const [selectedImageForModal, setSelectedImageForModal] = useState<FinishedImage | null>(null);
   const [selectedImageRetry, setSelectedImageRetry] = useState<(() => void | Promise<void>) | null>(null);
+  const [selectedModalImages, setSelectedModalImages] = useState<FinishedImage[]>([]);
+  const [selectedModalIndex, setSelectedModalIndex] = useState(-1);
 
   // State Hooks
   const [fileStatuses, setFileStatuses] = useState<Map<string, FileStatus>>(
@@ -2147,6 +2153,8 @@ export const App: React.FC = () => {
       mangaTitle?: string;
       offlineModel?: string;
       geminiModel?: string;
+      images?: FinishedImage[];
+      currentIndex?: number;
     },
   ) => {
     if (!result) return;
@@ -2212,12 +2220,16 @@ export const App: React.FC = () => {
       settings: mergedSettings,
     };
     setSelectedImageForModal(finishedItem);
-    setSelectedImageRetry(() => onRetry ?? null);
+    setSelectedModalImages(options?.images ?? []);
+    setSelectedModalIndex(options?.currentIndex ?? -1);
+    setSelectedImageRetry(options?.images?.length ? null : () => onRetry ?? null);
   };
 
   const closeStudioViewer = useCallback(() => {
     setSelectedImageForModal(null);
     setSelectedImageRetry(null);
+    setSelectedModalImages([]);
+    setSelectedModalIndex(-1);
   }, []);
 
 
@@ -2789,6 +2801,15 @@ export const App: React.FC = () => {
         <PageDetailModal
           image={selectedImageForModal}
           onClose={closeStudioViewer}
+          images={selectedModalImages}
+          currentIndex={selectedModalIndex >= 0 ? selectedModalIndex : undefined}
+          onNavigate={(index) => {
+            const nextImage = selectedModalImages[index];
+            if (!nextImage) return;
+            setSelectedImageForModal(nextImage);
+            setSelectedImageRetry(null);
+            setSelectedModalIndex(index);
+          }}
           onRetry={selectedImageRetry ?? (selectedImageForModal.folder ? retryFinishedImage : undefined)}
           onRetryFromStage={selectedImageForModal.folder ? retryFinishedImage : undefined}
           onRerender={selectedImageForModal.folder ? (image) => handleOpenPipelineRerun([image], selectedImageForModal.groupId ?? undefined, selectedImageForModal.mangaTitle) : undefined}

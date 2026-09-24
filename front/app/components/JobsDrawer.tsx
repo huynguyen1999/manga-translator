@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "@iconify/react";
 import { Link } from "react-router";
-import type { MangaSummary, SummaryJob, TranslationBatch, TranslationSettings, TranslatorKey } from "@/types";
+import type { FinishedImage, MangaSummary, SummaryJob, TranslationBatch, TranslationSettings, TranslatorKey } from "@/types";
 import { BatchCard } from "./TranslatingSection";
 import { summaryJobProgress } from "@/utils/summaryJobs";
 import { apiUrl } from "@/utils/api";
@@ -44,6 +44,8 @@ interface JobsDrawerProps {
       mangaTitle?: string;
       offlineModel?: string;
       geminiModel?: string;
+      images?: FinishedImage[];
+      currentIndex?: number;
     },
   ) => void;
   onOpenPageEdit?: (folder: string) => void;

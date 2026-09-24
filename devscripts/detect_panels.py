@@ -3,37 +3,46 @@
 
 Supported models:
   1. `shadowb`: ShadowB/Manga109-panel-balloon-text-yolov26-segmentation (Instance Segmentation: panel, text, balloon)
-  2. `leoxs22`: leoxs22/manga-panel-detector-yolo26n (Object Detection: panel, text)
+  2. `ashu` / `manga-segment`: Ashu11-A/Manga-Segment (YOLOv11s Instance Segmentation: panel/comic, speech-balloon)
+  3. `leoxs22`: leoxs22/manga-panel-detector-yolo26n (Object Detection: panel, text)
+  4. `jebin2` / `mosesb`: mosesb/best-comic-panel-detection (Object Detection: Comic Panel)
 
 Features:
-  - Automatic download from Hugging Face Hub if weights are not present locally.
+  - Automatic download from Hugging Face Hub / GitHub Releases if weights are not present locally.
+  - Full Batch Inference (`--batch-size N`): process multiple pages simultaneously through the GPU/accelerator.
   - Clear visualization with high-contrast color badges displaying:
       * Exact detected object type (panel/frame, speech bubble/balloon, text region).
       * Reading order sequence (#1, #2, ... for manga panels).
       * Confidence score percentage (e.g. `96%` or `0.96`).
       * Translucent masks & crisp bounding box outlines on the page.
       * Side legend explaining object types and colors.
-  - Reading-order sorting for panels (RTL default for manga, LTR optional).
+  - Reading-order sorting for panels (RTL default for manga, LTR optional for Western comics).
   - High-res segmentation polygon mask extraction (`--retina-masks`).
   - Panel cropping (`--crop-panels`) to save individual panels as images.
   - Export structured JSON metadata with bounding boxes, segmentation polygons, reading order, and confidence scores.
 
 Usage examples:
-    # 1. Run ShadowB segmentation model (panels, text, balloons with masks)
-    python devscripts/detect_panels.py --model shadowb --input devscripts/input/img1.png --crop-panels
+    # 1. Run Ashu11-A/Manga-Segment model
+    python devscripts/detect_panels.py --model ashu --input devscripts/input/img1.png --crop-panels
 
-    # 2. Run Leoxs22 detector (lightweight YOLO26n)
+    # 2. Run ShadowB segmentation model with batch inference (e.g. batch size 4)
+    python devscripts/detect_panels.py --model shadowb --input devscripts/input --batch-size 4 --crop-panels
+
+    # 3. Run jebin2 / mosesb comic panel detector
+    python devscripts/detect_panels.py --model jebin2 --input devscripts/input/img1.png
+
+    # 4. Run Leoxs22 detector (lightweight YOLO26n)
     python devscripts/detect_panels.py --model leoxs22 --input devscripts/input/img1.png
-
-    # 3. Directory batch processing with custom confidence and device
-    python devscripts/detect_panels.py --model shadowb --input devscripts/input --conf 0.3 --device mps
 """
 
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
+import tarfile
+import urllib.request
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -70,20 +79,58 @@ IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
 MODEL_PRESETS: dict[str, dict[str, Any]] = {
     "shadowb": {
+        "source_type": "huggingface",
         "repo_id": "ShadowB/Manga109-panel-balloon-text-yolov26-segmentation",
         "filename": "best.pt",
         "local_subpath": "shadowb_yolo26s_seg/best.pt",
         "default_imgsz": 1280,
         "is_segmentation": True,
-        "description": "YOLO26s Instance Segmentation (Classes: panel/frame, text, balloon)",
+        "description": "ShadowB YOLO26s Instance Segmentation (Classes: panel/frame, text, balloon)",
+    },
+    "ashu": {
+        "source_type": "github_release_tar",
+        "url": "https://github.com/Ashu11-A/Manga-Segment/releases/download/v0.2.0/yolov11s_model.tar.xz",
+        "tar_target_path": "weights/best.pt",
+        "local_subpath": "ashu_manga_segment/weights/best.pt",
+        "default_imgsz": 1280,
+        "is_segmentation": True,
+        "description": "Ashu11-A Manga-Segment YOLOv11s Instance Segmentation (Classes: comic/panel, speech-balloon)",
+    },
+    "manga-segment": {
+        "source_type": "github_release_tar",
+        "url": "https://github.com/Ashu11-A/Manga-Segment/releases/download/v0.2.0/yolov11s_model.tar.xz",
+        "tar_target_path": "weights/best.pt",
+        "local_subpath": "ashu_manga_segment/weights/best.pt",
+        "default_imgsz": 1280,
+        "is_segmentation": True,
+        "description": "Ashu11-A Manga-Segment YOLOv11s Instance Segmentation (Classes: comic/panel, speech-balloon)",
     },
     "leoxs22": {
+        "source_type": "huggingface",
         "repo_id": "leoxs22/manga-panel-detector-yolo26n",
         "filename": "manga_panel_detector_fp32.pt",
         "local_subpath": "leoxs22/manga_panel_detector_fp32.pt",
         "default_imgsz": 640,
         "is_segmentation": False,
-        "description": "YOLO26-nano Detection (Classes: panel, text)",
+        "description": "Leoxs22 YOLO26-nano Detection (Classes: panel, text)",
+    },
+    "jebin2": {
+        "source_type": "huggingface",
+        "repo_id": "mosesb/best-comic-panel-detection",
+        "filename": "best.pt",
+        "local_subpath": "mosesb_comic/best.pt",
+        "default_imgsz": 640,
+        "is_segmentation": False,
+        "description": "Jebin2 / Mosesb Comic Panel Detection (Classes: Comic Panel)",
+    },
+    "mosesb": {
+        "source_type": "huggingface",
+        "repo_id": "mosesb/best-comic-panel-detection",
+        "filename": "best.pt",
+        "local_subpath": "mosesb_comic/best.pt",
+        "default_imgsz": 640,
+        "is_segmentation": False,
+        "description": "Mosesb Comic Panel Detection (Classes: Comic Panel)",
     },
 }
 
@@ -117,12 +164,12 @@ CLASS_CONFIG: dict[str, dict[str, Any]] = {
 
 
 def normalize_class_name(name: str) -> str:
-    lower = str(name).lower()
-    if lower in ("frame", "panel"):
+    lower = str(name).lower().strip()
+    if lower in ("frame", "panel", "comic", "comic panel", "comic_panel", "panels", "comics"):
         return "panel"
-    if lower in ("bubble", "balloon"):
+    if lower in ("bubble", "balloon", "bubbles", "balloons", "speech-balloon", "speech_balloon", "thought-balloon", "thought_balloon"):
         return "balloon"
-    if lower == "text":
+    if lower in ("text", "texts"):
         return "text"
     return lower
 
@@ -132,32 +179,44 @@ def get_class_cfg(name: str) -> dict[str, Any]:
     return CLASS_CONFIG.get(norm, CLASS_CONFIG["default"])
 
 
-def ensure_model_weights(
-    weights_path: Path,
-    repo_id: str,
-    filename: str,
-) -> Path:
-    """Ensure the PyTorch model checkpoint is available locally, downloading from HF if needed."""
+def ensure_model_weights(weights_path: Path, preset: dict[str, Any]) -> Path:
+    """Ensure the PyTorch model checkpoint is available locally, downloading if needed."""
     if weights_path.is_file():
         return weights_path
 
     weights_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"[*] Downloading model '{filename}' from Hugging Face repo '{repo_id}'...")
+    source_type = preset.get("source_type", "huggingface")
 
-    try:
-        from huggingface_hub import hf_hub_download
-        downloaded = hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            local_dir=weights_path.parent,
-        )
-        return Path(downloaded)
-    except Exception as exc:
-        print(f"[!] huggingface_hub download failed: {exc}. Trying direct URL download...", file=sys.stderr)
-        import urllib.request
-        url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
-        urllib.request.urlretrieve(url, weights_path)
+    if source_type == "huggingface":
+        repo_id = preset["repo_id"]
+        filename = preset["filename"]
+        print(f"[*] Downloading model '{filename}' from Hugging Face repo '{repo_id}'...")
+        try:
+            from huggingface_hub import hf_hub_download
+            downloaded = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                local_dir=weights_path.parent,
+            )
+            return Path(downloaded)
+        except Exception as exc:
+            print(f"[!] huggingface_hub download failed: {exc}. Trying direct URL download...", file=sys.stderr)
+            url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
+            urllib.request.urlretrieve(url, weights_path)
+            return weights_path
+
+    elif source_type == "github_release_tar":
+        url = preset["url"]
+        print(f"[*] Downloading release archive from '{url}'...")
+        extract_root = weights_path.parents[1] if weights_path.parent.name == "weights" else weights_path.parent
+        extract_root.mkdir(parents=True, exist_ok=True)
+        req = urllib.request.urlopen(url)
+        buf = io.BytesIO(req.read())
+        with tarfile.open(fileobj=buf) as tar:
+            tar.extractall(extract_root)
         return weights_path
+
+    raise ValueError(f"Unknown source_type: {source_type}")
 
 
 def expand_input_paths(inputs: list[Path], output_dir: Path | None = None) -> list[Path]:
@@ -186,7 +245,7 @@ def expand_input_paths(inputs: list[Path], output_dir: Path | None = None) -> li
 
 
 def sort_panels_reading_order(panels: list[dict[str, Any]], rtl: bool = True) -> list[dict[str, Any]]:
-    """Sort panels in standard manga reading order (RTL: top-to-bottom, right-to-left)."""
+    """Sort panels in standard reading order (RTL default for Manga, LTR for Western Comics)."""
     if not panels:
         return []
 
@@ -217,7 +276,6 @@ def draw_detections(
     img_h, img_w = image.shape[:2]
 
     # Draw masks on overlay (panels first, then bubbles, then text)
-    # Sort detections by class precedence so text/bubbles are drawn on top of panels
     def draw_order(d: dict[str, Any]) -> int:
         c = normalize_class_name(d["class_name"])
         if c == "panel":
@@ -267,7 +325,6 @@ def draw_detections(
             cv2.rectangle(vis, (x1, y1), (x2, y2), color, thickness=thickness, lineType=cv2.LINE_AA)
 
         if show_labels:
-            # Build clear badge text: e.g. "#1 PANEL 96%" or "BUBBLE 92%" or "TEXT 89%"
             order_tag = f"#{item['reading_order']} " if "reading_order" in item else ""
             caption = f"{order_tag}{display_label} {conf * 100:.0f}%"
 
@@ -277,7 +334,6 @@ def draw_detections(
 
             (w, h), baseline = cv2.getTextSize(caption, font, scale, text_thickness)
 
-            # Badge placement: panels at top-left inside or above; text/bubbles top-left
             pad_x = 6
             pad_y = 4
             badge_h = h + (pad_y * 2)
@@ -292,11 +348,9 @@ def draw_detections(
             by2 = min(img_h, by1 + badge_h)
             bx2 = min(img_w, bx1 + badge_w)
 
-            # Draw badge background (solid color box with dark outline)
             cv2.rectangle(vis, (bx1, by1), (bx2, by2), (20, 20, 20), -1)
             cv2.rectangle(vis, (bx1, by1), (bx2, by2), color, 1, lineType=cv2.LINE_AA)
 
-            # Draw badge text (colored text for high contrast on dark badge)
             text_y = by1 + pad_y + h
             cv2.putText(
                 vis,
@@ -311,7 +365,6 @@ def draw_detections(
 
     # 3. Draw Legend Overlay on Top-Right Corner
     if show_legend:
-        # Collect present classes
         present_classes = {normalize_class_name(d["class_name"]) for d in detections}
         legend_items = []
         for cname in ["panel", "balloon", "text"]:
@@ -328,13 +381,11 @@ def draw_detections(
             lx2 = lx1 + lw
             ly2 = ly1 + lh
 
-            # Draw dark translucent card
             card_overlay = vis.copy()
             cv2.rectangle(card_overlay, (lx1, ly1), (lx2, ly2), (15, 15, 15), -1)
             cv2.rectangle(card_overlay, (lx1, ly1), (lx2, ly2), (80, 80, 80), 1)
             vis = cv2.addWeighted(card_overlay, 0.85, vis, 0.15, 0)
 
-            # Title
             cv2.putText(
                 vis,
                 "DETECTIONS",
@@ -346,13 +397,10 @@ def draw_detections(
                 lineType=cv2.LINE_AA,
             )
 
-            # Rows
             for idx, (dname, col, cnt) in enumerate(legend_items):
                 row_y = ly1 + 38 + (idx * 20)
-                # Color chip
                 cv2.rectangle(vis, (lx1 + 10, row_y - 10), (lx1 + 22, row_y + 2), col, -1)
                 cv2.rectangle(vis, (lx1 + 10, row_y - 10), (lx1 + 22, row_y + 2), (255, 255, 255), 1)
-                # Label + count
                 row_text = f"{dname}: {cnt}"
                 cv2.putText(
                     vis,
@@ -415,7 +463,7 @@ def main() -> int:
         "-m",
         choices=list(MODEL_PRESETS.keys()),
         default="shadowb",
-        help="Model preset: 'shadowb' (YOLO26s instance segmentation) or 'leoxs22' (YOLO26n detection)",
+        help="Model preset: 'shadowb' (Manga109 segmentation), 'ashu'/'manga-segment' (Ashu11-A YOLOv11s segmentation), 'leoxs22' (YOLO26n detection), or 'jebin2'/'mosesb' (Comic panel detector)",
     )
     parser.add_argument(
         "--output-dir",
@@ -430,6 +478,13 @@ def main() -> int:
         type=Path,
         default=None,
         help="Path to custom model weights file (.pt). If not provided, downloads default for preset.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        "-b",
+        type=int,
+        default=1,
+        help="Number of images to process concurrently in a single batch inference call",
     )
     parser.add_argument(
         "--conf",
@@ -448,7 +503,7 @@ def main() -> int:
         "--imgsz",
         type=int,
         default=None,
-        help="Inference image size (defaults to 1280 for shadowb, 640 for leoxs22)",
+        help="Inference image size (defaults to 1280 for shadowb/ashu, 640 for leoxs22/jebin2)",
     )
     parser.add_argument(
         "--device",
@@ -488,7 +543,7 @@ def main() -> int:
     preset = MODEL_PRESETS[args.model]
     imgsz = args.imgsz if args.imgsz is not None else preset["default_imgsz"]
     weights_path = args.weights or (MODEL_DIR / preset["local_subpath"])
-    weights_path = ensure_model_weights(weights_path, preset["repo_id"], preset["filename"])
+    weights_path = ensure_model_weights(weights_path, preset)
 
     # 2. Expand input paths
     try:
@@ -511,27 +566,27 @@ def main() -> int:
     class_map = {int(k): normalize_class_name(v) for k, v in raw_names.items()}
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    batch_size = max(1, args.batch_size)
     print(f"[*] Model: {preset['description']}")
-    print(f"[*] Processing {len(image_paths)} image(s) (conf={args.conf}, imgsz={imgsz})...\n")
+    print(f"[*] Processing {len(image_paths)} image(s) (batch_size={batch_size}, conf={args.conf}, imgsz={imgsz})...\n")
 
     total_time = 0.0
     total_panels = 0
     total_balloons = 0
     total_text = 0
 
-    for idx, img_path in enumerate(image_paths, start=1):
-        print(f"[{idx}/{len(image_paths)}] Processing: {img_path.name}")
-        image = cv2.imread(str(img_path))
-        if image is None:
-            print(f"  [!] Failed to read image: {img_path}", file=sys.stderr)
-            continue
+    # Chunk image paths into batches
+    for b_idx in range(0, len(image_paths), batch_size):
+        batch_paths = image_paths[b_idx : b_idx + batch_size]
+        batch_str_sources = [str(p) for p in batch_paths]
 
         t0 = perf_counter()
         predict_kwargs: dict[str, Any] = {
-            "source": str(img_path),
+            "source": batch_str_sources,
             "conf": args.conf,
             "iou": args.iou,
             "imgsz": imgsz,
+            "batch": len(batch_paths),
             "verbose": False,
         }
         if preset["is_segmentation"]:
@@ -543,84 +598,90 @@ def main() -> int:
         elapsed = perf_counter() - t0
         total_time += elapsed
 
-        result = results[0]
-        detections: list[dict[str, Any]] = []
-
-        has_masks = result.masks is not None and len(result.masks) > 0
-        raw_polygons = result.masks.xy if has_masks else None
-
-        for box_idx, box in enumerate(result.boxes):
-            cls_id = int(box.cls[0].item())
-            conf = float(box.conf[0].item())
-            xyxy = box.xyxy[0].tolist()
-            norm_name = class_map.get(cls_id, f"class_{cls_id}")
-
-            if args.panels_only and norm_name != "panel":
+        for item_idx, (img_path, result) in enumerate(zip(batch_paths, results), start=1):
+            global_idx = b_idx + item_idx
+            image = cv2.imread(str(img_path))
+            if image is None:
+                print(f"  [!] Failed to read image: {img_path}", file=sys.stderr)
                 continue
 
-            det_entry: dict[str, Any] = {
-                "class_id": cls_id,
-                "class_name": norm_name,
-                "confidence": round(conf, 4),
-                "bbox": [round(coord, 2) for coord in xyxy],
+            detections: list[dict[str, Any]] = []
+            has_masks = result.masks is not None and len(result.masks) > 0
+            raw_polygons = result.masks.xy if has_masks else None
+
+            for box_idx, box in enumerate(result.boxes):
+                cls_id = int(box.cls[0].item())
+                conf = float(box.conf[0].item())
+                xyxy = box.xyxy[0].tolist()
+                norm_name = class_map.get(cls_id, f"class_{cls_id}")
+
+                if args.panels_only and norm_name != "panel":
+                    continue
+
+                det_entry: dict[str, Any] = {
+                    "class_id": cls_id,
+                    "class_name": norm_name,
+                    "confidence": round(conf, 4),
+                    "bbox": [round(coord, 2) for coord in xyxy],
+                }
+
+                if raw_polygons is not None and box_idx < len(raw_polygons):
+                    poly_arr = raw_polygons[box_idx]
+                    if len(poly_arr) > 0:
+                        det_entry["polygon"] = [[round(pt[0], 1), round(pt[1], 1)] for pt in poly_arr.tolist()]
+
+                detections.append(det_entry)
+
+            # Separate items and sort panels in reading order
+            panels = [d for d in detections if d["class_name"] == "panel"]
+            balloons = [d for d in detections if d["class_name"] == "balloon"]
+            texts = [d for d in detections if d["class_name"] == "text"]
+            others = [d for d in detections if d["class_name"] not in ("panel", "balloon", "text")]
+
+            panels = sort_panels_reading_order(panels, rtl=not args.ltr)
+            ordered_detections = panels + balloons + texts + others
+
+            total_panels += len(panels)
+            total_balloons += len(balloons)
+            total_text += len(texts)
+
+            summary_parts = [f"{len(panels)} panel(s)"]
+            if balloons:
+                summary_parts.append(f"{len(balloons)} balloon(s)")
+            if texts:
+                summary_parts.append(f"{len(texts)} text region(s)")
+            per_item_ms = (elapsed / len(batch_paths)) * 1000
+            print(f"[{global_idx}/{len(image_paths)}] {img_path.name} -> {', '.join(summary_parts)} ({per_item_ms:.1f} ms/page)")
+
+            # Save JSON output
+            out_json_path = args.output_dir / f"{img_path.stem}_detections.json"
+            metadata = {
+                "image_path": str(img_path.resolve()),
+                "image_size": [image.shape[1], image.shape[0]],  # [width, height]
+                "model": args.model,
+                "is_segmentation": preset["is_segmentation"],
+                "num_panels": len(panels),
+                "num_balloons": len(balloons),
+                "num_texts": len(texts),
+                "inference_time_ms": round(per_item_ms, 2),
+                "panels": panels,
+                "balloons": balloons,
+                "texts": texts,
+                "detections": ordered_detections,
             }
+            with open(out_json_path, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2)
 
-            if raw_polygons is not None and box_idx < len(raw_polygons):
-                poly_arr = raw_polygons[box_idx]
-                if len(poly_arr) > 0:
-                    det_entry["polygon"] = [[round(pt[0], 1), round(pt[1], 1)] for pt in poly_arr.tolist()]
+            # Save visualization
+            if not args.no_viz:
+                vis_img = draw_detections(image, ordered_detections, show_legend=not args.no_legend)
+                out_vis_path = args.output_dir / f"{img_path.stem}_annotated.png"
+                cv2.imwrite(str(out_vis_path), vis_img)
 
-            detections.append(det_entry)
-
-        # Separate items and sort panels in reading order
-        panels = [d for d in detections if d["class_name"] == "panel"]
-        balloons = [d for d in detections if d["class_name"] == "balloon"]
-        texts = [d for d in detections if d["class_name"] == "text"]
-        others = [d for d in detections if d["class_name"] not in ("panel", "balloon", "text")]
-
-        panels = sort_panels_reading_order(panels, rtl=not args.ltr)
-        ordered_detections = panels + balloons + texts + others
-
-        total_panels += len(panels)
-        total_balloons += len(balloons)
-        total_text += len(texts)
-
-        summary_parts = [f"{len(panels)} panel(s)"]
-        if balloons:
-            summary_parts.append(f"{len(balloons)} balloon(s)")
-        if texts:
-            summary_parts.append(f"{len(texts)} text region(s)")
-        print(f"  -> Found {', '.join(summary_parts)} in {elapsed * 1000:.1f} ms")
-
-        # Save JSON output
-        out_json_path = args.output_dir / f"{img_path.stem}_detections.json"
-        metadata = {
-            "image_path": str(img_path.resolve()),
-            "image_size": [image.shape[1], image.shape[0]],  # [width, height]
-            "model": args.model,
-            "is_segmentation": preset["is_segmentation"],
-            "num_panels": len(panels),
-            "num_balloons": len(balloons),
-            "num_texts": len(texts),
-            "inference_time_ms": round(elapsed * 1000, 2),
-            "panels": panels,
-            "balloons": balloons,
-            "texts": texts,
-            "detections": ordered_detections,
-        }
-        with open(out_json_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=2)
-
-        # Save visualization
-        if not args.no_viz:
-            vis_img = draw_detections(image, ordered_detections, show_legend=not args.no_legend)
-            out_vis_path = args.output_dir / f"{img_path.stem}_annotated.png"
-            cv2.imwrite(str(out_vis_path), vis_img)
-
-        # Optionally crop panels
-        if args.crop_panels and panels:
-            crop_paths = crop_panels(image, panels, args.output_dir, img_path.stem)
-            print(f"  -> Cropped {len(crop_paths)} panel(s) to: {args.output_dir / f'{img_path.stem}_panels'}")
+            # Optionally crop panels
+            if args.crop_panels and panels:
+                crop_paths = crop_panels(image, panels, args.output_dir, img_path.stem)
+                print(f"  -> Cropped {len(crop_paths)} panel(s) to: {args.output_dir / f'{img_path.stem}_panels'}")
 
     print("\n" + "=" * 50)
     print(f"Done! Processed {len(image_paths)} images in {total_time:.2f}s (avg {total_time / max(1, len(image_paths)) * 1000:.1f}ms/page)")

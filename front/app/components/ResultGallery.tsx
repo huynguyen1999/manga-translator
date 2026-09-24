@@ -2931,7 +2931,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
       if (mangaTitle && mangaTitle !== 'Ungrouped') {
         const a = document.createElement('a');
         a.href = apiUrl(`/api/results/export/cbz?groupId=${encodeURIComponent(groupId || mangaTitle)}&manga=${encodeURIComponent(mangaTitle)}&original=${original}`);
-        const safeTitle = mangaTitle.replace(/[^a-zA-Z0-9_\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af.\-]/g, '_') || 'manga';
+        const safeTitle = mangaTitle.replace(/[\\:*?"<>|\u0000-\u001f]/g, '_').replace(/\//g, '_').replace(/[. ]+$/, '') || 'manga';
         a.download = `${safeTitle}${original ? '_original' : ''}.cbz`;
         document.body.appendChild(a);
         a.click();
@@ -2954,7 +2954,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      const safeTitle = mangaTitle.replace(/[^a-zA-Z0-9_\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af.\-]/g, '_') || 'manga';
+      const safeTitle = mangaTitle.replace(/[\\:*?"<>|\u0000-\u001f]/g, '_').replace(/\//g, '_').replace(/[. ]+$/, '') || 'manga';
       a.download = `${safeTitle}${original ? '_original' : ''}.cbz`;
       document.body.appendChild(a);
       a.click();

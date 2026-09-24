@@ -4,6 +4,7 @@ import { fontOptions, ocrOptions } from "@/config";
 import type { FinishedImage, PipelineRerunMode, TranslationSettings } from "@/types";
 import { validTranslators } from "@/types";
 import { getTranslatorName } from "@/utils/getTranslatorName";
+import { AppOverlayPortal } from "@/components/AppOverlayPortal";
 
 interface PipelineRerunDialogProps {
   images: FinishedImage[];
@@ -145,7 +146,8 @@ export const PipelineRerunDialog: React.FC<PipelineRerunDialogProps> = ({
   const targetLabel = pageCount === 1 ? images[0].originalName : `${pageCount} selected pages`;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px] isolate" onClick={onClose}>
+    <AppOverlayPortal>
+    <div data-app-overlay="pipeline-rerun" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px] isolate" onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"
@@ -436,5 +438,6 @@ export const PipelineRerunDialog: React.FC<PipelineRerunDialogProps> = ({
         </div>
       </div>
     </div>
+    </AppOverlayPortal>
   );
 };

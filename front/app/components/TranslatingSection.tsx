@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Icon } from "@iconify/react";
 import { Link } from "react-router";
-import type { QueuedImage, TranslationBatch, TranslationSettings, TranslatorKey } from "@/types";
+import type { FinishedImage, QueuedImage, TranslationBatch, TranslationSettings, TranslatorKey } from "@/types";
 import { validTranslators } from "@/types";
 import { getTranslatorName } from "@/utils/getTranslatorName";
 import { formatStage, formatStageElapsed, getBatchKind } from "@/utils/serverBatches";
@@ -38,6 +38,8 @@ interface TranslatingSectionProps {
       mangaTitle?: string;
       offlineModel?: string;
       geminiModel?: string;
+      images?: FinishedImage[];
+      currentIndex?: number;
     },
   ) => void;
   onOpenPageEdit?: (folder: string) => void;
@@ -121,12 +123,15 @@ const ItemRow: React.FC<{
       mangaTitle?: string;
       offlineModel?: string;
       geminiModel?: string;
+      images?: FinishedImage[];
+      currentIndex?: number;
     },
   ) => void;
   onOpenPageEdit?: (folder: string) => void;
   isColorizerActive?: boolean;
   onToggleExcludeColor?: (itemId: string) => void;
   sourceType?: ImageSourceType;
+  modalImages?: FinishedImage[];
 }> = React.memo(({
   item,
   now,
@@ -142,6 +147,7 @@ const ItemRow: React.FC<{
   isColorizerActive,
   onToggleExcludeColor,
   sourceType,
+  modalImages,
 }) => {
   const result = resultFor(item);
   const isFinished = item.status === "finished";
@@ -205,6 +211,8 @@ const ItemRow: React.FC<{
               mangaTitle: batchMangaTitle,
               offlineModel: item.offlineModel,
               geminiModel: item.geminiModel,
+              images: modalImages,
+              currentIndex: modalImages?.findIndex((image) => image.id === item.id),
             },
           )
         }
@@ -531,6 +539,8 @@ export const BatchCard: React.FC<{
       mangaTitle?: string;
       offlineModel?: string;
       geminiModel?: string;
+      images?: FinishedImage[];
+      currentIndex?: number;
     },
   ) => void;
   onOpenPageEdit?: (folder: string) => void;
@@ -582,6 +592,38 @@ export const BatchCard: React.FC<{
     batch.settings.translator === "none" && batch.settings.inpainter === "original"
       ? "original"
       : "translated";
+  const modalImages = useMemo(() => batch.items.flatMap((item): FinishedImage[] => {
+    if (item.status !== "finished" && item.status !== "queued" && item.status !== "processing") return [];
+    const input = item.inputUrl || (item.file.size > 0 ? item.file : null);
+    const result = item.status === "finished" ? resultFor(item) || input : input;
+    if (!result) return [];
+    return [{
+      id: item.id,
+      groupId: item.mangaGroupId,
+      pageOrder: item.pageOrder,
+      sourcePath: item.sourcePath,
+      originalName: item.file.name,
+      result,
+      batchPreviewUrl: item.batchPreviewUrl,
+      coverUrl: item.coverUrl,
+      detailPreviewUrl: item.detailPreviewUrl,
+      readerUrl: item.readerUrl,
+      fullUrl: item.fullUrl,
+      sourceType: item.status === "finished" ? sourceType : "original",
+      inputUrl: item.inputUrl || (item.file.size > 0 ? item.file : null),
+      inpaintedUrl: item.folder ? `/result/${item.folder}/inpainted.jpg` : undefined,
+      textRegionsUrl: item.folder ? `/result/${item.folder}/text_regions.json` : undefined,
+      hasTextRegions: item.status === "finished" && Boolean(item.folder),
+      folder: item.folder,
+      mangaTitle: item.mangaTitle || batch.mangaTitle,
+      finishedAt: item.addedAt,
+      settings: {
+        ...batch.settings,
+        offlineModel: item.offlineModel || batch.settings.offlineModel,
+        geminiModel: item.geminiModel || batch.settings.geminiModel,
+      },
+    }];
+  }), [batch.items, batch.mangaTitle, batch.settings, sourceType]);
   const retryAllActionKey = `retry-all:${batch.id}`;
   const stopActionKey = `stop:${batch.id}`;
   const needsReview = hasDetails ? batch.items.filter((item) => item.needsReview).length : (batch.needsReviewCount || 0);
@@ -990,6 +1032,7 @@ export const BatchCard: React.FC<{
               isColorizerActive={isUploading ? false : isColorizerActive}
               onToggleExcludeColor={handleToggleExcludeColor}
               sourceType={sourceType}
+              modalImages={modalImages}
             />
         )} />
       )}
