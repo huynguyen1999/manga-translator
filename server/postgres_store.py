@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from server.batch_store import BatchConflict, BatchNotFound, BatchStore, InvalidBatch
+from server.batch_store import BatchConflict, BatchNotFound, BatchStore, InvalidBatch, _batch_progress
 from server.image_variants import asset_version, final_file, generate_image_variants
 from server.manga_summary import synopsis_status
 from manga_translator.pipeline.stages import (
@@ -2640,7 +2640,7 @@ class PostgresStore:
         return pages
 
     async def export_pages(
-        self, title: str, folders: list[str] | None = None
+        self, title: str, folders: list[str] | None = None, *, original: bool = False
     ) -> list[dict[str, Any]]:
         if self.pool is None:
             raise RuntimeError("PostgreSQL store is not started")
@@ -2667,7 +2667,8 @@ class PostgresStore:
         pages = []
         for row in rows:
             page_root = self.result_root / row["folder"]
-            source = page_root / row["input_name"] if row["source_type"] == "original" and row["input_name"] else final_file(page_root)
+            use_input = (original or row["source_type"] == "original") and row["input_name"]
+            source = page_root / row["input_name"] if use_input else final_file(page_root)
             if source is not None and source.is_file():
                 pages.append({
                     "originalName": row["original_name"] if row["original_name"] and row["original_name"] != "Unknown" else f"{row['folder']}.png",
@@ -2929,46 +2930,163 @@ class PostgresStore:
                 )
         return old_title, int(count or 0)
 
+    async def delete_results(self, folders: list[str]) -> list[str]:
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL store is not started")
+        safe_folders = list(dict.fromkeys(_safe_folder(str(folder)) for folder in folders))
+        if not safe_folders:
+            return []
+        async with self.pool.acquire() as connection:
+            while True:
+                retry = False
+                async with connection.transaction():
+                    group_ids = [
+                        row["group_id"]
+                        for row in await connection.fetch(
+                            """SELECT DISTINCT manga_group_id AS group_id FROM pages
+                               WHERE active AND folder=ANY($1::text[])
+                               ORDER BY manga_group_id""",
+                            safe_folders,
+                        )
+                    ]
+                    if not group_ids:
+                        return []
+                    for group_id in group_ids:
+                        await connection.fetchval(
+                            "SELECT id FROM manga_groups WHERE id=$1 FOR UPDATE", group_id
+                        )
+
+                    pages = await connection.fetch(
+                        """
+                        SELECT p.id, p.folder, p.manga_group_id AS group_id, g.series_id
+                        FROM pages p
+                        JOIN manga_groups g ON g.id=p.manga_group_id
+                        WHERE p.active AND p.folder=ANY($1::text[])
+                        ORDER BY g.id, p.id
+                        FOR UPDATE OF p
+                        """,
+                        safe_folders,
+                    )
+                    page_group_ids = {page["group_id"] for page in pages}
+                    if not page_group_ids.issubset(group_ids):
+                        retry = True
+                    elif pages:
+                        group_ids = sorted(page_group_ids)
+                        await connection.execute(
+                            "DELETE FROM pages WHERE id=ANY($1::text[])",
+                            [page["id"] for page in pages],
+                        )
+                        series_ids = sorted({page["series_id"] for page in pages if page["series_id"]})
+                        for group_id in group_ids:
+                            await self._compact_page_order(connection, group_id)
+
+                        remaining_groups = {
+                            row["id"]
+                            for row in await connection.fetch(
+                                """
+                                SELECT g.id FROM manga_groups g
+                                WHERE g.id=ANY($1::text[])
+                                  AND EXISTS (SELECT 1 FROM pages p WHERE p.active AND p.manga_group_id=g.id)
+                                """,
+                                group_ids,
+                            )
+                        }
+                        empty_group_ids = [group_id for group_id in group_ids if group_id not in remaining_groups]
+                        if empty_group_ids:
+                            await connection.execute(
+                                "DELETE FROM manga_groups WHERE id=ANY($1::text[])", empty_group_ids
+                            )
+
+                        if series_ids:
+                            series_counts = await connection.fetch(
+                                """
+                                SELECT s.id, count(g.id) AS group_count
+                                FROM manga_series s
+                                LEFT JOIN manga_groups g ON g.series_id=s.id
+                                  AND EXISTS (SELECT 1 FROM pages p WHERE p.active AND p.manga_group_id=g.id)
+                                WHERE s.id=ANY($1::text[])
+                                GROUP BY s.id
+                                """,
+                                series_ids,
+                            )
+                            empty_series_ids = [row["id"] for row in series_counts if int(row["group_count"]) < 2]
+                            if empty_series_ids:
+                                await connection.execute(
+                                    "UPDATE manga_groups SET series_id=NULL, series_position=NULL WHERE series_id=ANY($1::text[])",
+                                    empty_series_ids,
+                                )
+                                await connection.execute(
+                                    "DELETE FROM manga_series WHERE id=ANY($1::text[])", empty_series_ids
+                                )
+                        deleted_folders = [page["folder"] for page in pages]
+                if not retry:
+                    return deleted_folders if pages else []
+
     async def delete_result(self, folder: str) -> bool:
         if self.pool is None:
             raise RuntimeError("PostgreSQL store is not started")
         record_id = _safe_folder(str(folder))
         async with self.pool.acquire() as connection:
-            async with connection.transaction():
-                page = await connection.fetchrow(
-                    """
-                    SELECT p.id, g.id AS group_id, g.series_id
-                    FROM pages p
-                    JOIN manga_groups g ON g.id=p.manga_group_id
-                    WHERE p.active AND (p.id=$1 OR p.folder=$1)
-                    FOR UPDATE OF p, g
-                    """,
-                    record_id,
-                )
-                if page is None:
-                    return False
-                result = await connection.execute("DELETE FROM pages WHERE id=$1", page["id"])
-                await self._compact_page_order(connection, page["group_id"])
-                if not await connection.fetchval(
-                    "SELECT 1 FROM pages WHERE active AND manga_group_id=$1 LIMIT 1", page["group_id"]
-                ):
-                    await connection.execute("DELETE FROM manga_groups WHERE id=$1", page["group_id"])
-                if page["series_id"]:
-                    remaining = await connection.fetchval(
-                        """
-                        SELECT count(*) FROM manga_groups g
-                        WHERE g.series_id=$1
-                          AND EXISTS (SELECT 1 FROM pages p WHERE p.active AND p.manga_group_id=g.id)
-                        """,
-                        page["series_id"],
+            while True:
+                retry = False
+                async with connection.transaction():
+                    group_id = await connection.fetchval(
+                        "SELECT manga_group_id FROM pages WHERE active AND (id=$1 OR folder=$1) LIMIT 1",
+                        record_id,
                     )
-                    if int(remaining or 0) < 2:
-                        await connection.execute(
-                            "UPDATE manga_groups SET series_id=NULL, series_position=NULL WHERE series_id=$1",
-                            page["series_id"],
+                    if group_id is None:
+                        return False
+                    if await connection.fetchval(
+                        "SELECT id FROM manga_groups WHERE id=$1 FOR UPDATE", group_id
+                    ) is None:
+                        retry = True
+                    else:
+                        page = await connection.fetchrow(
+                            """
+                            SELECT p.id, g.id AS group_id, g.series_id
+                            FROM pages p
+                            JOIN manga_groups g ON g.id=p.manga_group_id
+                            WHERE p.active AND (p.id=$1 OR p.folder=$1)
+                            FOR UPDATE OF p
+                            """,
+                            record_id,
                         )
-                        await connection.execute("DELETE FROM manga_series WHERE id=$1", page["series_id"])
-        return result.endswith("1")
+                        if page is None:
+                            return False
+                        if page["group_id"] != group_id:
+                            retry = True
+                        else:
+                            result = await connection.execute(
+                                "DELETE FROM pages WHERE id=$1", page["id"]
+                            )
+                            await self._compact_page_order(connection, group_id)
+                            if not await connection.fetchval(
+                                "SELECT 1 FROM pages WHERE active AND manga_group_id=$1 LIMIT 1",
+                                group_id,
+                            ):
+                                await connection.execute(
+                                    "DELETE FROM manga_groups WHERE id=$1", group_id
+                                )
+                            if page["series_id"]:
+                                remaining = await connection.fetchval(
+                                    """
+                                    SELECT count(*) FROM manga_groups g
+                                    WHERE g.series_id=$1
+                                      AND EXISTS (SELECT 1 FROM pages p WHERE p.active AND p.manga_group_id=g.id)
+                                    """,
+                                    page["series_id"],
+                                )
+                                if int(remaining or 0) < 2:
+                                    await connection.execute(
+                                        "UPDATE manga_groups SET series_id=NULL, series_position=NULL WHERE series_id=$1",
+                                        page["series_id"],
+                                    )
+                                    await connection.execute(
+                                        "DELETE FROM manga_series WHERE id=$1", page["series_id"]
+                                    )
+                            deleted = result.endswith("1")
+                if not retry:
+                    return deleted
 
     async def delete_group(self, title: str) -> list[str]:
         if self.pool is None:
@@ -3552,7 +3670,13 @@ class PostgresBatchStore(BatchStore):
                 COUNT(*) FILTER (WHERE i.status = 'queued' OR i.stage IN ('awaiting_translation', 'reserved')) AS queued_count,
                 COUNT(*) FILTER (WHERE i.status = 'processing' AND COALESCE(i.stage, '') NOT IN ('awaiting_translation', 'reserved')) AS processing_count,
                 COUNT(*) FILTER (WHERE i.status = 'error') AS failed_count,
-                COUNT(*) FILTER (WHERE i.payload->>'needsReview' = 'true') AS needs_review_count
+                COUNT(*) FILTER (WHERE i.payload->>'needsReview' = 'true') AS needs_review_count,
+                jsonb_agg(jsonb_build_object(
+                    'status', i.status,
+                    'stage', i.stage,
+                    'pipelineStage', i.payload->>'pipelineStage',
+                    'retryFromStage', i.payload->>'retryFromStage'
+                )) FILTER (WHERE i.id IS NOT NULL) AS stage_items
             FROM batches b
             LEFT JOIN batch_items i ON i.batch_id = b.id
             WHERE b.active
@@ -3581,6 +3705,7 @@ class PostgresBatchStore(BatchStore):
                 "processingCount": int(row["processing_count"] or 0),
                 "failedCount": int(row["failed_count"] or 0),
                 "needsReviewCount": int(row["needs_review_count"] or 0),
+                **_batch_progress(_json_load(row["stage_items"], [])),
             }
             for row in rows
         ]

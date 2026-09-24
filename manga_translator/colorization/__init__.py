@@ -5,7 +5,7 @@ from .manga_colorization_v2 import MangaColorizationV2
 from .detector import is_image_colored, distance_from_grayscale
 from ..config import Colorizer
 from ..utils.model_cache import (
-    get_cached_model, model_operation, remove_cached_model,
+    get_cached_model, model_operation, unload_cached_model,
 )
 
 COLORIZERS = {
@@ -33,4 +33,4 @@ async def dispatch(key: Colorizer, image: Image.Image, device: str = 'cpu', **kw
 
 @model_operation
 async def unload(key: Colorizer):
-    remove_cached_model('colorizer', colorizer_cache, key)
+    await unload_cached_model('colorizer', colorizer_cache, key)

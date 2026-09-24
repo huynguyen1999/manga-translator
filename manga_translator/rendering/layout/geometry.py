@@ -299,10 +299,12 @@ class BubbleGeometry:
         self._covariance = None
         self._max_radius = None
         self._safe_cache: Dict[Tuple[int, int, float], np.ndarray] = {}
+        self._safe_bbox_cache: Dict[Tuple[int, int, float], Tuple[int, int, int, int]] = {}
         self._band_cache: Dict[Tuple[int, int, int, int, float, int], List[BandSlot]] = {}
 
     def clear_ephemeral_caches(self) -> None:
         self._safe_cache.clear()
+        self._safe_bbox_cache.clear()
         self._band_cache.clear()
 
     def safe_radius(self, font_size: int, stroke_width: int = 0, margin: float = 2.0) -> float:
@@ -359,10 +361,15 @@ class BubbleGeometry:
         )
 
     def safe_bounding_box(self, font_size: int, stroke_width: int = 0, margin: float = 2.0) -> Tuple[int, int, int, int]:
+        key = (font_size, stroke_width, margin)
+        if key in self._safe_bbox_cache:
+            return self._safe_bbox_cache[key]
         ys, xs = np.nonzero(self.safe_pixels(font_size, stroke_width, margin))
-        return (0, 0, 0, 0) if not len(ys) else (
+        result = (0, 0, 0, 0) if not len(ys) else (
             int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
         )
+        self._safe_bbox_cache[key] = result
+        return result
 
     def has_safe_pixels(self, font_size: int, stroke_width: int = 0, margin: float = 2.0) -> bool:
         return bool(np.any(self.safe_pixels(font_size, stroke_width, margin)))
@@ -420,10 +427,11 @@ def compute_zone_shape_profile(
     preferred_mask: Optional[np.ndarray] = None,
     line_h: Optional[int] = None,
     words: Optional[List[str]] = None,
+    placement_target: Optional[PlacementTarget] = None,
 ) -> ZoneShapeProfile:
-    safe = compute_placement_target(
+    safe = (placement_target or compute_placement_target(
         geom, font_size, stroke_width, margin, preferred_mask=preferred_mask
-    ).mask
+    )).mask
     ys, xs = np.nonzero(safe)
     if not len(ys):
         x1, y1, x2, y2 = geom.bounding_box()

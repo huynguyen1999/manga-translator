@@ -1930,14 +1930,19 @@ export const App: React.FC = () => {
   const deleteFinishedImages = async (images: FinishedImage[]) => {
     if (images.length === 0) return;
     galleryPageCacheRef.current.clear();
-    const folders = images.map((img) => img.folder).filter(Boolean) as string[];
-    await Promise.allSettled(
-      folders.map((folder) =>
-        fetch(apiUrl(`/api/results/${folder}`), { method: "DELETE" }).catch((err) =>
-          console.warn(`Failed to delete result ${folder} on server:`, err)
-        )
-      )
-    );
+    const folders = [...new Set(images.map((img) => img.folder).filter(Boolean) as string[])];
+    if (folders.length > 0) {
+      try {
+        const response = await fetch(apiUrl("/api/results/batch-delete"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ folders }),
+        });
+        if (!response.ok) console.warn(`Failed to batch delete results (${response.status})`);
+      } catch (err) {
+        console.warn("Failed to batch delete results:", err);
+      }
+    }
     const deletedIds = new Set(images.map((img) => img.id));
     const titleCounts = new Map<string, number>();
     for (const img of images) {

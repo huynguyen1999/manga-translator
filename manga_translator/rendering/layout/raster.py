@@ -5,21 +5,22 @@ from typing import Dict, Optional, Tuple
 import cv2
 import numpy as np
 
-from .models import LayoutCandidate, PlacedLine
+from .models import CandidateRaster, LayoutCandidate, PlacedLine
 
 
-_LINE_ALPHA_CACHE: Dict[Tuple[str, int, int], Optional[np.ndarray]] = {}
+_LINE_ALPHA_CACHE: Dict[Tuple[object, str, int, int], Optional[np.ndarray]] = {}
 
 
 def _render_line_alpha(line: PlacedLine, font_size: int) -> Optional[np.ndarray]:
     global _LINE_ALPHA_CACHE
-    key = (line.text, line.width, font_size)
+    from manga_translator.rendering import text_render
+
+    key = (text_render.FONT_SELECTION_KEY, line.text, line.width, font_size)
     if key in _LINE_ALPHA_CACHE:
         cached = _LINE_ALPHA_CACHE[key]
         return cached.copy() if cached is not None else None
 
     try:
-        from manga_translator.rendering import text_render
         canvas = np.zeros((font_size + 4, line.width + font_size + 4), dtype=np.uint8)
         border = canvas.copy()
         pen = [0, font_size]
@@ -38,35 +39,33 @@ def _render_line_alpha(line: PlacedLine, font_size: int) -> Optional[np.ndarray]
         _LINE_ALPHA_CACHE[key] = None
         return None
 
-def _candidate_cropped_visual_masks(
-    candidate: LayoutCandidate,
-    stroke_width: int,
-    image_shape: Tuple[int, int],
-) -> Tuple[Tuple[int, int, int, int], np.ndarray, np.ndarray, np.ndarray]:
-    """Rasterize candidate ink_mask, visual_mask (ink + stroke), and block_mask in a local bounding box crop."""
-    h, w = image_shape[:2]
+def _candidate_crop_box(candidate: LayoutCandidate, stroke_width: int) -> Tuple[int, int, int, int]:
     if not candidate.lines:
-        return (0, 0, 0, 0), np.zeros((0, 0), bool), np.zeros((0, 0), bool), np.zeros((0, 0), bool)
-
+        return (0, 0, 0, 0)
     b_left = min(line.x for line in candidate.lines)
     b_top = min(line.y for line in candidate.lines)
     b_right = max(line.x + line.width for line in candidate.lines)
     b_bottom = max(line.y + line.height for line in candidate.lines)
-
     radius = max(1, int(stroke_width))
     pad = radius + 2
-    cx1 = max(0, b_left - pad)
-    cy1 = max(0, b_top - pad)
-    cx2 = min(w, b_right + pad)
-    cy2 = min(h, b_bottom + pad)
+    return b_left - pad, b_top - pad, b_right + pad, b_bottom + pad
 
+
+def _rasterize_candidate_crop(
+    candidate: LayoutCandidate,
+    stroke_width: int,
+    crop_box: Tuple[int, int, int, int],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Rasterize masks into the requested crop, which may extend off-page."""
+    cx1, cy1, cx2, cy2 = crop_box
     ch = cy2 - cy1
     cw = cx2 - cx1
     if ch <= 0 or cw <= 0:
-        return (cx1, cy1, cx2, cy2), np.zeros((0, 0), bool), np.zeros((0, 0), bool), np.zeros((0, 0), bool)
+        return np.zeros((0, 0), bool), np.zeros((0, 0), bool), np.zeros((0, 0), bool)
 
     ink_crop = np.zeros((ch, cw), dtype=bool)
     block_crop = np.zeros((ch, cw), dtype=bool)
+    radius = max(1, int(stroke_width))
 
     for line in candidate.lines:
         lx1 = max(0, line.x - cx1)
@@ -95,7 +94,61 @@ def _candidate_cropped_visual_masks(
         vis_crop = cv2.dilate(ink_crop.astype(np.uint8), kernel) > 0
     else:
         vis_crop = ink_crop.copy()
-    return (cx1, cy1, cx2, cy2), ink_crop, vis_crop, block_crop
+    return ink_crop, vis_crop, block_crop
+
+
+def rasterize_candidate(candidate: LayoutCandidate, stroke_width: int) -> CandidateRaster:
+    """Rasterize a typography candidate once in page-independent coordinates."""
+    crop_box = _candidate_crop_box(candidate, stroke_width)
+    ink, visual, block = _rasterize_candidate_crop(candidate, stroke_width, crop_box)
+    ys, xs = np.nonzero(ink)
+    if len(xs):
+        ink_bbox = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+        centroid = (float(xs.mean()), float(ys.mean()))
+    else:
+        ink_bbox = (0, 0, 0, 0)
+        centroid = (0.0, 0.0)
+    for mask in (ink, visual, block):
+        mask.setflags(write=False)
+    return CandidateRaster(crop_box, ink, visual, block, ink_bbox, centroid, int(len(xs)))
+
+
+def _candidate_raster_at_offset(
+    raster: CandidateRaster,
+    dx: int,
+    dy: int,
+    image_shape: Tuple[int, int],
+) -> Tuple[Tuple[int, int, int, int], np.ndarray, np.ndarray, np.ndarray]:
+    """Translate cached masks and clip their view to page bounds without rerasterizing."""
+    x1, y1, x2, y2 = raster.crop_box
+    x1 += dx
+    y1 += dy
+    x2 += dx
+    y2 += dy
+    h, w = image_shape[:2]
+    cx1, cy1, cx2, cy2 = max(0, x1), max(0, y1), min(w, x2), min(h, y2)
+    if cx1 >= cx2 or cy1 >= cy2:
+        empty = np.zeros((0, 0), dtype=bool)
+        return (cx1, cy1, cx2, cy2), empty, empty, empty
+    sx1, sy1, sx2, sy2 = cx1 - x1, cy1 - y1, cx2 - x1, cy2 - y1
+    return (
+        (cx1, cy1, cx2, cy2),
+        raster.ink_crop[sy1:sy2, sx1:sx2],
+        raster.visual_crop[sy1:sy2, sx1:sx2],
+        raster.block_crop[sy1:sy2, sx1:sx2],
+    )
+
+
+def _candidate_cropped_visual_masks(
+    candidate: LayoutCandidate,
+    stroke_width: int,
+    image_shape: Tuple[int, int],
+) -> Tuple[Tuple[int, int, int, int], np.ndarray, np.ndarray, np.ndarray]:
+    """Rasterize candidate ink, stroke, and line blocks in a page-clipped crop."""
+    box = _candidate_crop_box(candidate, stroke_width)
+    ink, visual, block = _rasterize_candidate_crop(candidate, stroke_width, box)
+    raster = CandidateRaster(box, ink, visual, block, (0, 0, 0, 0), (0.0, 0.0), 0)
+    return _candidate_raster_at_offset(raster, 0, 0, image_shape)
 
 def _candidate_visual_masks(
     candidate: LayoutCandidate,

@@ -3,6 +3,7 @@ import sys
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from unittest.mock import patch
 import numpy as np
 from PIL import Image
@@ -17,13 +18,166 @@ from manga_translator import Context
 from manga_translator.rendering.text_render import set_font, put_text_horizontal, get_char_glyph
 from manga_translator.rendering import get_default_eng_font, text_render
 from manga_translator.rendering.layout import solver
+from manga_translator.rendering.layout import raster as layout_raster
+from manga_translator.rendering.layout.engine import layout_page
+from manga_translator.rendering.layout.models import LayoutCandidate, PageObstacleMap, PlacedLine
 from manga_translator.manga_translator import MangaTranslator
 from server.sent_data_internal import get_client_session, close_client_session
 from server.instance import ExecutorInstance
 from manga_translator.config import Config
 
 
+def _shift_candidate(candidate, dx, dy):
+    return replace(
+        candidate,
+        lines=[replace(line, x=line.x + dx, y=line.y + dy) for line in candidate.lines],
+        qa=dict(candidate.qa),
+    )
+
+
 class TestPerformanceImprovements(unittest.TestCase):
+    def test_layout_page_profiles_are_isolated_between_workers(self):
+        barrier = threading.Barrier(2, timeout=10)
+        contexts = [
+            Context(img_rgb=np.zeros((16, 16, 3), dtype=np.uint8), text_regions=[])
+            for _ in range(2)
+        ]
+        for context, count in zip(contexts, (3, 7)):
+            context.profile_count = count
+
+        def fake_solver(ctx, *_args, **_kwargs):
+            solver.get_solver_profile().fonts_tested += ctx.profile_count
+            barrier.wait()
+
+        def layout_and_profile(ctx):
+            layout_page(ctx, Config())
+            return solver.get_solver_profile()
+
+        with patch.object(solver, "apply_shape_aware_bubble_layout", fake_solver):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first, second = list(executor.map(layout_and_profile, contexts))
+
+        self.assertIsNot(first, second)
+        self.assertEqual({first.fonts_tested, second.fonts_tested}, {3, 7})
+
+    def test_cached_max_row_width_matches_row_slot_table(self):
+        mask = np.zeros((64, 96), dtype=np.uint8)
+        mask[8:56, 12:84] = 1
+        geom = solver.BubbleGeometry(mask)
+        expected = max(
+            (slot.width for row in solver._build_row_slot_table(geom, 12, 1, 2.0, 12).values() for slot in row),
+            default=0,
+        )
+
+        profile = solver.reset_solver_profile()
+        self.assertEqual(solver._max_usable_row_width(geom, 12, 1, 2.0, 12), expected)
+        self.assertEqual(profile.bubble_row_slot_table_builds, 0)
+        profile.row_slot_max_widths.clear()
+        solver._cached_row_slot_table(geom, 12, 1, 2.0, 12)
+        self.assertEqual(solver._max_usable_row_width(geom, 12, 1, 2.0, 12), expected)
+        self.assertEqual(profile.bubble_row_slot_table_builds, 1)
+        self.assertEqual(profile.bubble_row_slot_table_cache_hits, 1)
+
+    def test_candidate_raster_matches_page_raster_for_100_offsets(self):
+        candidate = LayoutCandidate(
+            font_size=24,
+            y_origin=25,
+            line_spacing=0.0,
+            lines=[
+                PlacedLine("SILK AND COTTON", 25, 30, 150, 28),
+                PlacedLine("TEST", 55, 44, 80, 28),
+            ],
+            penalty=0.0,
+            glyph_clearance_p5=0.0,
+        )
+        cached = layout_raster.rasterize_candidate(candidate, 2)
+        for index in range(100):
+            dx, dy = (index % 25) - 12, (index // 25) * 3 - 4
+            shifted = _shift_candidate(candidate, dx, dy)
+            expected = layout_raster._candidate_cropped_visual_masks(shifted, 2, (100, 220))
+            actual = layout_raster._candidate_raster_at_offset(cached, dx, dy, (100, 220))
+            self.assertEqual(expected[0], actual[0])
+            for expected_mask, actual_mask in zip(expected[1:], actual[1:]):
+                np.testing.assert_array_equal(expected_mask, actual_mask)
+
+    def test_line_alpha_cache_is_font_aware_under_concurrency(self):
+        fonts = [
+            os.path.join(BASE_DIR, "fonts", "anime_ace.ttf"),
+            os.path.join(BASE_DIR, "fonts", "comic shanns 2.ttf"),
+        ]
+        if not all(os.path.isfile(path) for path in fonts):
+            self.skipTest("two bundled fonts are required")
+        line = PlacedLine("WMWMWM", 0, 0, 160, 24)
+        layout_raster._LINE_ALPHA_CACHE.clear()
+
+        expected = []
+        for font in fonts:
+            set_font(font)
+            expected.append(layout_raster._render_line_alpha(line, 24))
+        self.assertFalse(np.array_equal(expected[0], expected[1]))
+        layout_raster._LINE_ALPHA_CACHE.clear()
+
+        barrier = threading.Barrier(2, timeout=10)
+
+        def render(font):
+            set_font(font)
+            barrier.wait()
+            return layout_raster._render_line_alpha(line, 24)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first, second = list(executor.map(render, fonts))
+        np.testing.assert_array_equal(first, expected[0])
+        np.testing.assert_array_equal(second, expected[1])
+        self.assertEqual(len(layout_raster._LINE_ALPHA_CACHE), 2)
+
+        set_font(fonts[0])
+        cached = layout_raster._render_line_alpha(line, 24)
+        np.testing.assert_array_equal(cached, expected[0])
+        self.assertEqual(len(layout_raster._LINE_ALPHA_CACHE), 2)
+
+    def test_cached_free_text_overflow_matches_rerasterized_result(self):
+        candidate = LayoutCandidate(
+            font_size=24,
+            y_origin=35,
+            line_spacing=0.0,
+            lines=[PlacedLine("WMWM", 35, 18, 80, 24)],
+            penalty=0.0,
+            glyph_clearance_p5=0.0,
+        )
+        image_shape = (100, 100)
+        raster = layout_raster.rasterize_candidate(candidate, 0)
+        panel = np.ones(image_shape, dtype=np.uint8)
+        protected = np.zeros(image_shape, dtype=np.uint8)
+        text = np.zeros(image_shape, dtype=np.uint8)
+        obstacles = PageObstacleMap(
+            bubble_mask=np.zeros(image_shape, dtype=np.uint8),
+            protected_bubble_mask=protected,
+            text_mask=text,
+            panel_mask=panel,
+        )
+        other_text = np.zeros(image_shape, dtype=bool)
+        cases = [(0, 0, None, None), (0, 0, "bubble", (36, 36, 43, 48)), (0, 0, "text", (36, 36, 43, 48)), (-20, 0, None, None)]
+
+        for dx, dy, obstacle, rect in cases:
+            with self.subTest(dx=dx, obstacle=obstacle):
+                protected.fill(0)
+                other_text.fill(False)
+                if obstacle == "bubble":
+                    x1, y1, x2, y2 = rect
+                    protected[y1:y2, x1:x2] = 255
+                elif obstacle == "text":
+                    x1, y1, x2, y2 = rect
+                    other_text[y1:y2, x1:x2] = True
+                shifted = _shift_candidate(candidate, dx, dy)
+                expected = solver._free_text_ink_overflow(shifted, image_shape, obstacles, other_text)
+                if obstacle is not None:
+                    self.assertGreater(expected, 0.0)
+                solver.reset_solver_profile()
+                destination_box = tuple(value + delta for value, delta in zip(raster.crop_box, (dx, dy, dx, dy)))
+                actual = solver._free_text_ink_overflow_from_raster(raster, destination_box, obstacles, other_text)
+                self.assertAlmostEqual(actual, expected, places=7)
+                self.assertEqual(solver.get_solver_profile().overflow_rasterizations, 0)
+
     def test_dump_image_no_alpha(self):
         # RGB image without alpha
         img_arr = np.zeros((100, 100, 3), dtype=np.uint8)

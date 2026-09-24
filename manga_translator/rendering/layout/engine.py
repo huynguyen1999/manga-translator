@@ -39,6 +39,9 @@ def _region_layout(region: Any, font_path: Optional[str]) -> RegionLayout:
 
 def layout_page(ctx: Any, config: Any, font_path: Optional[str] = None, options: Any = None) -> PageLayoutResult:
     """Run the production shape-aware solver and freeze its result for rendering."""
+    from .solver import apply_shape_aware_bubble_layout, reset_solver_profile
+
+    profile = reset_solver_profile()
     started = perf_counter()
     regions = prepare_regions(getattr(ctx, "text_regions", []) or [])
     result = PageLayoutResult()
@@ -50,17 +53,18 @@ def layout_page(ctx: Any, config: Any, font_path: Optional[str] = None, options:
     option_debug = options.get("layout_debug", False) if isinstance(options, dict) else getattr(options, "layout_debug", False)
     layout_debug = bool(option_debug or getattr(ctx, "_layout_debug_enabled", False))
     timing: Dict[str, float] = {}
-    from .solver import apply_shape_aware_bubble_layout
-
-    apply_shape_aware_bubble_layout(
-        ctx,
-        config,
-        font_path=active_font,
-        infer_bubbles=True,
-        timing=timing,
-        layout_debug=layout_debug,
-        page_geometry=getattr(ctx, "page_geometry", None),
-    )
+    try:
+        apply_shape_aware_bubble_layout(
+            ctx,
+            config,
+            font_path=active_font,
+            infer_bubbles=True,
+            timing=timing,
+            layout_debug=layout_debug,
+            page_geometry=getattr(ctx, "page_geometry", None),
+        )
+    finally:
+        profile.clear_ephemeral_caches()
 
     regions = ctx.text_regions
     prepare_regions(regions)

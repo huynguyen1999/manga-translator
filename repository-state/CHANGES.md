@@ -2,6 +2,42 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-24 — Search existing manga when moving pages
+
+- Added a title filter to Gallery's Move to Manga dialog.
+
+## 2026-09-24 — Batch DeepL translations across pages
+
+- DeepL now receives grouped manga text as native multi-text requests, splitting only at the API body-size limit, and returns ordered per-region translations.
+
+## 2026-09-24 — Download original manga CBZ archives
+
+- Added an original-page CBZ option for manga groups, using retained source images and an `_original.cbz` filename.
+
+## 2026-09-24 — Make memory profiling verbose-only
+
+- Memory snapshots now log at DEBUG; server console level can be set with `LOG_LEVEL` in `.env` or `--log-level`.
+
+## 2026-09-24 — Reduce layout solver work without changing fallback selection
+
+- Scoped solver profiles to each layout, keyed line-alpha masks by font selection, and reused immutable candidate rasters for placement and overflow checks.
+- Deferred free-text QA, reused page-local geometry and row-slot results, and added feasibility checks before hyphenation rescue.
+- Added strict, disabled-by-default free-text early acceptance, shadow comparison, and a repeated layout benchmark with workload counters.
+
+## 2026-09-24 — Show batch stage progress
+
+- Job cards now show the current pipeline step and how many pages have passed it, using the existing per-page stage records.
+
+## 2026-09-24 — Add local semantic-search experiment harness
+
+- Added a developer CLI and thin notebook frontend for indexing manga ZIPs/directories, reusing BGE/SigLIP vectors incrementally, comparing exact image/text/RRF retrieval, generating standalone HTML evidence, and benchmarking labeled queries.
+- Search encoders now prefer CUDA, then MPS, then CPU, with an optional explicit device.
+
+## 2026-09-24 — Add TTL and memory-pressure eviction for shared models
+
+- Added shared active-use/last-use tracking, backend unload calls, LRU eviction at 60% process-RAM pressure, full idle cleanup at 72%, and a 120-second server default (`--models-ttl 0` keeps entries indefinitely).
+- Deduplicated bubble model instances across inference settings, removed detector source-image copies, streamed 48px OCR/MangaOCR crops in bounded chunks, and reduced scheduler page groups as RSS rises.
+
 ## 2026-09-24 — Log actual GPU inference batch sizes
 
 - Added bubble detector page-count logs, inpainting tensor batch/device logs, and backend-specific upscaler logs that distinguish tensor batching, tiled calls, and NCNN-Vulkan directory processing.

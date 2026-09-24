@@ -177,6 +177,37 @@ class PlacedLine:
     slot: Optional[BandSlot] = None
 
 
+@dataclass(frozen=True)
+class CandidateRaster:
+    """Page-independent masks for one frozen typography candidate."""
+
+    crop_box: Tuple[int, int, int, int]
+    ink_crop: np.ndarray
+    visual_crop: np.ndarray
+    block_crop: np.ndarray
+    ink_bbox_local: Tuple[int, int, int, int]
+    ink_centroid_local: Tuple[float, float]
+    ink_pixel_count: int
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    """Compact free-text search winner data before expensive QA materialization."""
+
+    typography_candidate: "LayoutCandidate"
+    raster: CandidateRaster
+    dx: int
+    dy: int
+    relative_dx: int
+    relative_dy: int
+    score: float
+    coverage: Dict[str, float]
+    actual_centroid: Tuple[float, float]
+    center_dx: float
+    center_dy: float
+    ink_bbox: Tuple[int, int, int, int]
+
+
 @dataclass
 class LayoutCandidate:
     """One solver candidate before it is committed to a region."""

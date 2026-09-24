@@ -92,6 +92,32 @@ def test_pipeline_run_checkpoints_json_without_sidecars(tmp_path):
     set_document_saver(_save_documents)
 
 
+def test_pipeline_render_checkpoints_manga_metadata(tmp_path):
+    config = Config(
+        manga_title="New manga",
+        manga_group_id="group-id",
+        original_name="page.png",
+        page_order=1,
+    )
+    image = Image.new("RGB", (8, 8))
+    run = PipelineRun(tmp_path, "page", image, config)
+    run.ctx = Context(
+        input=image,
+        img_inpainted=np.zeros((8, 8, 3), dtype=np.uint8),
+        text_regions=[],
+    )
+    translator = MangaTranslator.__new__(MangaTranslator)
+    translator._current_image_context = None
+    translator._pipeline_run = run
+    translator.font_path = None
+    translator._run_text_rendering = AsyncMock(return_value=np.zeros((8, 8, 3), dtype=np.uint8))
+
+    asyncio.run(run.retry_stage("rendering", config, translator))
+
+    assert run.documents["meta.json"]["mangaTitle"] == "New manga"
+    assert run.documents["meta.json"]["mangaGroupId"] == "group-id"
+
+
 def test_pipeline_ocr_retry_persists_precomputed_batch_result(tmp_path):
     config = Config()
     image = Image.new("RGB", (8, 8))

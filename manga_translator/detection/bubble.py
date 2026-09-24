@@ -14,11 +14,11 @@ import cv2
 import numpy as np
 
 from ..utils.model_cache import (
-    clear_model_cache, get_cached_model, model_operation,
+    get_cached_model, model_operation, unload_cached_model,
 )
 
 logger = logging.getLogger(__name__)
-_bubble_cache: dict[tuple[str, str, float, float, int], "BubbleDetector"] = {}
+_bubble_cache: dict[tuple[str, str], "BubbleDetector"] = {}
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ def _resolve_checkpoint(model: str) -> Path:
 
 
 class BubbleDetector:
-    def __init__(self, model: str, confidence: float, mask_threshold: float, image_size: int, device: str):
+    def __init__(self, model: str, device: str):
         try:
             import torch
             from ultralytics import YOLO
@@ -69,65 +69,69 @@ class BubbleDetector:
             else:
                 device = "cpu"
         self.device = device
-        self.confidence = confidence
-        self.mask_threshold = mask_threshold
-        self.image_size = image_size
         self.model = YOLO(str(_resolve_checkpoint(model)))
 
-    def __call__(self, image: np.ndarray) -> list[BubbleDetection]:
+    def __call__(self, image: np.ndarray, confidence: float, mask_threshold: float, image_size: int) -> list[BubbleDetection]:
         logger.info("Bubble detector inference batch pages=1 device=%s", self.device)
         return self._read_result(
             self.model.predict(
                 source=cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
                 device=self.device,
-                conf=self.confidence,
-                imgsz=self.image_size,
+                conf=confidence,
+                imgsz=image_size,
                 retina_masks=True,
                 verbose=False,
             )[0],
             image.shape[:2],
+            confidence,
+            mask_threshold,
         )
 
-    def detect_batch(self, images: list[np.ndarray]) -> list[list[BubbleDetection]]:
+    def detect_batch(self, images: list[np.ndarray], confidence: float, mask_threshold: float, image_size: int) -> list[list[BubbleDetection]]:
         if not images:
             return []
         logger.info("Bubble detector inference batch pages=%d device=%s", len(images), self.device)
+        source = [cv2.cvtColor(image, cv2.COLOR_RGB2BGR) for image in images]
         results = self.model.predict(
-            source=[cv2.cvtColor(image, cv2.COLOR_RGB2BGR) for image in images],
+            source=source,
             device=self.device,
-            conf=self.confidence,
-            imgsz=self.image_size,
+            conf=confidence,
+            imgsz=image_size,
             retina_masks=True,
             batch=len(images),
             verbose=False,
         )
+        del source
         if len(results) != len(images):
             raise RuntimeError(f"Bubble detector returned {len(results)} pages for {len(images)} inputs")
-        return [self._read_result(result, image.shape[:2]) for result, image in zip(results, images)]
+        return [
+            self._read_result(result, image.shape[:2], confidence, mask_threshold)
+            for result, image in zip(results, images)
+        ]
 
-    def _read_result(self, result, image_shape: tuple[int, int]) -> list[BubbleDetection]:
+    def _read_result(self, result, image_shape: tuple[int, int], confidence_threshold: float, mask_threshold: float) -> list[BubbleDetection]:
         if result.masks is None:
             return []
         detections = []
-        for mask, confidence in zip(result.masks.data, result.boxes.conf):
-            score = float(confidence)
-            if score < self.confidence:
+        for mask, model_confidence in zip(result.masks.data, result.boxes.conf):
+            score = float(model_confidence)
+            if score < confidence_threshold:
                 continue
             values = mask.detach().float().cpu().numpy()
             if values.shape != image_shape:
                 values = cv2.resize(values, (image_shape[1], image_shape[0]), interpolation=cv2.INTER_LINEAR)
-            binary = np.where(values >= self.mask_threshold, 255, 0).astype(np.uint8)
+            binary = np.where(values >= mask_threshold, 255, 0).astype(np.uint8)
             if np.count_nonzero(binary) >= 100:
                 detections.append(BubbleDetection(binary, score))
         return detections
 
 
-def get_detector(model: str, confidence: float, mask_threshold: float, image_size: int, device: str = "cpu") -> BubbleDetector:
-    key = (model, device, confidence, mask_threshold, image_size)
+def get_detector(model: str, device: str = "cpu") -> BubbleDetector:
+    key = (model, device)
 
     def create_detector():
         started = perf_counter()
-        detector = BubbleDetector(model, confidence, mask_threshold, image_size, device)
+        detector = BubbleDetector(model, device)
         logger.info("Loaded bubble detector %s in %.0fms", model, (perf_counter() - started) * 1000)
         return detector
 
@@ -136,14 +140,14 @@ def get_detector(model: str, confidence: float, mask_threshold: float, image_siz
 
 def detect(image: np.ndarray, config, device: str = "cpu") -> list[BubbleDetection]:
     target_device = device if device and device != "auto" else getattr(config, "device", "cpu")
-    detector = get_detector(config.model, config.confidence, config.mask_threshold, config.image_size, target_device)
-    return detector(image)
+    detector = get_detector(config.model, target_device)
+    return detector(image, config.confidence, config.mask_threshold, config.image_size)
 
 
 @model_operation
 async def prepare(config, device: str = "cpu"):
     target_device = device if device and device != "auto" else getattr(config, "device", "cpu")
-    get_detector(config.model, config.confidence, config.mask_threshold, config.image_size, target_device)
+    get_detector(config.model, target_device)
 
 
 @model_operation
@@ -156,13 +160,17 @@ async def dispatch_batch(images: list[np.ndarray], config, device: str = "cpu") 
     if not images:
         return []
     target_device = device if device and device != "auto" else getattr(config, "device", "cpu")
-    detector = get_detector(config.model, config.confidence, config.mask_threshold, config.image_size, target_device)
-    return detector.detect_batch(images)
+    detector = get_detector(config.model, target_device)
+    return detector.detect_batch(images, config.confidence, config.mask_threshold, config.image_size)
 
 
 @model_operation
-async def unload():
-    clear_model_cache('bubble_detector', _bubble_cache)
+async def unload(key=None):
+    if key is None:
+        for cache_key in list(_bubble_cache):
+            await unload_cached_model('bubble_detector', _bubble_cache, cache_key)
+    else:
+        await unload_cached_model('bubble_detector', _bubble_cache, key)
 
 
 def serialize_bubble_detections(

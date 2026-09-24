@@ -233,7 +233,7 @@ class MangaTranslator:
         torch.backends.cudnn.allow_tf32 = True
 
         self._model_usage_timestamps = {}
-        self._detector_cleanup_task = None
+        self._model_cleanup_task = None
         self.prep_manual = params.get('prep_manual', None)
         self.context_size = params.get('context_size', 0)
         self.all_page_translations = []
@@ -343,7 +343,85 @@ class MangaTranslator:
             'source_path': source_path,
             'request_id': getattr(config, 'request_id', None),
         }
-        
+
+    def _build_result_metadata(self, config: Config, ctx: Context) -> dict:
+        image_context = getattr(self, '_current_image_context', None) or {}
+        original_name = image_context.get('original_name') or getattr(config, 'original_name', None)
+        if not original_name or original_name == 'Unknown':
+            original_name = getattr(config, 'original_name', None) or f"{self._get_image_subfolder()}.png"
+        manga_title = (
+            image_context.get('manga_title') or getattr(config, 'manga_title', None) or 'Ungrouped'
+        ).strip() or 'Ungrouped'
+        manga_group_id = image_context.get('manga_group_id') or getattr(config, 'manga_group_id', None)
+        review_pending = bool(getattr(ctx, 'manual_review_required', False)) or any(
+            bool(getattr(region, 'review_required', False)) for region in (getattr(ctx, 'text_regions', None) or [])
+        )
+        started_at = (
+            getattr(ctx, 'started_at_iso', None)
+            or image_context.get('started_at')
+            or (self._pipeline_run.manifest.get('createdAt') if getattr(self, '_pipeline_run', None) else None)
+        )
+        finished_at = datetime.now(timezone.utc).isoformat()
+        duration_ms = None
+        if getattr(ctx, 'started_at_monotonic', None) is not None:
+            duration_ms = round((time.monotonic() - ctx.started_at_monotonic) * 1000)
+        elif started_at:
+            try:
+                started = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+                duration_ms = round((datetime.fromisoformat(finished_at.replace('Z', '+00:00')) - started).total_seconds() * 1000)
+            except Exception:
+                pass
+
+        return {
+            'originalName': original_name,
+            'mangaTitle': manga_title,
+            'mangaGroupId': manga_group_id,
+            'groupId': manga_group_id,
+            'pageOrder': getattr(config, 'page_order', None),
+            'sourcePath': getattr(config, 'source_path', None),
+            'requestId': getattr(config, 'request_id', None),
+            'timestamp': int(time.time() * 1000),
+            'startedAt': started_at,
+            'finishedAt': finished_at,
+            'durationMs': duration_ms,
+            'reviewStatus': 'pending' if review_pending else 'not_required',
+            'reviewedAt': None,
+            'settings': {
+                'detectionResolution': str(getattr(config.detector, 'detection_size', '1536')),
+                'textDetector': str(getattr(config.detector, 'detector', 'default')),
+                'customUnclipRatio': float(getattr(config.detector, 'unclip_ratio', 2.3)),
+                'customBoxThreshold': float(getattr(config.detector, 'box_threshold', 0.7)),
+                'ocr': str(getattr(config.ocr, 'ocr', Ocr.ocr48px_ctc)),
+                'customOcrProb': float(getattr(config.ocr, 'prob')) if getattr(config.ocr, 'prob', None) is not None else None,
+                'ocrMinConfidence': float(getattr(config.ocr, 'prob')) if getattr(config.ocr, 'prob', None) is not None else None,
+                'useMocrMerge': bool(getattr(config.ocr, 'use_mocr_merge', False)),
+                'bubbleDetection': bool(getattr(config.bubble_detection, 'enabled', False)),
+                'bubbleModel': str(getattr(config.bubble_detection, 'model', 'manga109')),
+                'bubbleConfidence': float(getattr(config.bubble_detection, 'confidence', 0.25)),
+                'bubbleMaskThreshold': float(getattr(config.bubble_detection, 'mask_threshold', 0.5)),
+                'inpainter': str(getattr(config.inpainter, 'inpainter', 'default')),
+                'inpaintingSize': str(getattr(config.inpainter, 'inpainting_size', '2048')),
+                'inpaintingPrecision': str(getattr(config.inpainter, 'inpainting_precision', 'bf16')),
+                'maskDilationOffset': int(getattr(config, 'mask_dilation_offset', 30)),
+                'renderer': str(getattr(config.render, 'renderer', 'default')),
+                'renderTextDirection': str(getattr(config.render, 'direction', 'auto')),
+                'renderAlignment': str(getattr(config.render, 'alignment', 'auto')),
+                'renderFont': str(getattr(config.render, 'gimp_font', 'Sans-serif')),
+                'translator': str(getattr(config.translator, 'translator', 'offline')),
+                'translatorModel': getattr(ctx, 'translator_model', None),
+                'offlineModel': getattr(ctx, 'offline_model', None),
+                'geminiModel': getattr(ctx, 'gemini_model', None),
+                'targetLanguage': str(getattr(config.translator, 'target_lang', 'ENG')),
+                'colorizer': str(getattr(config.colorizer, 'colorizer', 'none')),
+                'colorizationSize': int(getattr(config.colorizer, 'colorization_size', 576)),
+                'denoiseSigma': int(getattr(config.colorizer, 'denoise_sigma', 25)),
+                'colorThreshold': float(getattr(config.colorizer, 'color_threshold', 31.0)),
+                'upscaler': str(getattr(config.upscale, 'upscaler', '')),
+                'upscaleRatio': getattr(config.upscale, 'upscale_ratio', None),
+                'revertUpscaling': bool(getattr(config.upscale, 'revert_upscaling', True)),
+            },
+        }
+
     def _get_image_subfolder(self) -> str:
         """获取当前图片的调试子文件夹名"""
         if self._current_image_context:
@@ -531,8 +609,8 @@ class MangaTranslator:
         if getattr(ctx, 'result_documents', None) is None:
             ctx.result_documents = {}
         # Start the background cleanup job once if not already started.
-        if self._detector_cleanup_task is None:
-            self._detector_cleanup_task = asyncio.create_task(self._detector_cleanup_job())
+        if self._model_cleanup_task is None:
+            self._model_cleanup_task = asyncio.create_task(self._model_cleanup_job())
         # -- Colorization
         colorization_ran = False
         if config.colorizer.colorizer != Colorizer.none:
@@ -1061,87 +1139,7 @@ class MangaTranslator:
 
             # 保存meta.json记录元数据
             try:
-                original_name = None
-                manga_title = 'Ungrouped'
-                manga_group_id = None
-                if self._current_image_context:
-                    original_name = self._current_image_context.get('original_name')
-                    manga_title = (self._current_image_context.get('manga_title', 'Ungrouped') or 'Ungrouped').strip() or 'Ungrouped'
-                    manga_group_id = self._current_image_context.get('manga_group_id')
-                if not original_name or original_name == 'Unknown':
-                    original_name = getattr(config, 'original_name', None) or f"{self._get_image_subfolder()}.png"
-                if manga_group_id is None:
-                    manga_group_id = getattr(config, 'manga_group_id', None)
-                
-                review_pending = bool(getattr(ctx, 'manual_review_required', False)) or any(
-                    bool(getattr(region, 'review_required', False)) for region in (getattr(ctx, 'text_regions', None) or [])
-                )
-                started_at = (
-                    getattr(ctx, 'started_at_iso', None)
-                    or (self._current_image_context.get('started_at') if self._current_image_context else None)
-                    or (self._pipeline_run.manifest.get('createdAt') if self._pipeline_run else None)
-                )
-                finished_at = datetime.now(timezone.utc).isoformat()
-                duration_ms = None
-                if getattr(ctx, 'started_at_monotonic', None) is not None:
-                    duration_ms = round((time.monotonic() - ctx.started_at_monotonic) * 1000)
-                elif started_at:
-                    try:
-                        s_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-                        f_dt = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
-                        duration_ms = round((f_dt - s_dt).total_seconds() * 1000)
-                    except Exception:
-                        pass
-
-                meta = {
-                    'originalName': original_name,
-                    'mangaTitle': manga_title,
-                    'mangaGroupId': manga_group_id,
-                    'groupId': manga_group_id,
-                    'pageOrder': getattr(config, 'page_order', None),
-                    'sourcePath': getattr(config, 'source_path', None),
-                    'requestId': getattr(config, 'request_id', None),
-                    'timestamp': int(time.time() * 1000),
-                    'startedAt': started_at,
-                    'finishedAt': finished_at,
-                    'durationMs': duration_ms,
-                    'reviewStatus': 'pending' if review_pending else 'not_required',
-                    'reviewedAt': None,
-                    'settings': {
-                        'detectionResolution': str(getattr(config.detector, 'detection_size', '1536')),
-                        'textDetector': str(getattr(config.detector, 'detector', 'default')),
-                        'customUnclipRatio': float(getattr(config.detector, 'unclip_ratio', 2.3)),
-                        'customBoxThreshold': float(getattr(config.detector, 'box_threshold', 0.7)),
-                        'ocr': str(getattr(config.ocr, 'ocr', Ocr.ocr48px_ctc)),
-                        'customOcrProb': float(getattr(config.ocr, 'prob')) if getattr(config.ocr, 'prob', None) is not None else None,
-                        'ocrMinConfidence': float(getattr(config.ocr, 'prob')) if getattr(config.ocr, 'prob', None) is not None else None,
-                        'useMocrMerge': bool(getattr(config.ocr, 'use_mocr_merge', False)),
-                        'bubbleDetection': bool(getattr(config.bubble_detection, 'enabled', False)),
-                        'bubbleModel': str(getattr(config.bubble_detection, 'model', 'manga109')),
-                        'bubbleConfidence': float(getattr(config.bubble_detection, 'confidence', 0.25)),
-                        'bubbleMaskThreshold': float(getattr(config.bubble_detection, 'mask_threshold', 0.5)),
-                        'inpainter': str(getattr(config.inpainter, 'inpainter', 'default')),
-                        'inpaintingSize': str(getattr(config.inpainter, 'inpainting_size', '2048')),
-                        'inpaintingPrecision': str(getattr(config.inpainter, 'inpainting_precision', 'bf16')),
-                        'maskDilationOffset': int(getattr(config, 'mask_dilation_offset', 30)),
-                        'renderer': str(getattr(config.render, 'renderer', 'default')),
-                        'renderTextDirection': str(getattr(config.render, 'direction', 'auto')),
-                        'renderAlignment': str(getattr(config.render, 'alignment', 'auto')),
-                        'renderFont': str(getattr(config.render, 'gimp_font', 'Sans-serif')),
-                        'translator': str(getattr(config.translator, 'translator', 'offline')),
-                        'translatorModel': getattr(ctx, 'translator_model', None),
-                        'offlineModel': getattr(ctx, 'offline_model', None),
-                        'geminiModel': getattr(ctx, 'gemini_model', None),
-                        'targetLanguage': str(getattr(config.translator, 'target_lang', 'ENG')),
-                        'colorizer': str(getattr(config.colorizer, 'colorizer', 'none')),
-                        'colorizationSize': int(getattr(config.colorizer, 'colorization_size', 576)),
-                        'denoiseSigma': int(getattr(config.colorizer, 'denoise_sigma', 25)),
-                        'colorThreshold': float(getattr(config.colorizer, 'color_threshold', 31.0)),
-                        'upscaler': str(getattr(config.upscale, 'upscaler', '')),
-                        'upscaleRatio': getattr(config.upscale, 'upscale_ratio', None),
-                        'revertUpscaling': bool(getattr(config.upscale, 'revert_upscaling', True)),
-                    }
-                }
+                meta = self._build_result_metadata(config, ctx)
             except Exception as e:
                 logger.error(f"Error saving meta.json: {e}")
                 raise
@@ -1340,17 +1338,18 @@ class MangaTranslator:
             await executor.run_exclusive(unload)
 
     # Background models cleanup job.
-    async def _detector_cleanup_job(self):
+    async def _model_cleanup_job(self):
         while True:
-            if self.models_ttl == 0:
-                await asyncio.sleep(1)
-                continue
-            now = time.time()
-            for (tool, model), last_used in list(self._model_usage_timestamps.items()):
-                if now - last_used > self.models_ttl:
-                    await self._unload_model(tool, model)
-                    del self._model_usage_timestamps[(tool, model)]
-            await asyncio.sleep(1)
+            await asyncio.sleep(20)
+            executor = get_model_executor()
+            if executor is not None:
+                await executor.cleanup_models(self.models_ttl)
+            elif self.models_ttl > 0:
+                now = time.time()
+                for (tool, model), last_used in list(self._model_usage_timestamps.items()):
+                    if now - last_used > self.models_ttl:
+                        await self._unload_model(tool, model)
+                        del self._model_usage_timestamps[(tool, model)]
 
     @model_operation
     async def _run_ocr(self, config: Config, ctx: Context):
@@ -2926,8 +2925,8 @@ class MangaTranslator:
 
         self._log_memory_boundary("models_ready", ctx)
         # Start the background cleanup job once if not already started.
-        if self._detector_cleanup_task is None:
-            self._detector_cleanup_task = asyncio.create_task(self._detector_cleanup_job())
+        if self._model_cleanup_task is None:
+            self._model_cleanup_task = asyncio.create_task(self._model_cleanup_job())
 
         # -- Colorization
         if config.colorizer.colorizer != Colorizer.none:

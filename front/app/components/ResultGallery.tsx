@@ -1466,7 +1466,12 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
   const lastSelectedGalleryIdRef = useRef<SelectionAnchor | null>(null);
   const [isMoveModalOpen, setIsMoveModalOpen] = useState(false);
   const [targetMangaName, setTargetMangaName] = useState('');
+  const [moveMangaSearch, setMoveMangaSearch] = useState('');
   const [singleImageToMove, setSingleImageToMove] = useState<FinishedImage | null>(null);
+
+  useEffect(() => {
+    if (isMoveModalOpen) setMoveMangaSearch('');
+  }, [isMoveModalOpen]);
 
   // Manga groups selected for a new series; IDs survive pagination and search changes.
   const [selectedMangaIds, setSelectedMangaIds] = useState<Map<string, string>>(new Map());
@@ -2915,7 +2920,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
   };
 
   // Download Manga as CBZ archive
-  const handleDownloadCbz = async (mangaTitle: string, images: FinishedImage[]) => {
+  const handleDownloadCbz = async (mangaTitle: string, images: FinishedImage[], original = false) => {
     setDownloadingCbz((prev) => ({ ...prev, [mangaTitle]: true }));
     const groupId = mangaGroups.find((group) => group.title === mangaTitle)?.id || images[0]?.groupId;
     try {
@@ -2923,9 +2928,9 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
       // avoiding massive JS heap memory allocations and connection timeouts
       if (mangaTitle && mangaTitle !== 'Ungrouped') {
         const a = document.createElement('a');
-        a.href = apiUrl(`/api/results/export/cbz?groupId=${encodeURIComponent(groupId || mangaTitle)}&manga=${encodeURIComponent(mangaTitle)}`);
+        a.href = apiUrl(`/api/results/export/cbz?groupId=${encodeURIComponent(groupId || mangaTitle)}&manga=${encodeURIComponent(mangaTitle)}&original=${original}`);
         const safeTitle = mangaTitle.replace(/[^a-zA-Z0-9_\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af.\-]/g, '_') || 'manga';
-        a.download = `${safeTitle}.cbz`;
+        a.download = `${safeTitle}${original ? '_original' : ''}.cbz`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -2936,7 +2941,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
       const response = await fetch(apiUrl('/api/results/export/cbz'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ groupId: groupId || undefined, mangaTitle, folders }),
+        body: JSON.stringify({ groupId: groupId || undefined, mangaTitle, folders, original }),
       });
 
       if (!response.ok) {
@@ -2948,7 +2953,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
       const a = document.createElement('a');
       a.href = url;
       const safeTitle = mangaTitle.replace(/[^a-zA-Z0-9_\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af.\-]/g, '_') || 'manga';
-      a.download = `${safeTitle}.cbz`;
+      a.download = `${safeTitle}${original ? '_original' : ''}.cbz`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -2968,6 +2973,12 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
     if (!q) return mangaGroups;
     return mangaGroups.filter((g) => g.title.toLowerCase().includes(q));
   }, [mangaGroups, mangaSearchQuery]);
+
+  const moveMangaGroups = useMemo(() => {
+    const q = moveMangaSearch.trim().toLowerCase();
+    if (!q) return mangaGroups;
+    return mangaGroups.filter((g) => g.title.toLowerCase().includes(q));
+  }, [mangaGroups, moveMangaSearch]);
 
   const filteredGroups = useMemo(() => {
     const base = mangaSearchQuery.trim() && !onGallerySearchChange ? searchedMangaGroups : mangaGroups;
@@ -4101,7 +4112,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
                   onClick={() => handleDownloadCbz(currentSingleGroup.title, currentSingleGroup.images)}
                   disabled={Boolean(downloadingCbz[currentSingleGroup.title])}
                   className="inline-flex h-10 items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 cursor-pointer"
-                  title="Download this entire manga as a CBZ comic archive"
+                  title="Download the translated manga as a CBZ comic archive"
                 >
                   {downloadingCbz[currentSingleGroup.title] ? (
                     <>
@@ -4111,9 +4122,20 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
                   ) : (
                     <>
                       <Icon icon="carbon:catalog" className="w-3.5 h-3.5" />
-                      <span>Download CBZ</span>
+                      <span>Translated CBZ</span>
                     </>
                   )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleDownloadCbz(currentSingleGroup.title, currentSingleGroup.images, true)}
+                  disabled={Boolean(downloadingCbz[currentSingleGroup.title])}
+                  className="inline-flex h-10 items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 cursor-pointer"
+                  title="Download the original manga pages as a CBZ comic archive"
+                >
+                  <Icon icon="carbon:download" className="w-3.5 h-3.5" />
+                  <span>Original CBZ</span>
                 </button>
 
                 {onDeleteManga && (
@@ -4685,7 +4707,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
                             onClick={() => handleDownloadCbz(group.title, group.images)}
                             disabled={isDownloading}
                             className="flex items-center space-x-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-indigo-500 disabled:opacity-50 transition-colors cursor-pointer"
-                            title="Download this entire manga as a CBZ comic archive"
+                            title="Download the translated manga as a CBZ comic archive"
                           >
                             {isDownloading ? (
                               <>
@@ -4695,9 +4717,20 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
                             ) : (
                               <>
                                 <Icon icon="carbon:catalog" className="w-3.5 h-3.5" />
-                                <span>Download CBZ</span>
+                                <span>Translated CBZ</span>
                               </>
                             )}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleDownloadCbz(group.title, group.images, true)}
+                            disabled={isDownloading}
+                            className="flex items-center space-x-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 transition-colors cursor-pointer dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                            title="Download the original manga pages as a CBZ comic archive"
+                          >
+                            <Icon icon="carbon:download" className="w-3.5 h-3.5" />
+                            <span>Original CBZ</span>
                           </button>
 
                           {/* Delete Manga */}
@@ -4962,8 +4995,29 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
                 <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
                   Select existing manga:
                 </label>
+                <div className="relative flex items-center">
+                  <Icon icon="carbon:search" className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-zinc-400" />
+                  <input
+                    type="text"
+                    aria-label="Search existing manga"
+                    value={moveMangaSearch}
+                    onChange={(e) => setMoveMangaSearch(e.target.value)}
+                    placeholder="Search existing manga..."
+                    className="w-full rounded-lg border border-zinc-200 bg-zinc-50 py-1.5 pl-8 pr-7 text-xs text-zinc-900 placeholder-zinc-400 outline-hidden transition-all focus:border-indigo-500 focus:bg-white dark:border-zinc-700/80 dark:bg-zinc-800/60 dark:text-zinc-100 dark:focus:bg-zinc-900"
+                  />
+                  {moveMangaSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setMoveMangaSearch('')}
+                      className="absolute right-2 p-0.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200"
+                      title="Clear search"
+                    >
+                      <Icon icon="carbon:close" className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
                 <div className="max-h-36 overflow-y-auto space-y-1 rounded-lg border border-zinc-200 dark:border-zinc-800 p-1.5">
-                  {mangaGroups.map((g) => (
+                  {moveMangaGroups.length > 0 ? moveMangaGroups.map((g) => (
                     <button
                       key={g.title}
                       type="button"
@@ -4973,7 +5027,11 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
                       <span className="truncate">{g.title}</span>
                       <span className="text-[10px] text-zinc-400">{g.images.length} pages</span>
                     </button>
-                  ))}
+                  )) : (
+                    <p className="px-2.5 py-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+                      No matching manga found.
+                    </p>
+                  )}
                 </div>
               </div>
             )}

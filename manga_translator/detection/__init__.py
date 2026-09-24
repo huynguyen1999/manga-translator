@@ -10,7 +10,7 @@ from .common import CommonDetector, OfflineDetector
 from .common_rust import RustDetector
 from ..config import Detector
 from ..utils.model_cache import (
-    get_cached_model, model_operation, remove_cached_model,
+    get_cached_model, model_operation, unload_cached_model,
 )
 
 DETECTORS = {
@@ -69,4 +69,4 @@ async def unload(detector_key: Detector | str):
             detector_key = Detector(detector_key)
         except ValueError:
             pass
-    remove_cached_model('detector', detector_cache, detector_key)
+    await unload_cached_model('detector', detector_cache, detector_key)

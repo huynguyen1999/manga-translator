@@ -50,6 +50,7 @@ import os
 from pathlib import Path
 import pickle
 import sys
+import tempfile
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple, Union
 import uuid
@@ -1232,6 +1233,7 @@ def run_fast_placement_and_render(
     solver_max_y_trials: Optional[int] = None,
     legacy_only: bool = False,
     solver_report: bool = False,
+    layout_shadow_compare: bool = False,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Execute ONLY the placement, text fit, and rendering stages rapidly on existing inpainted pixels.
 
@@ -1300,6 +1302,7 @@ def run_fast_placement_and_render(
     translator.font_path = active_font
     ctx._strict_layout_validation = bool(solver_report)
     ctx._layout_debug_enabled = bool(solver_report)
+    ctx._layout_shadow_compare = bool(layout_shadow_compare)
     _ensure_region_identities(ctx.text_regions)
 
     # Ensure all regions have translation populated
@@ -1311,15 +1314,16 @@ def run_fast_placement_and_render(
     config.bubble_detection.enabled = enable_bubble_layout
 
     # 1. Bubble geometry placement and text fit using the shape-aware solver
-    reset_solver_profile()
     t_layout = perf_counter()
     if enable_bubble_layout and getattr(ctx, "img_rgb", None) is not None:
         try:
-            layout_page(
+            layout_result = layout_page(
                 ctx=ctx,
                 config=config,
                 font_path=active_font,
             )
+            for key in ("mask_prep_ms", "mode_classification_ms", "bubble_solver_ms", "free_text_solver_ms", "fallback_ms"):
+                layout_timing[key] = float(layout_result.timings.get(key, 0.0) or 0.0)
         except Exception as e:
             logger.warning(f"Shape-aware bubble layout failed, falling back to standard placement: {e}")
             t_fallback = perf_counter()
@@ -1328,6 +1332,8 @@ def run_fast_placement_and_render(
             except Exception as e2:
                 logger.warning(f"Standard bubble layout fallback failed: {e2}")
             layout_timing["fallback_ms"] += (perf_counter() - t_fallback) * 1000.0
+    else:
+        reset_solver_profile()
     timing["placement_and_fit_ms"] = (perf_counter() - t_layout) * 1000.0
     measured_layout_ms = sum(layout_timing.values())
     layout_timing["other_ms"] = max(0.0, timing["placement_and_fit_ms"] - measured_layout_ms)
@@ -1931,6 +1937,7 @@ def execute_fast_render_batch(
     solver_max_y_trials: Optional[int] = None,
     legacy_only: bool = False,
     solver_report: bool = False,
+    layout_shadow_compare: bool = False,
 ) -> List[Dict[str, Any]]:
     """Fit OCR text back onto pages and render multiple sample datasets concurrently."""
     def _render_one(sample_dir: Path) -> Dict[str, Any]:
@@ -1961,6 +1968,7 @@ def execute_fast_render_batch(
                 solver_max_y_trials=solver_max_y_trials,
                 legacy_only=legacy_only,
                 solver_report=solver_report,
+                layout_shadow_compare=layout_shadow_compare,
             )
 
             # Determine destination path
@@ -1992,6 +2000,17 @@ def execute_fast_render_batch(
             result_info["output_path"] = str(dest_path)
             result_info["timing"] = timing
             result_info["regions_count"] = len(ctx.text_regions or [])
+            modes = {
+                getattr(getattr(region, "placement_mode", None), "value", getattr(region, "placement_mode", None))
+                for region in (ctx.text_regions or [])
+            }
+            has_bubble = PlacementMode.BUBBLE.value in modes
+            has_free = PlacementMode.FREE_TEXT.value in modes
+            result_info["layout_category"] = (
+                "mixed" if has_bubble and has_free else
+                "bubble-only" if has_bubble else
+                "free-text-only" if has_free else "empty"
+            )
         except Exception as e:
             logger.error(f"Render failed for '{sample_dir.name}': {e}", exc_info=True)
             result_info["error"] = str(e)
@@ -2002,6 +2021,64 @@ def execute_fast_render_batch(
         results = list(executor.map(_render_one, sample_dirs))
 
     return results
+
+
+def run_layout_benchmark(
+    sample_dirs: List[Path],
+    repeat: int = 5,
+    layout_shadow_compare: bool = False,
+) -> List[Dict[str, Any]]:
+    """Run repeated layout-focused samples and print percentile/counter totals."""
+    if repeat < 1:
+        raise ValueError("repeat must be at least 1")
+    runs: List[Dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="layout-benchmark-") as output_dir:
+        for _ in range(repeat):
+            runs.extend(execute_fast_render_batch(
+                sample_dirs=sample_dirs,
+                output_filename="rendered.png",
+                output_dir=Path(output_dir),
+                concurrency=1,
+                layout_shadow_compare=layout_shadow_compare,
+            ))
+
+    successful = [item for item in runs if item.get("success")]
+    categories = ("bubble-only", "free-text-only", "mixed")
+    print(f"Layout benchmark: {len(successful)} page runs, {len(sample_dirs)} pages, {repeat} repeats")
+    for category in (*categories, "all"):
+        items = successful if category == "all" else [item for item in successful if item.get("layout_category") == category]
+        if not items:
+            continue
+        page_ms = [float(item["timing"].get("placement_and_fit_ms", 0.0)) for item in items]
+        percentiles = np.percentile(page_ms, [50, 90, 95, 100])
+        timings = [item["timing"].get("layout_breakdown", {}) for item in items]
+        profiles = [item["timing"].get("solver_profiling", {}).get("workload", {}) for item in items]
+        sums = lambda name: sum(int(profile.get(name, 0) or 0) for profile in profiles)
+        free_regions = sums("free_text_regions")
+        ideal_attempts = sums("free_text_ideal_attempts")
+        local_runs = sums("free_text_local_search_runs")
+        local_attempts = sums("free_text_local_search_attempts")
+        print(
+            f"  {category}: runs={len(items)} regions={sum(item.get('regions_count', 0) for item in items)} "
+            f"layout_ms p50/p90/p95/max={percentiles[0]:.1f}/{percentiles[1]:.1f}/{percentiles[2]:.1f}/{percentiles[3]:.1f} "
+            f"bubble_ms={sum(t.get('bubble_solver_ms', 0.0) for t in timings):.1f} "
+            f"free_text_ms={sum(t.get('free_text_solver_ms', 0.0) for t in timings):.1f} "
+            f"fallback_ms={sum(t.get('fallback_ms', 0.0) for t in timings):.1f}"
+        )
+        print(
+            f"    dp={sums('dp_invocations')} states={sums('dp_states_created')} "
+            f"free_text_candidates={sums('free_text_typography_candidates')} offsets={sums('free_text_offsets_tested')} "
+            f"candidate_rasters={sums('candidate_rasters_created')} raster_cache_hits={sums('candidate_raster_cache_hits')} "
+            f"overflow_checks={sums('overflow_checks')} overflow_rasterizations={sums('overflow_rasterizations')} "
+            f"full_search_fallbacks={sums('free_text_full_search_fallbacks')} "
+            f"ideal_success={sums('free_text_ideal_successes')}/{ideal_attempts} "
+            f"({100 * sums('free_text_ideal_successes') / max(1, ideal_attempts):.1f}%) "
+            f"local_success={sums('free_text_local_search_successes')}/{local_runs} "
+            f"({100 * sums('free_text_local_search_successes') / max(1, local_runs):.1f}%, placements={local_attempts}) "
+            f"exhaustive_search={sums('free_text_full_search_runs')}/{free_regions} "
+            f"({100 * sums('free_text_full_search_runs') / max(1, free_regions):.1f}%)"
+        )
+    return runs
 
 
 # ------------------------------------------------------------------
@@ -3026,9 +3103,20 @@ def build_parser() -> argparse.ArgumentParser:
                               help="Skip the new shape-aware solver; use the original lobe-rect path only.")
     solver_group.add_argument("--solver-report", action="store_true",
                               help="Print per-region solver diagnostics (font chosen, clearance, score, path).")
+    solver_group.add_argument("--layout-shadow-compare", action="store_true",
+                              help="Evaluate conservative free-text shortcuts, compare them with exhaustive search, and keep the exhaustive result.")
     solver_group.add_argument("--solver-diagnose", action="store_true",
                                help="Run the solver directly (bypassing MangaTranslator) for deep diagnostics. "
                                     "Renders nothing; prints per-region solver internals.")
+
+    p_bench = subparsers.add_parser(
+        "layout-benchmark",
+        help="Repeat captured layout samples and report layout timing and solver counters.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p_bench.add_argument("--dataset", default=str(DEFAULT_DATA_DIR), help="Sample directory or directory containing captured samples.")
+    p_bench.add_argument("--repeat", type=int, default=5, help="Number of sequential runs per sample.")
+    p_bench.add_argument("--layout-shadow-compare", action="store_true", help="Measure fast free-text candidates while returning exhaustive results.")
 
     # --- Typediag Subcommand ---
     p_typediag = subparsers.add_parser(
@@ -3105,7 +3193,21 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    if args.subcommand == "capture":
+    if args.subcommand == "layout-benchmark":
+        dataset = Path(args.dataset).resolve()
+        if (dataset / "regions.json").is_file() or (dataset / "step_data.pkl").is_file():
+            sample_dirs = [dataset]
+        else:
+            sample_dirs = [
+                child.resolve() for child in sorted(dataset.iterdir())
+                if child.is_dir() and ((child / "regions.json").is_file() or (child / "step_data.pkl").is_file())
+            ] if dataset.is_dir() else []
+        if not sample_dirs:
+            logger.error(f"No valid sample datasets found in '{dataset}'.")
+            sys.exit(1)
+        run_layout_benchmark(sample_dirs, repeat=args.repeat, layout_shadow_compare=args.layout_shadow_compare)
+
+    elif args.subcommand == "capture":
         image_paths = expand_input_images(args.input)
         if not image_paths:
             logger.error(f"No valid image files matched inputs: {args.input}")
@@ -3227,6 +3329,7 @@ def main():
             solver_max_y_trials=args.max_y_trials,
             legacy_only=args.legacy_only,
             solver_report=args.solver_report,
+            layout_shadow_compare=args.layout_shadow_compare,
         )
         total_time_ms = (perf_counter() - t_start) * 1000.0
 

@@ -225,7 +225,7 @@ def log_memory_stats(
             previous = before.get(key) if before else None
             fields.append(f"{label}_before={previous if previous is not None else '-'}MB")
             fields.append(f"{label}_after={value if value is not None else '-'}MB")
-        _MEMORY_LOGGER.info('[MEM] %s', ' '.join(fields))
+        _MEMORY_LOGGER.debug('[MEM] %s', ' '.join(fields))
         return after
     except Exception:
         _MEMORY_LOGGER.debug('Unable to collect memory stats for %s', stage, exc_info=True)

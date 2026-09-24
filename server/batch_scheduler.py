@@ -82,6 +82,13 @@ _STAGE_RESOURCE_LIMITS = {
     ResourceClass.CPU_LIGHT: 2,
     ResourceClass.NETWORK: 4,
 }
+_INFERENCE_PAGE_LIMITS = {
+    "detection": 3,
+    "ocr": 3,
+    "bubble_detection": 3,
+    "inpainting": 2,
+    "upscaling": 2,
+}
 def stage_resource_limits(
     pipeline_workers: int,
     cpu_heavy_workers: int,
@@ -91,6 +98,7 @@ def stage_resource_limits(
     cpu_heavy = min(workers, max(1, cpu_heavy_workers))
     return {
         **_STAGE_RESOURCE_LIMITS,
+        ResourceClass.IO: workers,
         ResourceClass.GPU: gpu_concurrency,
         ResourceClass.CPU_HEAVY: cpu_heavy,
         ResourceClass.CPU_LIGHT: cpu_heavy,
@@ -147,6 +155,34 @@ class BatchScheduler:
             for resource, limit in self.resource_limits.items()
         }
         self._closed = False
+
+    def _inference_page_limit(self, stage_id: str) -> int:
+        limit = min(self.inference_page_batch_size, _INFERENCE_PAGE_LIMITS[stage_id])
+        try:
+            import psutil
+            process = psutil.Process(os.getpid()).memory_info().rss
+            total = psutil.virtual_memory().total
+        except Exception:
+            return limit
+        if total <= 0:
+            return limit
+
+        pressure = process / total
+        if pressure >= 0.60:
+            try:
+                loop = asyncio.get_running_loop()
+                for instance in self.executors.list:
+                    executor = getattr(instance, "_model_executor", None)
+                    ttl = getattr(getattr(instance, "translator", None), "models_ttl", 0)
+                    if executor is not None and ttl > 0:
+                        loop.create_task(executor.cleanup_models(ttl))
+                        break
+            except (AttributeError, RuntimeError):
+                pass
+            return 1
+        if pressure >= 0.50:
+            return max(1, limit - 1)
+        return limit
 
     def wake(self) -> None:
         self._wake.set()
@@ -268,6 +304,11 @@ class BatchScheduler:
         if not uncompleted:
             return None
 
+        translation_items = [
+            item for item in uncompleted
+            if self._item_batch_stage(item) == "translation"
+        ]
+
         ready_group = [
             item for item in uncompleted
             if item.get("stage") == "awaiting_translation"
@@ -277,7 +318,7 @@ class BatchScheduler:
         if len(ready_group) >= size:
             return ready_group[:size]
 
-        if len(ready_group) == len(uncompleted):
+        if len(ready_group) == len(translation_items):
             return ready_group
 
         return None
@@ -376,7 +417,7 @@ class BatchScheduler:
             key = fingerprint(config.ocr.dict())
             compatible.setdefault(key, []).append(item)
         group = next((pages for pages in compatible.values() if len(pages) > 1), [])
-        return group[:self.inference_page_batch_size]
+        return group[:self._inference_page_limit("ocr")]
 
     def _find_page_inference_group(
         self, batch: dict[str, Any], items: list[dict[str, Any]]
@@ -410,7 +451,7 @@ class BatchScheduler:
                 compatible.setdefault(fingerprint(settings), []).append(item)
             group = next((pages for pages in compatible.values() if len(pages) > 1), [])
             if group:
-                return stage_id, group[:self.inference_page_batch_size]
+                return stage_id, group[:self._inference_page_limit(stage_id)]
         return None
 
     async def _claim_prepare_items(
@@ -912,6 +953,7 @@ class BatchScheduler:
             ctx.text_regions = []
             ctx.result = ctx.upscaled
             await translator._revert_upscale(config, ctx)
+            run.write_json("meta.json", translator._build_result_metadata(config, ctx))
             run.progress("skip-no-regions" if stage_id == "detection" else "skip-no-text", True)
             run.manifest["status"] = "completed"
             run.manifest.pop("error", None)

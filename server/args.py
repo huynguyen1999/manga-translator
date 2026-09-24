@@ -39,6 +39,12 @@ def positive_int(string):
         raise argparse.ArgumentTypeError('value must be at least 1')
     return value
 
+def nonnegative_int(string):
+    value = int(string)
+    if value < 0:
+        raise argparse.ArgumentTypeError('value must be zero or greater')
+    return value
+
 def cpu_stage_workers(string):
     return None if string.lower() == 'auto' else positive_int(string)
 
@@ -52,7 +58,8 @@ def parse_arguments(args=None):
                         help='If a translator should be launched automatically')
     parser.add_argument('--ignore-errors', action='store_true', help='Skip image on encountered error.')
     parser.add_argument('--nonce', default=os.getenv('MT_WEB_NONCE', 'None'), type=str, help='Nonce for securing internal web server communication, set to "None" to disable')
-    parser.add_argument('--models-ttl', default='0', type=int, help='models TTL in memory in seconds')
+    parser.add_argument('--models-ttl', default=120, type=nonnegative_int,
+                        help='Keep idle models cached for this many seconds; 0 keeps them forever (default: 120)')
     parser.add_argument('--pre-dict', default=None, type=file_path, help='Path to the pre-translation dictionary file')
     parser.add_argument('--post-dict', default=None, type=file_path, help='Path to the post-translation dictionary file')    
     parser.add_argument('--executor-mode', choices=['inprocess', 'subprocess'], default='inprocess',
@@ -69,7 +76,7 @@ def parse_arguments(args=None):
                    help='Disable gpu usage and run on cpu')
     g.add_argument('--use-gpu-limited', action='store_true', default=False,
                    help='Turn on/off gpu (excluding offline translator)')
-    parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], default='INFO',
+    parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], default=os.getenv('LOG_LEVEL', 'INFO').upper(),
                         help='Console log level (default: INFO)')
     parser.add_argument('--log-dir', type=str, default='logs',
                         help='Directory to store daily log files (default: logs)')

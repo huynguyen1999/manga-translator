@@ -7,7 +7,7 @@ from .esrgan import ESRGANUpscaler
 from .esrgan_pytorch import ESRGANUpscalerPytorch
 from ..config import Upscaler
 from ..utils.model_cache import (
-    get_cached_model, model_operation, remove_cached_model,
+    get_cached_model, model_operation, unload_cached_model,
 )
 
 UPSCALERS = {
@@ -39,4 +39,4 @@ async def dispatch(upscaler_key: Upscaler, image_batch: List[Image.Image], upsca
 
 @model_operation
 async def unload(upscaler_key: Upscaler):
-    remove_cached_model('upscaler', upscaler_cache, upscaler_key)
+    await unload_cached_model('upscaler', upscaler_cache, upscaler_key)

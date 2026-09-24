@@ -8,7 +8,7 @@ from .model_manga_ocr import ModelMangaOCR
 from ..config import Ocr, OcrConfig
 from ..utils import Quadrilateral
 from ..utils.model_cache import (
-    get_cached_model, model_operation, remove_cached_model,
+    get_cached_model, model_operation, unload_cached_model,
 )
 
 OCRS = {
@@ -59,4 +59,4 @@ async def dispatch_batch(ocr_key: Ocr, pages: list[tuple[np.ndarray, List[Quadri
 
 @model_operation
 async def unload(ocr_key: Ocr):
-    remove_cached_model('ocr', ocr_cache, ocr_key)
+    await unload_cached_model('ocr', ocr_cache, ocr_key)

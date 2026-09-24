@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -44,6 +45,7 @@ from .geometry import (
 from .models import (
     BandSlot,
     BubbleLayoutGroup,
+    CandidateRaster,
     FreeTextDamageTarget,
     FreeTextZone,
     LayoutCandidate,
@@ -54,6 +56,7 @@ from .models import (
     PlacementMode,
     PlacedLine,
     ScanInterval,
+    SearchResult,
     ZoneShapeProfile,
 )
 from .ownership import build_free_text_ownership_zones
@@ -62,9 +65,11 @@ from .regions import prepare_regions as _ensure_region_identities
 from .raster import (
     _candidate_cropped_visual_masks,
     _candidate_global_glyph_mask,
+    _candidate_raster_at_offset,
     _candidate_visual_masks,
     _cropped_masks_overlap,
     _render_line_alpha,
+    rasterize_candidate,
 )
 
 
@@ -103,9 +108,9 @@ def _record_content_trace(regions: Optional[List[Any]], stage: str) -> None:
 
 logger = logging.getLogger("layout.solver")
 
+@dataclass
 class SolverProfileStats:
-    """Fine-grained Level-2 timing and workload counter stats for layout solvers."""
-    # Workload counters
+    """Fine-grained, layout-local timing and workload counters."""
     fonts_tested: int = 0
     spacing_tested: int = 0
     y_origins_tested: int = 0
@@ -121,12 +126,34 @@ class SolverProfileStats:
     safe_cache_misses: int = 0
     band_cache_hits: int = 0
     band_cache_misses: int = 0
-    # Free-text specific workload
     free_text_crops_rendered: int = 0
     free_text_offsets_tested: int = 0
     free_text_hard_valid_hits: int = 0
+    candidate_rasters_created: int = 0
+    candidate_raster_cache_hits: int = 0
+    free_text_typography_candidates: int = 0
+    free_text_candidates_geometry_evaluated: int = 0
+    free_text_ideal_attempts: int = 0
+    free_text_ideal_successes: int = 0
+    free_text_local_search_runs: int = 0
+    free_text_local_search_attempts: int = 0
+    free_text_local_search_successes: int = 0
+    free_text_full_search_fallbacks: int = 0
+    free_text_regions: int = 0
+    free_text_full_search_runs: int = 0
+    overflow_checks: int = 0
+    overflow_rasterizations: int = 0
+    full_qa_candidates: int = 0
+    bubble_row_slot_table_builds: int = 0
+    bubble_row_slot_table_cache_hits: int = 0
+    joint_layout_plans: int = 0
+    joint_layout_candidates: int = 0
+    joint_layout_candidate_counts: List[int] = field(default_factory=list)
+    joint_layout_cartesian_product: int = 0
+    joint_layout_combinations_tested: int = 0
+    joint_layout_collisions_rejected: int = 0
+    joint_layout_winner_score: Optional[float] = None
 
-    # Level-2 timing accumulators (in ms)
     safe_mask_prep_ms: float = 0.0
     width_precompute_ms: float = 0.0
     row_slot_table_ms: float = 0.0
@@ -141,11 +168,23 @@ class SolverProfileStats:
     composite_penalty_ms: float = 0.0
     bbox_validation_ms: float = 0.0
     glyph_validation_ms: float = 0.0
-    # Free-text specific timings
     ft_typography_ms: float = 0.0
     ft_crops_rasterize_ms: float = 0.0
     ft_offset_search_ms: float = 0.0
     ft_coverage_ms: float = 0.0
+    joint_layout_ms: float = 0.0
+
+    # These caches live only as long as the current layout's profile.
+    row_slot_tables: Dict[Tuple[Any, ...], Any] = field(default_factory=dict, repr=False)
+    row_slot_max_widths: Dict[Tuple[Any, ...], int] = field(default_factory=dict, repr=False)
+    placement_targets: Dict[Tuple[Any, ...], Any] = field(default_factory=dict, repr=False)
+    zone_shape_profiles: Dict[Tuple[Any, ...], Any] = field(default_factory=dict, repr=False)
+
+    def clear_ephemeral_caches(self) -> None:
+        self.row_slot_tables.clear()
+        self.row_slot_max_widths.clear()
+        self.placement_targets.clear()
+        self.zone_shape_profiles.clear()
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -168,6 +207,30 @@ class SolverProfileStats:
                 "free_text_crops_rendered": self.free_text_crops_rendered,
                 "free_text_offsets_tested": self.free_text_offsets_tested,
                 "free_text_hard_valid_hits": self.free_text_hard_valid_hits,
+                "candidate_rasters_created": self.candidate_rasters_created,
+                "candidate_raster_cache_hits": self.candidate_raster_cache_hits,
+                "free_text_typography_candidates": self.free_text_typography_candidates,
+                "free_text_candidates_geometry_evaluated": self.free_text_candidates_geometry_evaluated,
+                "free_text_ideal_attempts": self.free_text_ideal_attempts,
+                "free_text_ideal_successes": self.free_text_ideal_successes,
+                "free_text_local_search_runs": self.free_text_local_search_runs,
+                "free_text_local_search_attempts": self.free_text_local_search_attempts,
+                "free_text_local_search_successes": self.free_text_local_search_successes,
+                "free_text_full_search_fallbacks": self.free_text_full_search_fallbacks,
+                "free_text_regions": self.free_text_regions,
+                "free_text_full_search_runs": self.free_text_full_search_runs,
+                "overflow_checks": self.overflow_checks,
+                "overflow_rasterizations": self.overflow_rasterizations,
+                "full_qa_candidates": self.full_qa_candidates,
+                "bubble_row_slot_table_builds": self.bubble_row_slot_table_builds,
+                "bubble_row_slot_table_cache_hits": self.bubble_row_slot_table_cache_hits,
+                "joint_layout_plans": self.joint_layout_plans,
+                "joint_layout_candidates": self.joint_layout_candidates,
+                "joint_layout_candidate_counts": list(self.joint_layout_candidate_counts),
+                "joint_layout_cartesian_product": self.joint_layout_cartesian_product,
+                "joint_layout_combinations_tested": self.joint_layout_combinations_tested,
+                "joint_layout_collisions_rejected": self.joint_layout_collisions_rejected,
+                "joint_layout_winner_score": self.joint_layout_winner_score,
             },
             "timings_ms": {
                 "safe_mask_prep": self.safe_mask_prep_ms,
@@ -188,24 +251,26 @@ class SolverProfileStats:
                 "ft_crops_rasterize": self.ft_crops_rasterize_ms,
                 "ft_offset_search": self.ft_offset_search_ms,
                 "ft_coverage": self.ft_coverage_ms,
+                "joint_layout": self.joint_layout_ms,
             }
         }
 
 
-_GLOBAL_SOLVER_PROFILE: Optional[SolverProfileStats] = None
+_SOLVER_PROFILE: ContextVar[Optional[SolverProfileStats]] = ContextVar("solver_profile", default=None)
 
 
 def get_solver_profile() -> SolverProfileStats:
-    global _GLOBAL_SOLVER_PROFILE
-    if _GLOBAL_SOLVER_PROFILE is None:
-        _GLOBAL_SOLVER_PROFILE = SolverProfileStats()
-    return _GLOBAL_SOLVER_PROFILE
+    profile = _SOLVER_PROFILE.get()
+    if profile is None:
+        profile = SolverProfileStats()
+        _SOLVER_PROFILE.set(profile)
+    return profile
 
 
 def reset_solver_profile() -> SolverProfileStats:
-    global _GLOBAL_SOLVER_PROFILE
-    _GLOBAL_SOLVER_PROFILE = SolverProfileStats()
-    return _GLOBAL_SOLVER_PROFILE
+    profile = SolverProfileStats()
+    _SOLVER_PROFILE.set(profile)
+    return profile
 
 # Composite-objective weights (Phase 7). Hard validity stays in the glyph
 # validators; everything here is soft preference.
@@ -581,7 +646,7 @@ def solve_layout(
         # Precompute reusable row-slot table for font size S
         min_slot_w = max(S, 8)
         t_rst0 = perf_counter()
-        row_slot_table = _build_row_slot_table(
+        row_slot_table = _cached_row_slot_table(
             geom, S, stroke_width, margin, min_width=min_slot_w
         )
         prof.row_slot_table_ms += (perf_counter() - t_rst0) * 1000.0
@@ -589,7 +654,7 @@ def solve_layout(
             continue
 
         t_pt0 = perf_counter()
-        target_geom = compute_placement_target(
+        target_geom = _cached_placement_target(
             geom, S, stroke_width, margin,
             source_profile=source_profile,
             preferred_mask=preferred_mask,
@@ -601,11 +666,12 @@ def solve_layout(
             prof.spacing_tested += 1
             line_h = _line_height(S, ls)
             t_zp0 = perf_counter()
-            zone_profile = compute_zone_shape_profile(
+            zone_profile = _cached_zone_shape_profile(
                 geom, S, stroke_width, margin,
                 preferred_mask=preferred_mask,
                 line_h=line_h,
                 words=norm_words,
+                placement_target=target_geom,
             )
             prof.zone_profile_ms += (perf_counter() - t_zp0) * 1000.0
 
@@ -957,6 +1023,101 @@ def _build_row_slot_table(
         slots.sort(key=lambda s: s.left)
         table[y] = slots
     return table
+
+
+def _cached_row_slot_table(
+    geom: BubbleGeometry,
+    font_size: int,
+    stroke_width: int,
+    margin: float,
+    min_width: int,
+) -> Dict[int, List[BandSlot]]:
+    profile = get_solver_profile()
+    key = (geom, font_size, stroke_width, margin, min_width)
+    cached = profile.row_slot_tables.get(key)
+    if cached is not None:
+        profile.bubble_row_slot_table_cache_hits += 1
+        return cached
+    profile.bubble_row_slot_table_builds += 1
+    table = _build_row_slot_table(geom, font_size, stroke_width, margin, min_width)
+    profile.row_slot_tables[key] = table
+    return table
+
+
+def _max_usable_row_width(
+    geom: BubbleGeometry,
+    font_size: int,
+    stroke_width: int,
+    margin: float,
+    min_width: int,
+) -> int:
+    profile = get_solver_profile()
+    key = (geom, font_size, stroke_width, margin, min_width)
+    if key in profile.row_slot_max_widths:
+        return profile.row_slot_max_widths[key]
+    table = profile.row_slot_tables.get(key)
+    if table is not None:
+        profile.bubble_row_slot_table_cache_hits += 1
+        result = max((slot.width for row in table.values() for slot in row), default=0)
+    else:
+        _, y1, _, y2 = geom.safe_bounding_box(font_size, stroke_width, margin)
+        safe = geom.safe_pixels(font_size, stroke_width, margin)
+        result = 0
+        for y in range(max(0, y1), min(safe.shape[0] - font_size + 1, y2 - font_size + 1)):
+            result = max(
+                result,
+                max((slot.width for slot in _runs_from_row(np.all(safe[y:y + font_size], axis=0)) if slot.width >= min_width), default=0),
+            )
+    profile.row_slot_max_widths[key] = result
+    return result
+
+
+def _cached_placement_target(
+    geom: BubbleGeometry,
+    font_size: int,
+    stroke_width: int,
+    margin: float,
+    source_profile: Optional[OriginalLayoutProfile],
+    preferred_mask: Optional[np.ndarray],
+    is_single_region: bool,
+) -> PlacementTarget:
+    profile = get_solver_profile()
+    key = (geom, font_size, stroke_width, margin, id(source_profile), id(preferred_mask), is_single_region)
+    cached = profile.placement_targets.get(key)
+    if cached is None:
+        cached = compute_placement_target(
+            geom, font_size, stroke_width, margin,
+            source_profile=source_profile,
+            preferred_mask=preferred_mask,
+            is_single_region=is_single_region,
+        )
+        profile.placement_targets[key] = cached
+    return cached
+
+
+def _cached_zone_shape_profile(
+    geom: BubbleGeometry,
+    font_size: int,
+    stroke_width: int,
+    margin: float,
+    preferred_mask: Optional[np.ndarray],
+    line_h: int,
+    words: List[str],
+    placement_target: PlacementTarget,
+) -> ZoneShapeProfile:
+    profile = get_solver_profile()
+    key = (geom, font_size, stroke_width, margin, id(preferred_mask), line_h, tuple(words), id(placement_target))
+    cached = profile.zone_shape_profiles.get(key)
+    if cached is None:
+        cached = compute_zone_shape_profile(
+            geom, font_size, stroke_width, margin,
+            preferred_mask=preferred_mask,
+            line_h=line_h,
+            words=words,
+            placement_target=placement_target,
+        )
+        profile.zone_shape_profiles[key] = cached
+    return cached
 
 
 def _try_placement_rows(
@@ -2187,7 +2348,36 @@ def _free_text_ink_overflow(
     other_text: np.ndarray,
 ) -> float:
     """Measure glyph pixels outside the legal page/obstacle area."""
+    stats = get_solver_profile()
+    stats.overflow_checks += 1
+    stats.overflow_rasterizations += 1
     crop_box, glyph, _, _ = _candidate_cropped_visual_masks(candidate, 0, image_shape)
+    return _free_text_ink_overflow_in_crop(crop_box, glyph, obstacles, other_text)
+
+
+def _free_text_ink_overflow_from_raster(
+    raster: CandidateRaster,
+    destination_crop_box: Tuple[int, int, int, int],
+    obstacles: PageObstacleMap,
+    other_text: np.ndarray,
+) -> float:
+    """Measure overflow by translating a cached raster, without rerasterizing."""
+    profile = get_solver_profile()
+    profile.overflow_checks += 1
+    dx = destination_crop_box[0] - raster.crop_box[0]
+    dy = destination_crop_box[1] - raster.crop_box[1]
+    crop_box, glyph, _, _ = _candidate_raster_at_offset(
+        raster, dx, dy, obstacles.panel_mask.shape[:2]
+    )
+    return _free_text_ink_overflow_in_crop(crop_box, glyph, obstacles, other_text)
+
+
+def _free_text_ink_overflow_in_crop(
+    crop_box: Tuple[int, int, int, int],
+    glyph: np.ndarray,
+    obstacles: PageObstacleMap,
+    other_text: np.ndarray,
+) -> float:
     total = int(np.count_nonzero(glyph))
     if not total:
         return 1.0
@@ -2200,6 +2390,187 @@ def _free_text_ink_overflow(
     return float(np.count_nonzero(glyph & ~allowed)) / total
 
 
+def _free_text_search_result(
+    typography_candidate: LayoutCandidate,
+    raster: CandidateRaster,
+    base_box: Tuple[int, int, int, int],
+    ink_crop: np.ndarray,
+    visual_crop: np.ndarray,
+    block_crop: np.ndarray,
+    base_centroid: Tuple[float, float],
+    base_ink_bbox: Tuple[int, int, int, int],
+    ideal_dx: int,
+    ideal_dy: int,
+    relative_dx: int,
+    relative_dy: int,
+    original_profile: OriginalLayoutProfile,
+    damage_centroid: Tuple[float, float],
+    target_width: float,
+    target_height: float,
+    zone: FreeTextZone,
+    obstacles: PageObstacleMap,
+    other_text: np.ndarray,
+) -> Optional[SearchResult]:
+    stats = get_solver_profile()
+    stats.free_text_offsets_tested += 1
+    stats.candidate_raster_cache_hits += 1
+    stats.free_text_candidates_geometry_evaluated += 1
+    dx, dy = ideal_dx + relative_dx, ideal_dy + relative_dy
+    x1, y1, x2, y2 = base_box
+    crop_box = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
+    started = perf_counter()
+    valid = _free_text_hard_valid(crop_box, visual_crop, zone, obstacles, other_text)
+    stats.ft_offset_search_ms += (perf_counter() - started) * 1000.0
+    if not valid:
+        return None
+    stats.free_text_hard_valid_hits += 1
+
+    started = perf_counter()
+    coverage = _measure_damage_coverage_crop(crop_box, visual_crop, ink_crop, block_crop, zone)
+    stats.ft_coverage_ms += (perf_counter() - started) * 1000.0
+    actual_centroid = (base_centroid[0] + dx, base_centroid[1] + dy)
+    center_dx = actual_centroid[0] - damage_centroid[0]
+    center_dy = actual_centroid[1] - damage_centroid[1]
+    center_penalty = (
+        (relative_dx / max(1.0, float(max(target_width, original_profile.block_width)))) ** 2
+        + (relative_dy / max(1.0, float(max(target_height, original_profile.block_height)))) ** 2
+    )
+    source_drift = math.hypot(
+        actual_centroid[0] - original_profile.centroid[0],
+        actual_centroid[1] - original_profile.centroid[1],
+    ) / max(1.0, math.hypot(original_profile.block_width, original_profile.block_height))
+    score = (
+        typography_candidate.penalty
+        + center_penalty * 100.0
+        + source_drift * 3.0
+        - coverage["c_damage"] * 15.0
+        + (1.0 - coverage["c_core"]) * 5.0
+    )
+    ink_bbox = tuple(value + delta for value, delta in zip(base_ink_bbox, (dx, dy, dx, dy)))
+    return SearchResult(
+        typography_candidate, raster, dx, dy, relative_dx, relative_dy,
+        score, coverage, actual_centroid, center_dx, center_dy, ink_bbox,
+    )
+
+
+def _materialize_free_text_search_result(
+    result: SearchResult,
+    original_profile: OriginalLayoutProfile,
+    target: Optional[FreeTextDamageTarget],
+    damage_centroid: Tuple[float, float],
+    obstacles: PageObstacleMap,
+    other_text: np.ndarray,
+    status: str = "free_text",
+    overflow: Optional[float] = None,
+) -> LayoutCandidate:
+    stats = get_solver_profile()
+    candidate = _free_text_shift_candidate(result.typography_candidate, result.dx, result.dy)
+    candidate_bbox = _candidate_bbox(candidate)
+    ink_overflow = overflow
+    if ink_overflow is None:
+        ink_overflow = _free_text_ink_overflow_from_raster(
+            result.raster,
+            tuple(value + delta for value, delta in zip(result.raster.crop_box, (result.dx, result.dy, result.dx, result.dy))),
+            obstacles,
+            other_text,
+        )
+    candidate.penalty = result.score
+    candidate.qa.update({
+        "placement_mode": PlacementMode.FREE_TEXT.value,
+        "source_bbox": original_profile.bbox,
+        "source_font_size": original_profile.font_size,
+        "source_line_count": original_profile.line_count,
+        "damage_bbox": target.bbox if target is not None else original_profile.bbox,
+        "damage_centroid": [damage_centroid[0], damage_centroid[1]],
+        "ink_centroid": [result.actual_centroid[0], result.actual_centroid[1]],
+        "center_error_px": math.hypot(result.center_dx, result.center_dy),
+        "placement_dx": result.relative_dx,
+        "placement_dy": result.relative_dy,
+        "coverage_ink": result.coverage["c_ink"],
+        "coverage_visual": result.coverage["c_visual"],
+        "coverage_block": result.coverage["c_block"],
+        "damage_coverage": result.coverage["c_damage"],
+        "core_damage_coverage": result.coverage["c_core"],
+        "uncovered_damage": result.coverage["u_damage"],
+        **_free_text_footprint_qa(original_profile, target, result.ink_bbox),
+        "ink_overflow": ink_overflow,
+        "layout_width": candidate_bbox[2] - candidate_bbox[0],
+        "layout_height": candidate_bbox[3] - candidate_bbox[1],
+        "expansion_ratio": (result.ink_bbox[2] - result.ink_bbox[0]) * (result.ink_bbox[3] - result.ink_bbox[1]) / max(1.0, original_profile.block_width * original_profile.block_height),
+        "hard_constraints": ["bubble_mask", "ownership_zone", "page_bounds", "other_text"],
+        "free_text_score": result.score,
+    })
+    candidate.status = status
+    stats.full_qa_candidates += 1
+    return candidate
+
+
+def _log_free_text_shadow_comparison(
+    fast: Optional[LayoutCandidate],
+    exhaustive: Optional[LayoutCandidate],
+    image_shape: Tuple[int, int],
+) -> None:
+    if exhaustive is None:
+        logger.info("layout shadow fast_accepted=%s exhaustive=none", fast is not None)
+        return
+    if fast is None:
+        logger.info("layout shadow fast_accepted=false exhaustive_score=%.4f", exhaustive.penalty)
+        return
+
+    fast_center = fast.qa.get("ink_centroid", (0.0, 0.0))
+    full_center = exhaustive.qa.get("ink_centroid", (0.0, 0.0))
+    fast_mask = _candidate_global_glyph_mask(fast, image_shape)
+    full_mask = _candidate_global_glyph_mask(exhaustive, image_shape)
+    union = int(np.count_nonzero(fast_mask | full_mask))
+    iou = float(np.count_nonzero(fast_mask & full_mask)) / union if union else 1.0
+    fast_bbox = fast.qa.get("ink_bbox", (0, 0, 0, 0))
+    full_bbox = exhaustive.qa.get("ink_bbox", (0, 0, 0, 0))
+    fast_area = max(0, fast_bbox[2] - fast_bbox[0]) * max(0, fast_bbox[3] - fast_bbox[1])
+    full_area = max(0, full_bbox[2] - full_bbox[0]) * max(0, full_bbox[3] - full_bbox[1])
+    logger.info(
+        "layout shadow fast_accepted=true exhaustive_score=%.4f font_delta=%+d line_count_delta=%+d "
+        "centroid_delta_px=%.2f damage_coverage_delta=%+.4f core_coverage_delta=%+.4f "
+        "footprint_area_delta=%+d overflow_delta=%+.4f rendered_mask_iou=%.4f",
+        exhaustive.penalty,
+        fast.font_size - exhaustive.font_size,
+        len(fast.lines) - len(exhaustive.lines),
+        math.hypot(float(fast_center[0]) - float(full_center[0]), float(fast_center[1]) - float(full_center[1])),
+        float(fast.qa.get("damage_coverage", 0.0)) - float(exhaustive.qa.get("damage_coverage", 0.0)),
+        float(fast.qa.get("core_damage_coverage", 0.0)) - float(exhaustive.qa.get("core_damage_coverage", 0.0)),
+        fast_area - full_area,
+        float(fast.qa.get("ink_overflow", 0.0)) - float(exhaustive.qa.get("ink_overflow", 0.0)),
+        iou,
+    )
+
+
+def _free_text_fast_gate(
+    result: SearchResult,
+    image_shape: Tuple[int, int],
+    obstacles: PageObstacleMap,
+    other_text: np.ndarray,
+) -> Tuple[bool, float]:
+    candidate_bbox = _candidate_bbox(result.typography_candidate)
+    candidate_bbox = tuple(value + delta for value, delta in zip(candidate_bbox, (result.dx, result.dy, result.dx, result.dy)))
+    h, w = image_shape[:2]
+    if not (0 <= candidate_bbox[0] <= candidate_bbox[2] <= w and 0 <= candidate_bbox[1] <= candidate_bbox[3] <= h):
+        return False, 1.0
+    if math.hypot(result.center_dx, result.center_dy) > max(2.0, 0.10 * result.typography_candidate.font_size):
+        return False, 1.0
+    if result.coverage["c_core"] < 0.90:
+        return False, 1.0
+    overflow = _free_text_ink_overflow_from_raster(
+        result.raster,
+        tuple(value + delta for value, delta in zip(result.raster.crop_box, (result.dx, result.dy, result.dx, result.dy))),
+        obstacles,
+        other_text,
+    )
+    return overflow == 0.0, overflow
+
+
+def _layout_env_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _solve_free_text_region(
     region: Any,
     zone: FreeTextZone,
@@ -2208,6 +2579,8 @@ def _solve_free_text_region(
     image_shape: Tuple[int, int],
     solver_margin: float,
     solver_max_y_trials: int,
+    allow_early_accept: bool = False,
+    shadow_compare: bool = False,
 ) -> Optional[Tuple[LayoutCandidate, OriginalLayoutProfile, Dict[str, Any]]]:
     """Solve FREE_TEXT as frozen typography followed by rigid placement.
 
@@ -2229,6 +2602,7 @@ def _solve_free_text_region(
 
     target = zone.damage_target
     prof = get_solver_profile()
+    prof.free_text_regions += 1
     t_topo0 = perf_counter()
     typography = _free_text_typography_candidates(
         text,
@@ -2240,6 +2614,7 @@ def _solve_free_text_region(
     prof.ft_typography_ms += (perf_counter() - t_topo0) * 1000.0
     if not typography:
         return None
+    prof.free_text_typography_candidates += len(typography)
 
     if target is None or target.area == 0:
         damage_centroid = profile.centroid
@@ -2251,20 +2626,32 @@ def _solve_free_text_region(
     stroke_width = max(1, int(max(candidate.font_size for candidate in typography) * 0.07))
     source = source_mask.astype(bool)
     other_text = obstacles.text_mask.astype(bool) & ~source
+    candidate_rasters: Dict[int, CandidateRaster] = {}
+    prepared_candidates: Dict[int, Tuple[Any, ...]] = {}
+    search_results: List[SearchResult] = []
     evaluated: List[LayoutCandidate] = []
     typography.sort(key=lambda c: c.penalty)
     eval_candidates = typography[:16]
+    fast_results_by_offset: Dict[Tuple[int, int, int], SearchResult] = {}
 
-    for typography_candidate in eval_candidates:
+    def prepare_candidate(typography_candidate: LayoutCandidate) -> Optional[Tuple[Any, ...]]:
+        cid = id(typography_candidate)
+        prepared = prepared_candidates.get(cid)
+        if prepared is not None:
+            prof.candidate_raster_cache_hits += 1
+            return prepared
         t_crop0 = perf_counter()
-        prof.free_text_crops_rendered += 1
-        base_box, ink_crop, visual_crop, block_crop = _candidate_cropped_visual_masks(
-            typography_candidate, stroke_width, image_shape,
-        )
+        raster = candidate_rasters.get(cid)
+        if raster is None:
+            raster = rasterize_candidate(typography_candidate, stroke_width)
+            candidate_rasters[cid] = raster
+            prof.free_text_crops_rendered += 1
+            prof.candidate_rasters_created += 1
+        base_box, ink_crop, visual_crop, block_crop = _candidate_raster_at_offset(raster, 0, 0, image_shape)
         prof.ft_crops_rasterize_ms += (perf_counter() - t_crop0) * 1000.0
         bx1, by1, bx2, by2 = base_box
         if bx2 <= bx1 or by2 <= by1 or not np.any(ink_crop):
-            continue
+            return None
         ink_y, ink_x = np.nonzero(ink_crop)
         base_centroid = (bx1 + float(ink_x.mean()), by1 + float(ink_y.mean()))
         base_ink_bbox = (
@@ -2274,84 +2661,108 @@ def _solve_free_text_region(
         ideal_dx = int(round(damage_centroid[0] - base_centroid[0]))
         ideal_dy = int(round(damage_centroid[1] - base_centroid[1]))
         max_radius = max(16, min(64, int(max(target_width, target_height, profile.block_width, profile.block_height))))
+        prepared = (
+            raster, base_box, ink_crop, visual_crop, block_crop, base_centroid,
+            base_ink_bbox, ideal_dx, ideal_dy, max_radius,
+        )
+        prepared_candidates[cid] = prepared
+        return prepared
 
-        # Stage A: Coarse offset exploration
+    fast_requested = shadow_compare or (allow_early_accept and _layout_env_enabled("LAYOUT_FAST_FREE_TEXT"))
+    try_local_stage = shadow_compare or _layout_env_enabled("LAYOUT_LAZY_CANDIDATES")
+    fast_result: Optional[SearchResult] = None
+    fast_overflow: Optional[float] = None
+    fast_status = "free_text_ideal"
+    if fast_requested and eval_candidates:
+        first = eval_candidates[0]
+        prepared = prepare_candidate(first)
+        if prepared is not None:
+            raster, base_box, ink_crop, visual_crop, block_crop, base_centroid, base_ink_bbox, ideal_dx, ideal_dy, _ = prepared
+            prof.free_text_ideal_attempts += 1
+            result = _free_text_search_result(
+                first, raster, base_box, ink_crop, visual_crop, block_crop,
+                base_centroid, base_ink_bbox, ideal_dx, ideal_dy, 0, 0,
+                profile, damage_centroid, target_width, target_height, zone,
+                obstacles, other_text,
+            )
+            if result is not None:
+                fast_results_by_offset[(id(first), 0, 0)] = result
+                accepted, fast_overflow = _free_text_fast_gate(result, image_shape, obstacles, other_text)
+                if accepted:
+                    fast_result = result
+                    prof.free_text_ideal_successes += 1
+
+        if fast_result is None and try_local_stage:
+            prof.free_text_local_search_runs += 1
+            local_offsets = (
+                (0, 0), (4, 0), (-4, 0), (0, 4), (0, -4),
+                (4, 4), (4, -4), (-4, 4), (-4, -4),
+                (8, 0), (-8, 0), (0, 8), (0, -8),
+            )
+            for candidate_index, typography_candidate in enumerate(eval_candidates[:3]):
+                prepared = prepare_candidate(typography_candidate)
+                if prepared is None:
+                    continue
+                raster, base_box, ink_crop, visual_crop, block_crop, base_centroid, base_ink_bbox, ideal_dx, ideal_dy, _ = prepared
+                for rel_dx, rel_dy in local_offsets:
+                    if candidate_index == 0 and (rel_dx, rel_dy) == (0, 0):
+                        continue
+                    prof.free_text_local_search_attempts += 1
+                    result = _free_text_search_result(
+                        typography_candidate, raster, base_box, ink_crop, visual_crop, block_crop,
+                        base_centroid, base_ink_bbox, ideal_dx, ideal_dy, rel_dx, rel_dy,
+                        profile, damage_centroid, target_width, target_height, zone,
+                        obstacles, other_text,
+                    )
+                    if result is None:
+                        continue
+                    fast_results_by_offset[(id(typography_candidate), rel_dx, rel_dy)] = result
+                    accepted, overflow = _free_text_fast_gate(result, image_shape, obstacles, other_text)
+                    if not accepted:
+                        continue
+                    fast_result, fast_overflow, fast_status = result, overflow, "free_text_local"
+                    prof.free_text_local_search_successes += 1
+                    break
+                if fast_result is not None:
+                    break
+
+        if fast_result is not None and not shadow_compare:
+            candidate = _materialize_free_text_search_result(
+                fast_result, profile, target, damage_centroid, obstacles, other_text,
+                status=fast_status, overflow=fast_overflow,
+            )
+            region._free_text_candidate_pool = [candidate]
+            return candidate, profile, candidate.qa
+        if fast_result is None:
+            prof.free_text_full_search_fallbacks += 1
+
+    prof.free_text_full_search_runs += 1
+    for typography_candidate in eval_candidates:
+        prepared = prepare_candidate(typography_candidate)
+        if prepared is None:
+            continue
+        raster, base_box, ink_crop, visual_crop, block_crop, base_centroid, base_ink_bbox, ideal_dx, ideal_dy, max_radius = prepared
         coarse_offsets = _free_text_offset_search(max_radius)
         best_coarse_offset: Optional[Tuple[int, int]] = None
         best_coarse_score = float("inf")
-
         tested_offsets = set()
         for rel_dx, rel_dy in coarse_offsets:
             tested_offsets.add((rel_dx, rel_dy))
-            prof.free_text_offsets_tested += 1
-            dx = ideal_dx + rel_dx
-            dy = ideal_dy + rel_dy
-            crop_box = (bx1 + dx, by1 + dy, bx2 + dx, by2 + dy)
-            t_off0 = perf_counter()
-            is_valid = _free_text_hard_valid(crop_box, visual_crop, zone, obstacles, other_text)
-            prof.ft_offset_search_ms += (perf_counter() - t_off0) * 1000.0
-            if not is_valid:
+            cache_key = (id(typography_candidate), rel_dx, rel_dy)
+            result = fast_results_by_offset.pop(cache_key, None)
+            if result is None:
+                result = _free_text_search_result(
+                    typography_candidate, raster, base_box, ink_crop, visual_crop, block_crop,
+                    base_centroid, base_ink_bbox, ideal_dx, ideal_dy, rel_dx, rel_dy,
+                    profile, damage_centroid, target_width, target_height, zone,
+                    obstacles, other_text,
+                )
+            if result is None:
                 continue
-            prof.free_text_hard_valid_hits += 1
-
-            t_cov0 = perf_counter()
-            coverage = _measure_damage_coverage_crop(crop_box, visual_crop, ink_crop, block_crop, zone)
-            prof.ft_coverage_ms += (perf_counter() - t_cov0) * 1000.0
-
-            actual_centroid = (base_centroid[0] + dx, base_centroid[1] + dy)
-            center_dx = actual_centroid[0] - damage_centroid[0]
-            center_dy = actual_centroid[1] - damage_centroid[1]
-            center_penalty = (
-                (rel_dx / max(1.0, float(max(target_width, profile.block_width)))) ** 2
-                + (rel_dy / max(1.0, float(max(target_height, profile.block_height)))) ** 2
-            )
-            source_drift = math.hypot(
-                actual_centroid[0] - profile.centroid[0],
-                actual_centroid[1] - profile.centroid[1],
-            ) / max(1.0, math.hypot(profile.block_width, profile.block_height))
-            score = (
-                typography_candidate.penalty
-                + center_penalty * 100.0
-                + source_drift * 3.0
-                - coverage["c_damage"] * 15.0
-                + (1.0 - coverage["c_core"]) * 5.0
-            )
-
-            if score < best_coarse_score:
-                best_coarse_score = score
+            search_results.append(result)
+            if result.score < best_coarse_score:
+                best_coarse_score = result.score
                 best_coarse_offset = (rel_dx, rel_dy)
-
-            candidate = _free_text_shift_candidate(typography_candidate, dx, dy)
-            cand_bbox = _candidate_bbox(candidate)
-            ink_bbox = tuple(value + delta for value, delta in zip(base_ink_bbox, (dx, dy, dx, dy)))
-            candidate.penalty = score
-            candidate.qa.update({
-                "placement_mode": PlacementMode.FREE_TEXT.value,
-                "source_bbox": profile.bbox,
-                "source_font_size": profile.font_size,
-                "source_line_count": profile.line_count,
-                "damage_bbox": target.bbox if target is not None else profile.bbox,
-                "damage_centroid": [damage_centroid[0], damage_centroid[1]],
-                "ink_centroid": [actual_centroid[0], actual_centroid[1]],
-                "center_error_px": math.hypot(center_dx, center_dy),
-                "placement_dx": rel_dx,
-                "placement_dy": rel_dy,
-                "coverage_ink": coverage["c_ink"],
-                "coverage_visual": coverage["c_visual"],
-                "coverage_block": coverage["c_block"],
-                "damage_coverage": coverage["c_damage"],
-                "core_damage_coverage": coverage["c_core"],
-                "uncovered_damage": coverage["u_damage"],
-                **_free_text_footprint_qa(profile, target, ink_bbox),
-                "ink_overflow": _free_text_ink_overflow(candidate, image_shape, obstacles, other_text),
-                "layout_width": cand_bbox[2] - cand_bbox[0],
-                "layout_height": cand_bbox[3] - cand_bbox[1],
-                "expansion_ratio": (ink_bbox[2] - ink_bbox[0]) * (ink_bbox[3] - ink_bbox[1]) / max(1.0, profile.block_width * profile.block_height),
-                "hard_constraints": ["bubble_mask", "ownership_zone", "page_bounds", "other_text"],
-                "free_text_score": score,
-            })
-            candidate.status = "free_text"
-            evaluated.append(candidate)
 
         # Stage B: Fine refinement around best coarse offset
         if best_coarse_offset is not None:
@@ -2360,77 +2771,44 @@ def _solve_free_text_region(
                 if (rel_dx, rel_dy) in tested_offsets:
                     continue
                 tested_offsets.add((rel_dx, rel_dy))
-                prof.free_text_offsets_tested += 1
-                dx = ideal_dx + rel_dx
-                dy = ideal_dy + rel_dy
-                crop_box = (bx1 + dx, by1 + dy, bx2 + dx, by2 + dy)
-                t_off0 = perf_counter()
-                is_valid = _free_text_hard_valid(crop_box, visual_crop, zone, obstacles, other_text)
-                prof.ft_offset_search_ms += (perf_counter() - t_off0) * 1000.0
-                if not is_valid:
+                result = _free_text_search_result(
+                    typography_candidate, raster, base_box, ink_crop, visual_crop, block_crop,
+                    base_centroid, base_ink_bbox, ideal_dx, ideal_dy, rel_dx, rel_dy,
+                    profile, damage_centroid, target_width, target_height, zone,
+                    obstacles, other_text,
+                )
+                if result is None:
                     continue
-                prof.free_text_hard_valid_hits += 1
+                search_results.append(result)
 
-                t_cov0 = perf_counter()
-                coverage = _measure_damage_coverage_crop(crop_box, visual_crop, ink_crop, block_crop, zone)
-                prof.ft_coverage_ms += (perf_counter() - t_cov0) * 1000.0
-
-                actual_centroid = (base_centroid[0] + dx, base_centroid[1] + dy)
-                center_dx = actual_centroid[0] - damage_centroid[0]
-                center_dy = actual_centroid[1] - damage_centroid[1]
-                center_penalty = (
-                    (rel_dx / max(1.0, float(max(target_width, profile.block_width)))) ** 2
-                    + (rel_dy / max(1.0, float(max(target_height, profile.block_height)))) ** 2
-                )
-                source_drift = math.hypot(
-                    actual_centroid[0] - profile.centroid[0],
-                    actual_centroid[1] - profile.centroid[1],
-                ) / max(1.0, math.hypot(profile.block_width, profile.block_height))
-                score = (
-                    typography_candidate.penalty
-                    + center_penalty * 100.0
-                    + source_drift * 3.0
-                    - coverage["c_damage"] * 15.0
-                    + (1.0 - coverage["c_core"]) * 5.0
-                )
-
-                candidate = _free_text_shift_candidate(typography_candidate, dx, dy)
-                cand_bbox = _candidate_bbox(candidate)
-                ink_bbox = tuple(value + delta for value, delta in zip(base_ink_bbox, (dx, dy, dx, dy)))
-                candidate.penalty = score
-                candidate.qa.update({
-                    "placement_mode": PlacementMode.FREE_TEXT.value,
-                    "source_bbox": profile.bbox,
-                    "source_font_size": profile.font_size,
-                    "source_line_count": profile.line_count,
-                    "damage_bbox": target.bbox if target is not None else profile.bbox,
-                    "damage_centroid": [damage_centroid[0], damage_centroid[1]],
-                    "ink_centroid": [actual_centroid[0], actual_centroid[1]],
-                    "center_error_px": math.hypot(center_dx, center_dy),
-                    "placement_dx": rel_dx,
-                    "placement_dy": rel_dy,
-                    "coverage_ink": coverage["c_ink"],
-                    "coverage_visual": coverage["c_visual"],
-                    "coverage_block": coverage["c_block"],
-                    "damage_coverage": coverage["c_damage"],
-                    "core_damage_coverage": coverage["c_core"],
-                    "uncovered_damage": coverage["u_damage"],
-                    **_free_text_footprint_qa(profile, target, ink_bbox),
-                    "ink_overflow": _free_text_ink_overflow(candidate, image_shape, obstacles, other_text),
-                    "layout_width": cand_bbox[2] - cand_bbox[0],
-                    "layout_height": cand_bbox[3] - cand_bbox[1],
-                    "expansion_ratio": (ink_bbox[2] - ink_bbox[0]) * (ink_bbox[3] - ink_bbox[1]) / max(1.0, profile.block_width * profile.block_height),
-                    "hard_constraints": ["bubble_mask", "ownership_zone", "page_bounds", "other_text"],
-                    "free_text_score": score,
-                })
-                candidate.status = "free_text"
-                evaluated.append(candidate)
+    search_results.sort(key=lambda result: result.score)
+    seen_searches = set()
+    for result in search_results:
+        key = (
+            result.typography_candidate.font_size,
+            tuple((line.text, line.x + result.dx, line.y + result.dy) for line in result.typography_candidate.lines),
+        )
+        if key in seen_searches:
+            continue
+        seen_searches.add(key)
+        candidate = _materialize_free_text_search_result(
+            result, profile, target, damage_centroid, obstacles, other_text
+        )
+        evaluated.append(candidate)
+        if len(evaluated) >= 8:
+            break
 
     if not evaluated:
         # Resilient fallback: ensure translated text is never dropped without a layout candidate
         for typography_candidate in typography:
-            base_box, ink_crop, visual_crop, block_crop = _candidate_cropped_visual_masks(
-                typography_candidate, stroke_width, image_shape,
+            raster = candidate_rasters.get(id(typography_candidate))
+            if raster is None:
+                raster = rasterize_candidate(typography_candidate, stroke_width)
+                candidate_rasters[id(typography_candidate)] = raster
+                prof.candidate_rasters_created += 1
+            prof.candidate_raster_cache_hits += 1
+            base_box, ink_crop, visual_crop, block_crop = _candidate_raster_at_offset(
+                raster, 0, 0, image_shape,
             )
             bx1, by1, bx2, by2 = base_box
             if bx2 <= bx1 or by2 <= by1 or not np.any(ink_crop):
@@ -2461,17 +2839,35 @@ def _solve_free_text_region(
                 "placement_dx": clamp_dx - ideal_dx,
                 "placement_dy": clamp_dy - ideal_dy,
                 **_free_text_footprint_qa(profile, target, ink_bbox),
-                "ink_overflow": _free_text_ink_overflow(candidate, image_shape, obstacles, other_text),
+                "ink_overflow": _free_text_ink_overflow_from_raster(
+                    raster,
+                    tuple(value + delta for value, delta in zip(raster.crop_box, (clamp_dx, clamp_dy, clamp_dx, clamp_dy))),
+                    obstacles,
+                    other_text,
+                ),
                 "free_text_score": candidate.penalty,
                 "fallback": True,
             })
             evaluated.append(candidate)
+            prof.full_qa_candidates += 1
             break
 
     if not evaluated:
+        if shadow_compare:
+            fast_candidate = _materialize_free_text_search_result(
+                fast_result, profile, target, damage_centroid, obstacles, other_text,
+                status=fast_status, overflow=fast_overflow,
+            ) if fast_result is not None else None
+            _log_free_text_shadow_comparison(fast_candidate, None, image_shape)
         return None
 
     evaluated.sort(key=lambda candidate: candidate.penalty)
+    if shadow_compare:
+        fast_candidate = _materialize_free_text_search_result(
+            fast_result, profile, target, damage_centroid, obstacles, other_text,
+            status=fast_status, overflow=fast_overflow,
+        ) if fast_result is not None else None
+        _log_free_text_shadow_comparison(fast_candidate, evaluated[0], image_shape)
     unique: List[LayoutCandidate] = []
     seen = set()
     for candidate in evaluated:
@@ -3249,75 +3645,82 @@ def _choose_joint_layout(
     plans: List[_RegionLayoutPlan],
     image_shape: Tuple[int, int],
 ) -> Optional[Tuple[LayoutCandidate, ...]]:
-    if not plans or any(not plan.candidates for plan in plans):
-        return None
+    profile = get_solver_profile()
+    started = perf_counter()
+    profile.joint_layout_plans += len(plans)
+    candidate_counts = [len(plan.candidates) for plan in plans]
+    profile.joint_layout_candidates += sum(candidate_counts)
+    profile.joint_layout_candidate_counts.extend(candidate_counts)
+    combinations = math.prod(len(plan.candidates) for plan in plans) if plans else 0
+    profile.joint_layout_cartesian_product += combinations
+    try:
+        if not plans or any(not plan.candidates for plan in plans):
+            return None
 
-    # ponytail: cap Cartesian search at 4096 combinations; callers use the
-    # existing greedy collision-safe fallback for larger candidate spaces.
-    if math.prod(len(plan.candidates) for plan in plans) > _MAX_JOINT_LAYOUT_COMBINATIONS:
-        return None
+        # ponytail: cap Cartesian search at 4096 combinations; callers use the
+        # existing greedy collision-safe fallback for larger candidate spaces.
+        if combinations > _MAX_JOINT_LAYOUT_COMBINATIONS:
+            return None
 
-    # Precompute candidate data once per unique candidate
-    candidate_cache: Dict[int, Any] = {}
-    for plan in plans:
-        for cand in plan.candidates:
-            cid = id(cand)
-            if cid not in candidate_cache:
-                candidate_cache[cid] = _candidate_data(cand, image_shape)
+        candidate_cache: Dict[int, Any] = {}
+        for plan in plans:
+            for cand in plan.candidates:
+                cid = id(cand)
+                if cid not in candidate_cache:
+                    candidate_cache[cid] = _candidate_data(cand, image_shape)
 
-    best: Optional[Tuple[float, Tuple[LayoutCandidate, ...]]] = None
-    for combination in itertools.product(*(plan.candidates for plan in plans)):
-        # Check pairwise collision first using cached glyph masks.
-        collision = False
-        for i in range(len(combination)):
-            box_i, res_i, _, _ = candidate_cache[id(combination[i])]
-            for j in range(i + 1, len(combination)):
-                box_j, res_j, _, _ = candidate_cache[id(combination[j])]
-                if _cropped_masks_overlap(box_i, res_i, box_j, res_j):
-                    collision = True
+        best: Optional[Tuple[float, Tuple[LayoutCandidate, ...]]] = None
+        for combination in itertools.product(*(plan.candidates for plan in plans)):
+            profile.joint_layout_combinations_tested += 1
+            collision = False
+            for i in range(len(combination)):
+                box_i, res_i, _, _ = candidate_cache[id(combination[i])]
+                for j in range(i + 1, len(combination)):
+                    box_j, res_j, _, _ = candidate_cache[id(combination[j])]
+                    if _cropped_masks_overlap(box_i, res_i, box_j, res_j):
+                        collision = True
+                        break
+                if collision:
                     break
             if collision:
-                break
-        if collision:
-            continue
+                profile.joint_layout_collisions_rejected += 1
+                continue
 
-        score = sum(candidate.penalty for candidate in combination)
-        for first in range(len(combination)):
-            first_cand = combination[first]
-            _, _, first_bbox, first_centroid = candidate_cache[id(first_cand)]
-            first_profile = plans[first].source_profile
+            score = sum(candidate.penalty for candidate in combination)
+            for first in range(len(combination)):
+                first_cand = combination[first]
+                _, _, first_bbox, first_centroid = candidate_cache[id(first_cand)]
+                first_profile = plans[first].source_profile
+                for second in range(first + 1, len(combination)):
+                    second_cand = combination[second]
+                    _, _, second_bbox, second_centroid = candidate_cache[id(second_cand)]
+                    second_profile = plans[second].source_profile
+                    if first_profile is None or second_profile is None:
+                        continue
 
-            for second in range(first + 1, len(combination)):
-                second_cand = combination[second]
-                _, _, second_bbox, second_centroid = candidate_cache[id(second_cand)]
-                second_profile = plans[second].source_profile
+                    source_dx = second_profile.centroid[0] - first_profile.centroid[0]
+                    source_dy = second_profile.centroid[1] - first_profile.centroid[1]
+                    rendered_dx = second_centroid[0] - first_centroid[0]
+                    rendered_dy = second_centroid[1] - first_centroid[1]
+                    font_scale = max(1.0, (first_cand.font_size + second_cand.font_size) / 2.0)
+                    if source_dy * rendered_dy < 0:
+                        score += 150.0
+                    if source_dx * rendered_dx < 0:
+                        score += 80.0
+                    source_distance = math.hypot(source_dx, source_dy)
+                    rendered_distance = math.hypot(rendered_dx, rendered_dy)
+                    score += abs(rendered_distance - source_distance) / font_scale * 3.0
+                    source_gap = _rect_gap(first_profile.bbox, second_profile.bbox)
+                    rendered_gap = _rect_gap(first_bbox, second_bbox)
+                    score += abs(rendered_gap - source_gap) / font_scale * 3.5
 
-                if first_profile is None or second_profile is None:
-                    continue
+            if best is None or score < best[0]:
+                best = (score, combination)
 
-                source_dx = second_profile.centroid[0] - first_profile.centroid[0]
-                source_dy = second_profile.centroid[1] - first_profile.centroid[1]
-                rendered_dx = second_centroid[0] - first_centroid[0]
-                rendered_dy = second_centroid[1] - first_centroid[1]
-                font_scale = max(1.0, (first_cand.font_size + second_cand.font_size) / 2.0)
-
-                # Strict spatial order preservation (B below A / B right of A)
-                if source_dy * rendered_dy < 0:
-                    score += 150.0
-                if source_dx * rendered_dx < 0:
-                    score += 80.0
-                source_distance = math.hypot(source_dx, source_dy)
-                rendered_distance = math.hypot(rendered_dx, rendered_dy)
-                score += abs(rendered_distance - source_distance) / font_scale * 3.0
-
-                source_gap = _rect_gap(first_profile.bbox, second_profile.bbox)
-                rendered_gap = _rect_gap(first_bbox, second_bbox)
-                score += abs(rendered_gap - source_gap) / font_scale * 3.5
-
-        if best is None or score < best[0]:
-            best = (score, combination)
-
-    return best[1] if best is not None and math.isfinite(best[0]) else None
+        profile.joint_layout_winner_score = best[0] if best is not None else None
+        return best[1] if best is not None and math.isfinite(best[0]) else None
+    finally:
+        profile.joint_layout_ms += (perf_counter() - started) * 1000.0
 
 
 def _compression_severity(font_ratio: float) -> str:
@@ -3334,10 +3737,9 @@ def _long_word_pressure(
     margin: float,
 ) -> Tuple[Dict[str, Any], Optional[int]]:
     widths, _ = _precompute_widths(words, font_size)
-    slots = _build_row_slot_table(
+    max_row_width = _max_usable_row_width(
         geom, font_size, stroke_width, margin, min_width=max(font_size, 8)
     )
-    max_row_width = max((slot.width for row in slots.values() for slot in row), default=0)
     longest_index = max(range(len(words)), key=lambda i: widths[i], default=None)
     longest_width = widths[longest_index] if longest_index is not None else 0
     bottlenecks = [
@@ -3523,28 +3925,37 @@ def _build_region_layout_plan(
                         diagnostics["hyphenation_rescue_attempted"] = True
                         diagnostics["hyphenation_reason"] = "long_word_width_bottleneck"
                         rescue_word = normal_words[bottleneck_index]
-                        rescue_result = solve_layout(
-                            geom=geom,
-                            words=variant,
-                            font_size_max=target,
-                            font_size_min=max(minimum, target - 3),
-                            language=getattr(region, "target_lang", "en_US") or "en_US",
-                            hyphenate=False,
-                            line_spacing=render_cfg.line_spacing or 0.0,
-                            stroke_width=stroke_width,
-                            margin=solver_margin,
-                            y_origin_step=max(2, target // 8),
-                            max_y_origin_trials=solver_max_y_trials,
-                            source_profile=source_profile,
-                            preferred_mask=zone_local,
-                            top_k=1,
-                            is_single_region=(preferred_mask is None or not np.any(preferred_mask)),
-                            lobe_graph=lobe_graph,
-                            forced_break_after=bottleneck_index,
+                        variant_widths, _ = _precompute_widths(variant, target)
+                        original_width = _precompute_widths([rescue_word], target)[0][0]
+                        parts_fit = max(variant_widths[bottleneck_index:bottleneck_index + 2], default=0) <= pressure["max_usable_row_width"]
+                        materially_narrower = max(variant_widths[bottleneck_index:bottleneck_index + 2], default=original_width) < original_width
+                        can_reach_gain = (
+                            target / float(max(1, normal.font_size)) >= 1.08
+                            or normal_ratio < 0.85
                         )
-                        rescue = rescue_result[0] if isinstance(rescue_result, list) and rescue_result else (
-                            rescue_result if isinstance(rescue_result, LayoutCandidate) else None
-                        )
+                        if parts_fit and materially_narrower and can_reach_gain:
+                            rescue_result = solve_layout(
+                                geom=geom,
+                                words=variant,
+                                font_size_max=target,
+                                font_size_min=max(minimum, target - 3),
+                                language=getattr(region, "target_lang", "en_US") or "en_US",
+                                hyphenate=False,
+                                line_spacing=render_cfg.line_spacing or 0.0,
+                                stroke_width=stroke_width,
+                                margin=solver_margin,
+                                y_origin_step=max(2, target // 8),
+                                max_y_origin_trials=solver_max_y_trials,
+                                source_profile=source_profile,
+                                preferred_mask=zone_local,
+                                top_k=1,
+                                is_single_region=(preferred_mask is None or not np.any(preferred_mask)),
+                                lobe_graph=lobe_graph,
+                                forced_break_after=bottleneck_index,
+                            )
+                            rescue = rescue_result[0] if isinstance(rescue_result, list) and rescue_result else (
+                                rescue_result if isinstance(rescue_result, LayoutCandidate) else None
+                            )
                         if rescue is not None:
                             diagnostics["rescue_candidate_font_size"] = rescue.font_size
                             rescue_gain = rescue.font_size / float(max(1, normal.font_size))
@@ -3984,6 +4395,8 @@ def apply_shape_aware_bubble_layout(
                 image_shape=img.shape[:2],
                 solver_margin=solver_margin,
                 solver_max_y_trials=solver_max_y_trials,
+                allow_early_accept=(len(free_regions) == 1),
+                shadow_compare=bool(getattr(ctx, "_layout_shadow_compare", False)),
             )
             if result is None:
                 region._solver_path = "free_text"

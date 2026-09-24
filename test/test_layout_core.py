@@ -187,6 +187,9 @@ def test_bubble_rescue_is_gated_and_splits_only_one_bottleneck(monkeypatch):
     monkeypatch.setattr(layout_solver, "_hyphenation_variant", lambda words, *_: [
         "UNCHARACTER-", "ISTICALLY", *words[1:]
     ])
+    monkeypatch.setattr(layout_solver, "_precompute_widths", lambda words, _size: (
+        [150 if word in {"UNCHARACTER-", "ISTICALLY"} else 300 for word in words], 10
+    ))
 
     def build(text, no_hyphenation=False, font_size=23, placement_mode=PlacementMode.BUBBLE):
         normal_font["value"] = font_size

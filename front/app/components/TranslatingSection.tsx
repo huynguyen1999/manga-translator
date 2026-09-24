@@ -49,7 +49,7 @@ interface TranslatingSectionProps {
 
 const itemStatusLabel: Record<QueuedImage["status"], string> = {
   queued: "Waiting",
-  processing: "Translating",
+  processing: "Processing",
   finished: "Complete",
   error: "Failed",
 };
@@ -589,6 +589,11 @@ export const BatchCard: React.FC<{
           <span className="shrink-0 text-zinc-500 dark:text-zinc-400">
             {completed}/{batch.totalItems} complete
           </span>
+          {batch.currentStage && ["processing", "paused", "stopping"].includes(batch.status) && (
+            <span className="shrink-0 text-zinc-500 dark:text-zinc-400">
+              {formatStage(batch.currentStage)} · {batch.currentStagePassedCount ?? 0}/{batch.totalItems} pages passed
+            </span>
+          )}
         </div>
 
         <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">

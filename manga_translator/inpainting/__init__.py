@@ -12,7 +12,7 @@ from .none import NoneInpainter
 from .original import OriginalInpainter
 from ..config import Inpainter, InpainterConfig
 from ..utils.model_cache import (
-    get_cached_model, model_operation, remove_cached_model,
+    get_cached_model, model_operation, unload_cached_model,
 )
 
 INPAINTERS = {
@@ -81,4 +81,4 @@ async def dispatch_batch(inpainter_key: Inpainter, images: list[np.ndarray], mas
 
 @model_operation
 async def unload(inpainter_key: Inpainter):
-    remove_cached_model('inpainter', inpainter_cache, inpainter_key)
+    await unload_cached_model('inpainter', inpainter_cache, inpainter_key)

@@ -69,10 +69,9 @@ class Model48pxOCR(OfflineOCR):
 
     async def _infer_batch(self, pages: List[Tuple[np.ndarray, List[Quadrilateral], OcrConfig]], verbose: bool = False) -> List[List[TextBlock]]:
         text_height = 48
-        max_chunk_size = max(16, len(pages))
+        max_chunk_size = max(32, len(pages))
         outputs = []
         quadrilaterals = []
-        region_imgs = []
         page_indices = []
         page_region_indices = [[] for _ in pages]
         is_quadrilateral_pages = []
@@ -83,13 +82,16 @@ class Model48pxOCR(OfflineOCR):
             outputs.append([] if is_quadrilaterals else textlines)
             for region, direction in page_quadrilaterals:
                 quadrilaterals.append((region, direction))
-                region_imgs.append(region.get_transformed_region(image, direction, text_height))
                 page_indices.append(page_index)
-                page_region_indices[page_index].append(len(region_imgs) - 1)
+                page_region_indices[page_index].append(len(quadrilaterals) - 1)
 
         for page_index, indices in enumerate(page_region_indices):
             if is_quadrilateral_pages[page_index]:
-                indices.sort(key=lambda index: region_imgs[index].shape[1])
+                indices.sort(key=lambda index: (
+                    quadrilaterals[index][0].aabb.w / max(1, quadrilaterals[index][0].aabb.h)
+                    if quadrilaterals[index][1] == 'h'
+                    else quadrilaterals[index][0].aabb.h / max(1, quadrilaterals[index][0].aabb.w)
+                ))
         perm = [
             indices[rank]
             for rank in range(max(map(len, page_region_indices), default=0))
@@ -100,12 +102,18 @@ class Model48pxOCR(OfflineOCR):
         ix = 0
         for indices in chunks(perm, max_chunk_size):
             N = len(indices)
-            widths = [region_imgs[i].shape[1] for i in indices]
+            crops = [
+                quadrilaterals[i][0].get_transformed_region(
+                    pages[page_indices[i]][0], quadrilaterals[i][1], text_height
+                )
+                for i in indices
+            ]
+            widths = [crop.shape[1] for crop in crops]
             max_width = 4 * (max(widths) + 7) // 4
             region = np.zeros((N, text_height, max_width, 3), dtype = np.uint8)
             for i, idx in enumerate(indices):
-                W = region_imgs[idx].shape[1]
-                tmp = region_imgs[idx]
+                W = crops[i].shape[1]
+                tmp = crops[i]
                 region[i, :, : W, :]=tmp
                 if verbose:
                     # 保存OCR调试图片，使用优化的保存方式
@@ -196,6 +204,8 @@ class Model48pxOCR(OfflineOCR):
 
                 if is_quadrilateral_pages[page_index]:
                     outputs[page_index].append(cur_region)
+
+            del crops, region, image_tensor, ret
 
         return outputs
 

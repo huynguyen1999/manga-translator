@@ -2,6 +2,97 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-24 — Concurrent page deletion deadlocked during order compaction
+
+- Symptom: Deleting pages concurrently could fail with PostgreSQL `DeadlockDetectedError` in `_compact_page_order()`.
+- Root cause: Delete transactions locked page rows before their manga group, while compaction locked the remaining page rows.
+- Fix: Lock affected manga groups in sorted order before locking pages; retry if a page changed groups during lock acquisition.
+- Prevention: Acquire group locks before page locks on every path that compacts page order.
+
+## 2026-09-24 — Bulk page deletion repeated group compaction
+
+- Symptom: Deleting selected pages became slow as the selection grew.
+- Root cause: The client sent one delete request per page, and each request compacted the same manga group again.
+- Fix: Delete selected folders in one request and compact each affected group once.
+- Prevention: Batch destructive page operations that share group-level cleanup.
+
+## 2026-09-24 — DeepL merged grouped regions into one text
+
+- Symptom: Grouped page translation sent newline-joined regions to DeepL, so line wrapping or altered newlines could break region-to-translation mapping.
+- Root cause: The DeepL adapter collapsed the query list into one string and split the translated string on newlines.
+- Fix: Send the query list through the SDK multi-text API and return each ordered result separately.
+- Prevention: Keep provider batch inputs and outputs as lists when the API supports per-text results.
+
+## 2026-09-24 — Server shutdown reported a leaked semaphore
+
+- Symptom: The server printed a `resource_tracker` warning about one leaked semaphore at shutdown.
+- Root cause: The first `tqdm` progress bar created a multiprocessing `RLock`, although pipeline work uses threads.
+- Fix: Configure `tqdm` with a standard thread `RLock` when the package loads.
+- Prevention: Keep progress-bar synchronization aligned with the app's thread-based execution model.
+
+## 2026-09-24 — Final translation group stayed pending
+
+- Symptom: A 61-page batch reached 60/61 translated, then left the last page awaiting translation while both workers were free.
+- Root cause: The partial-group gate compared ready translation pages with all unfinished pages, including pages already at later stages.
+- Fix: Dispatch a partial group once every page still at translation stage is ready.
+- Prevention: Treat the configured batch size as a maximum; later stages must not block a final partial translation group.
+
+## 2026-09-24 — Layout stage timing summary stayed at zero
+
+- Symptom: The layout benchmark showed nonzero page time but zero bubble and free-text stage durations.
+- Root cause: The render runner populated its summary from a separate timing dictionary instead of `PageLayoutResult.timings`.
+- Fix: Copy the measured stage durations from the layout result into the page timing breakdown.
+- Prevention: Verify timing reports against the instrumented stage result, not an unconnected accumulator.
+
+## 2026-09-24 — Concurrent free-text raster cache reused another font
+
+- Symptom: Identical text, width, and size could return glyph pixels rendered with a different page's font.
+- Root cause: The shared line-alpha cache key omitted the thread-local font selection.
+- Fix: Include `FONT_SELECTION_KEY` in the cache key and verify two-font concurrent lookups.
+- Prevention: Include all thread-local render state in shared raster-cache keys.
+
+## 2026-09-24 — Concurrent layout reports mixed page counters
+
+- Symptom: Solver workload totals could include work from another page layout running at the same time.
+- Root cause: Layout workers incremented one process-global profile object.
+- Fix: Scope the solver profile to the current layout context and reset it at `layout_page()` entry.
+- Prevention: Keep per-page diagnostics in the same execution context as the page work they measure.
+
+## 2026-09-24 — Candidate raster extraction missed stroke radius
+
+- Symptom: The first candidate-raster parity check failed when constructing the stroke dilation kernel.
+- Root cause: The extracted raster helper no longer initialized the local dilation radius.
+- Fix: Restore the radius calculation and cover page-clipped masks at 100 placement offsets.
+- Prevention: Run exact mask-parity checks whenever shared raster logic is extracted.
+
+## 2026-09-24 — Unpadded image names shifted page labels
+
+- Symptom: `1.jpg`, `2.jpg`, and `10.jpg` could receive page numbers in the wrong order, breaking relevant-page labels.
+- Root cause: Page numbers were assigned after lexicographic path sorting.
+- Fix: Sort numeric filename segments naturally before assigning page sequence numbers.
+- Prevention: Use numeric-aware ordering whenever filenames represent ordered pages.
+
+## 2026-09-24 — Initialization I/O was capped below configured workers
+
+- Symptom: Page initialization could not use more than four workers.
+- Root cause: The shared I/O-stage semaphore used a fixed limit of four.
+- Fix: Derive the I/O-stage limit from the configured pipeline worker count.
+- Prevention: Keep stage capacities aligned with the worker budget when a stage should scale with workers.
+
+## 2026-09-24 — Active pipeline pages were mislabeled as translating
+
+- Symptom: Pages showed “Translating” during initialization and other non-translation stages.
+- Root cause: The page row mapped every `processing` status to “Translating”, ignoring its separate current-stage label.
+- Fix: Label the broad active status “Processing” and keep the actual stage beside it.
+- Prevention: Keep umbrella lifecycle labels distinct from specific pipeline-stage labels.
+
+## 2026-09-24 — Shared model cache retained idle weights and duplicate bubble wrappers
+
+- Symptom: Server memory stayed elevated after batches and could grow when bubble inference settings changed.
+- Root cause: Each translator tracked model use independently despite sharing one executor cache; unload functions usually popped entries without calling backend unload hooks; the default detector kept strong global references; bubble cache identity included inference-only settings.
+- Fix: Track active users and last use in the shared executor, unload idle LRU entries on TTL or RAM pressure, run backend unload hooks, weaken detector fallbacks, and key bubble models only by checkpoint/device. Stream OCR crop microbatches and reduce page group size as RSS rises.
+- Prevention: Put lifetime metadata beside the shared cache and keep inference arguments out of model identity; ensure unload checks exercise the actual model object and its external references.
+
 ## 2026-09-24 — Layout pages were serialized by the render lock
 
 - Symptom: Batch pages reached the layout stage but only one page used CPU at a time.
@@ -159,12 +250,12 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 - Fix: Run bubble inference from the image alone, then apply saved detections when text grouping runs; reload those detections for mask generation.
 - Prevention: Keep bubble inference image-scoped and apply region association only after grouped text regions exist.
 
-## 2026-09-23 — Checkpointed textless pages failed while saving final metadata
+## 2026-09-24 — Checkpointed batch finalization lost metadata or failed on textless pages
 
-- Symptom: A batch page with no detected text failed after detection with `TypeError: 'NoneType' object is not a mapping`.
-- Root cause: Reconstructed `PipelineRun` contexts do not initialize `result_documents`, but `_revert_upscale()` expanded that optional field as a mapping while finalizing textless pages.
-- Fix: Treat missing result documents as an empty mapping when assembling the final documents.
-- Prevention: Cover `_revert_upscale()` with a checkpoint context that has no `result_documents`.
+- Symptom: Completed checkpointed pages could be indexed under `Ungrouped`; textless pages also failed after detection when `result_documents` was missing.
+- Root cause: Normal checkpointed rendering and textless completion bypassed the direct translation path that writes `meta.json`; separately, reconstructed `PipelineRun` contexts did not initialize `result_documents` before `_revert_upscale()` expanded it.
+- Fix: Share the result-metadata builder across direct and checkpointed finalization, persist `meta.json` for rendered and textless pages, and treat missing result documents as empty when assembling documents.
+- Prevention: Cover checkpointed render metadata with a manga group ID and textless finalization with a context that has no `result_documents`.
 
 ## 2026-09-23 — Checkpointed image stages were skipped and requeued forever
 

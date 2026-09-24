@@ -200,12 +200,7 @@ class ModelMangaOCR(OfflineOCR):
             merged_idx = [[i] for i in range(len(quadrilaterals))]
             merged_quadrilaterals = quadrilaterals
 
-        crops = []
-        for region, direction in merged_quadrilaterals:
-            crop_height = region.aabb.w if direction == 'h' else region.aabb.h
-            crop = region.get_transformed_region(image, 'h', crop_height)
-            crops.append(Image.fromarray(crop))
-        return merged_idx, merged_quadrilaterals, crops
+        return merged_idx, merged_quadrilaterals
 
     async def _infer_batch(
         self,
@@ -217,14 +212,17 @@ class ModelMangaOCR(OfflineOCR):
 
         text_height = 48
         prepared = []
-        for page_index, (image, textlines, config) in enumerate(pages):
+        for image, textlines, config in pages:
             quadrilaterals = list(self._generate_text_direction(textlines))
-            region_imgs = [q.get_transformed_region(image, direction, text_height) for q, direction in quadrilaterals]
-            perm = list(range(len(region_imgs)))
+            perm = list(range(len(quadrilaterals)))
             is_quadrilaterals = bool(quadrilaterals) and isinstance(quadrilaterals[0][0], Quadrilateral)
             if is_quadrilaterals:
-                perm.sort(key=lambda index: region_imgs[index].shape[1])
-            merged_idx, merged_quadrilaterals, crops = await self._prepare_mocr_regions(
+                perm.sort(key=lambda index: (
+                    quadrilaterals[index][0].aabb.w / max(1, quadrilaterals[index][0].aabb.h)
+                    if quadrilaterals[index][1] == 'h'
+                    else quadrilaterals[index][0].aabb.h / max(1, quadrilaterals[index][0].aabb.w)
+                ))
+            merged_idx, merged_quadrilaterals = await self._prepare_mocr_regions(
                 image, textlines, config, quadrilaterals
             )
             prepared.append({
@@ -232,31 +230,37 @@ class ModelMangaOCR(OfflineOCR):
                 'textlines': textlines,
                 'config': config,
                 'quadrilaterals': quadrilaterals,
-                'region_imgs': region_imgs,
                 'perm': perm,
                 'is_quadrilaterals': is_quadrilaterals,
                 'merged_idx': merged_idx,
                 'merged_quadrilaterals': merged_quadrilaterals,
-                'mocr_crops': crops,
                 'texts': {},
                 'out_regions': {},
             })
 
         mocr_image_refs = [
             (page_index, rank)
-            for rank in range(max((len(page['mocr_crops']) for page in prepared), default=0))
+            for rank in range(max((len(page['merged_quadrilaterals']) for page in prepared), default=0))
             for page_index, page in enumerate(prepared)
-            if rank < len(page['mocr_crops'])
+            if rank < len(page['merged_quadrilaterals'])
         ]
-        mocr_images = [prepared[page_index]['mocr_crops'][rank] for page_index, rank in mocr_image_refs]
-
-        if mocr_images:
+        if mocr_image_refs:
             self.logger.info(
-                f'MangaOCR batch: pages={len(pages)} crops={len(mocr_images)} device={self.device}'
+                f'MangaOCR batch: pages={len(pages)} crops={len(mocr_image_refs)} device={self.device}'
             )
-            mocr_texts = infer_mocr_batch(self.mocr, mocr_images, batch_size=max(8, len(pages)))
-            for (page_index, crop_index), text in zip(mocr_image_refs, mocr_texts):
-                prepared[page_index]['texts'][crop_index] = text
+            for crop_refs in chunks(mocr_image_refs, max(32, len(pages))):
+                mocr_images = []
+                for page_index, crop_index in crop_refs:
+                    page = prepared[page_index]
+                    region, direction = page['merged_quadrilaterals'][crop_index]
+                    crop_height = region.aabb.w if direction == 'h' else region.aabb.h
+                    mocr_images.append(Image.fromarray(
+                        region.get_transformed_region(page['image'], 'h', crop_height)
+                    ))
+                mocr_texts = infer_mocr_batch(self.mocr, mocr_images, batch_size=max(8, len(pages)))
+                for (page_index, crop_index), text in zip(crop_refs, mocr_texts):
+                    prepared[page_index]['texts'][crop_index] = text
+                del mocr_images, mocr_texts
 
         region_order = [
             (page_index, page['perm'][rank])
@@ -265,14 +269,21 @@ class ModelMangaOCR(OfflineOCR):
             if rank < len(page['perm'])
         ]
         debug_index = 0
-        for crop_refs in chunks(region_order, max(16, len(pages))):
-            widths = [prepared[page_index]['region_imgs'][region_index].shape[1]
-                      for page_index, region_index in crop_refs]
+        for crop_refs in chunks(region_order, max(32, len(pages))):
+            crops = [
+                prepared[page_index]['quadrilaterals'][region_index][0].get_transformed_region(
+                    prepared[page_index]['image'],
+                    prepared[page_index]['quadrilaterals'][region_index][1],
+                    text_height,
+                )
+                for page_index, region_index in crop_refs
+            ]
+            widths = [crop.shape[1] for crop in crops]
             max_width = 4 * (max(widths) + 7) // 4
             region = np.zeros((len(crop_refs), text_height, max_width, 3), dtype=np.uint8)
             for row, (page_index, region_index) in enumerate(crop_refs):
                 page = prepared[page_index]
-                crop = page['region_imgs'][region_index]
+                crop = crops[row]
                 region[row, :, :crop.shape[1], :] = crop
                 if verbose:
                     os.makedirs('result/ocrs/', exist_ok=True)
@@ -334,6 +345,8 @@ class ModelMangaOCR(OfflineOCR):
                     cur_region.update_font_colors(np.array([fr, fg, fb]), np.array([br, bg, bb]))
 
                 prepared[page_index]['out_regions'][region_index] = cur_region
+
+            del crops, region, image_tensor, results
 
         return [self._finish_page(page) for page in prepared]
 

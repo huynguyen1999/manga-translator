@@ -55,6 +55,8 @@ export interface ServerBatchSummary {
   processingCount: number;
   failedCount: number;
   needsReviewCount: number;
+  currentStage?: string;
+  currentStagePassedCount?: number;
 }
 
 export interface ServerBatch extends ServerBatchSummary {
@@ -82,21 +84,29 @@ export const formatStage = (step?: string): string => {
     case "awaiting_translation":
       return "Awaiting translation";
     case "colorizing":
+    case "colorization":
       return "Colorizing";
     case "upscaling":
+    case "upscale":
       return "Upscaling";
     case "detection":
       return "Detecting text";
+    case "bubble_detection":
+      return "Detecting speech bubbles";
     case "ocr":
       return "Recognizing text";
     case "textline_merge":
+    case "text_grouping":
       return "Merging text lines";
     case "mask-generation":
     case "mask_generation":
       return "Generating mask";
+    case "layout":
+      return "Laying out text";
     case "inpainting":
       return "Inpainting";
     case "translating":
+    case "translation":
       return "Translating with AI";
     case "translation_remap":
       return "Remapping translations";
@@ -114,6 +124,10 @@ export const formatStage = (step?: string): string => {
       return "Queued in batch";
     case "finished":
       return "Finished";
+    case "input":
+      return "Starting";
+    case "finalize":
+      return "Finalizing";
     default:
       return step.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   }
@@ -142,6 +156,8 @@ export const toTranslationBatch = (batch: ServerBatch | ServerBatchSummary): Tra
   processingCount: batch.processingCount,
   failedCount: batch.failedCount,
   needsReviewCount: batch.needsReviewCount,
+  currentStage: batch.currentStage,
+  currentStagePassedCount: batch.currentStagePassedCount,
   status: batch.status,
   priority: batch.priority,
   dismissed: batch.dismissed,

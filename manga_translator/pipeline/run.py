@@ -70,7 +70,7 @@ STAGE_ARTIFACTS = {
         "inpaint_mask.png", "profiling.json",
     ),
     "inpainting": ("inpainted.jpg", "inpainted.png"),
-    "rendering": ("final.jpg", "final.png", "text_regions.json"),
+    "rendering": ("final.jpg", "final.png", "text_regions.json", "meta.json"),
 }
 
 logger = get_logger("pipeline")
@@ -1018,6 +1018,7 @@ class PipelineRun:
                 self.write_json("text_regions.json", serialize_editor_regions(ctx.text_regions))
                 final_img = np.array(ctx.result)
                 save_jpeg(final_img, self.path / "final.jpg")
+                self.write_json("meta.json", translator._build_result_metadata(config, ctx))
 
             self._finish(stage_id, "completed")
             await self.checkpoint()

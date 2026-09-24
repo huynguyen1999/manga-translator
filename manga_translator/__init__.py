@@ -1,8 +1,13 @@
 import colorama
+import threading
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 colorama.init(autoreset=True)
 load_dotenv()
+
+# Pipeline progress bars share threads, not processes; avoid tqdm's semaphore-backed default lock.
+tqdm.set_lock(threading.RLock())
 
 from .config import Config
 from .utils import Context, get_logger

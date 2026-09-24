@@ -119,7 +119,7 @@ class SearchService:
             pass
         return {
             "available": error is None, "error": error,
-            "device": self.encoders.device or "Not loaded (MPS preferred, CPU fallback)",
+            "device": self.encoders.device or "Not loaded (CUDA preferred, then MPS, CPU fallback)",
             "profile": PROFILE, "models": {"summary": TEXT_MODEL, "image": IMAGE_MODEL},
             "revisions": {"summary": TEXT_REVISION, "image": IMAGE_REVISION},
             "queryLimits": {"summary": 512, "image": 64, "combined": 64},

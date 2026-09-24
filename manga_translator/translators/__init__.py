@@ -26,7 +26,10 @@ from .openrouter import OpenRouterTranslator
 from .structured import translate_structured
 from ..config import Translator, TranslatorConfig, TranslatorChain
 from ..utils import Context
-from ..utils.model_cache import get_model_cache, model_operation
+from ..utils.model_cache import (
+    get_cached_model, get_model_cache, model_operation, remove_cached_model,
+    unload_cached_model,
+)
 
 OFFLINE_TRANSLATORS = {
     Translator.sugoi: SugoiTranslator,
@@ -59,11 +62,7 @@ _OFFLINE_TRANSLATOR_LOCK = threading.Lock()
 def get_translator(key: Translator, *args, **kwargs) -> CommonTranslator:
     if key not in TRANSLATORS:
         raise ValueError(f'Could not find translator for: "{key}". Choose from the following: %s' % ','.join(TRANSLATORS))
-    cache = get_model_cache('translator', translator_cache)
-    if not cache.get(key):
-        translator = TRANSLATORS[key]
-        cache[key] = translator(*args, **kwargs)
-    return cache[key]
+    return get_cached_model('translator', translator_cache, key, lambda: TRANSLATORS[key](*args, **kwargs))
 
 
 async def _translate_with_context(
@@ -256,9 +255,12 @@ LANGDETECT_MAP = {
 }
 
 async def unload(key: Translator):
-    async def unload_one():
-        get_model_cache('translator', translator_cache).pop(key, None)
     if key in OFFLINE_TRANSLATORS:
+        async def unload_one():
+            translator = get_model_cache('translator', translator_cache).get(key)
+            if translator is not None and translator.is_loaded():
+                await translator.unload(getattr(translator, '_requested_device', None))
+            remove_cached_model('translator', translator_cache, key)
         await _offline_operation(unload_one)
-    else:
-        await unload_one()
+        return
+    await unload_cached_model('translator', translator_cache, key)

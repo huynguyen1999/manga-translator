@@ -2,6 +2,7 @@ from contextlib import nullcontext
 import os
 import shutil
 import threading
+import weakref
 import numpy as np
 import torch
 import cv2
@@ -36,7 +37,10 @@ def det_batch_forward_default(batch: np.ndarray, device: str, model=None):
         if callable(MODEL):
             target_model = MODEL
         else:
-            target_model = getattr(MODEL, 'value', None) or _GLOBAL_MODEL
+            model_ref = getattr(MODEL, 'value', None)
+            target_model = model_ref() if model_ref is not None else None
+            if target_model is None and _GLOBAL_MODEL is not None:
+                target_model = _GLOBAL_MODEL()
 
     if target_model is None:
         raise RuntimeError("Text detection model is not loaded.")
@@ -72,11 +76,16 @@ class DefaultDetector(OfflineDetector):
         if device.startswith('cuda') or device == 'mps' or device == 'xpu':
             self.model = self.model.to(self.device)
         global _GLOBAL_MODEL
-        _GLOBAL_MODEL = self.model
-        MODEL.value = self.model
+        _GLOBAL_MODEL = weakref.ref(self.model)
+        MODEL.value = weakref.ref(self.model)
 
     async def _unload(self):
-        del self.model
+        global _GLOBAL_MODEL
+        if _GLOBAL_MODEL is not None and _GLOBAL_MODEL() is self.model:
+            _GLOBAL_MODEL = None
+        if getattr(MODEL, 'value', None) is not None and MODEL.value() is self.model:
+            MODEL.value = None
+        self.model = None
 
     async def _detect_batch(self, images, detect_size, text_threshold, box_threshold, unclip_ratio, verbose=False):
         output = [None] * len(images)

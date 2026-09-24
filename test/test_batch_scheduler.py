@@ -448,6 +448,21 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([item["id"] for item in ready], ["p1", "p2"])
 
+    def test_translation_tail_group_ignores_pages_already_past_translation(self):
+        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
+        items = [
+            {"id": f"p{i}", "status": "queued", "stage": "queued", "pipelineStage": "mask_generation"}
+            for i in range(60)
+        ]
+        items.append({"id": "p60", "status": "processing", "stage": "awaiting_translation"})
+
+        ready = scheduler._find_ready_translation_group("batch", items, 12, {})
+
+        self.assertEqual([item["id"] for item in ready], ["p60"])
+
+        items.append({"id": "p61", "status": "queued", "stage": "queued", "pipelineStage": "translation"})
+        self.assertIsNone(scheduler._find_ready_translation_group("batch", items, 12, {}))
+
     def test_prepare_stops_after_text_grouping_and_bubble_detection(self):
         scheduler = BatchScheduler(None, None, tempfile.gettempdir())
         completed = {

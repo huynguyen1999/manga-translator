@@ -87,19 +87,24 @@ def prepare_image(path: Path):
 
 
 class SearchEncoders:
-    """Used only on the existing shared model executor's thread."""
+    """Production calls run on the shared model executor; local tools use it directly."""
 
-    def __init__(self):
+    def __init__(self, device=None):
         self.models = {}
         self.processors = {}
-        self.device = None
+        self.device = device
 
     def _load(self, modality):
         import torch
         from transformers import AutoModel, AutoProcessor, AutoTokenizer
 
         if self.device is None:
-            self.device = "mps" if torch.backends.mps.is_available() else "cpu"
+            if torch.cuda.is_available():
+                self.device = "cuda"
+            elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+                self.device = "mps"
+            else:
+                self.device = "cpu"
         if modality not in self.models:
             name, revision = (TEXT_MODEL, TEXT_REVISION) if modality == "summary" else (IMAGE_MODEL, IMAGE_REVISION)
             loader = AutoTokenizer if modality == "summary" else AutoProcessor

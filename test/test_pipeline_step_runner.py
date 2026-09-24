@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -98,6 +99,17 @@ class PipelineStepRunnerTests(unittest.TestCase):
 
         candidate_data.assert_not_called()
         product.assert_not_called()
+
+    def test_layout_benchmark_and_shadow_flags_parse(self):
+        benchmark = build_parser().parse_args([
+            "layout-benchmark", "--dataset", "devscripts/data", "--repeat", "2",
+            "--layout-shadow-compare",
+        ])
+        self.assertEqual(benchmark.repeat, 2)
+        self.assertTrue(benchmark.layout_shadow_compare)
+
+        render = build_parser().parse_args(["render", "--input", "sample", "--layout-shadow-compare"])
+        self.assertTrue(render.layout_shadow_compare)
 
     def test_glyph_cache_is_keyed_by_font_selection(self):
         text_render.get_char_glyph.cache_clear()
@@ -1161,6 +1173,35 @@ class PipelineStepRunnerTests(unittest.TestCase):
         self.assertGreaterEqual(qa["core_damage_coverage"], 0.15)
         self.assertLessEqual(qa["center_error_px"], 2.0)
         self.assertLessEqual(free_region.font_size, round(14 * 1.15))
+
+    def test_shadow_compare_returns_the_exhaustive_layout(self):
+        def run(shadow):
+            ctx = Context()
+            shape = (160, 180)
+            ctx.img_rgb = np.full((*shape, 3), 255, dtype=np.uint8)
+            ctx.img_inpainted = ctx.img_rgb.copy()
+            ctx.text_mask = np.zeros(shape, dtype=np.uint8)
+            cv2.rectangle(ctx.text_mask, (38, 35), (72, 105), 255, -1)
+            region = TextBlock(
+                lines=np.array([[[40, 40], [70, 40], [70, 100], [40, 100]]], dtype=np.int32),
+                texts=["原文"], translation="A SHORT TEST", target_lang="ENG", font_size=14,
+            )
+            ctx.text_regions = [region]
+            ctx._layout_shadow_compare = shadow
+            config = Config()
+            config.render.font_size = 14
+            config.render.font_size_minimum = 8
+            apply_shape_aware_bubble_layout(ctx, config, solver_max_y_trials=8)
+            return (
+                region.font_size,
+                tuple((line["text"], line["x"], line["y"]) for line in region.layout_segments[0]["lines"]),
+                region._solver_qa,
+            )
+
+        with patch.dict(os.environ, {"LAYOUT_FAST_FREE_TEXT": "0", "LAYOUT_LAZY_CANDIDATES": "0"}):
+            exhaustive = run(False)
+            shadow = run(True)
+        self.assertEqual(shadow, exhaustive)
 
     def test_free_text_hard_safety_prevents_bubble_intrusion(self):
         ctx = Context()

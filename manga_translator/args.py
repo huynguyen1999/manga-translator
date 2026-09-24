@@ -35,6 +35,12 @@ def file_path(string):
         raise argparse.ArgumentTypeError(f'No such file: "{string}"')
     return s
 
+def nonnegative_int(string):
+    value = int(string)
+    if value < 0:
+        raise argparse.ArgumentTypeError('value must be zero or greater')
+    return value
+
 def dir_path(string):
     if not string:
         return ''
@@ -171,7 +177,7 @@ parser_ws.add_argument('--host', default='127.0.0.1', type=str, help='Host for W
 parser_ws.add_argument('--port', default=5003, type=int, help='Port for WebSocket service')
 parser_ws.add_argument('--nonce', default=os.getenv('MT_WEB_NONCE') or None, type=str, help='Nonce for securing internal WebSocket communication')
 parser_ws.add_argument('--ws-url', default='ws://localhost:5000', type=str, help='Server URL for WebSocket mode')
-parser_ws.add_argument('--models-ttl', default='0', type=int, help='How long to keep models in memory in seconds after last use (0 means forever)')
+parser_ws.add_argument('--models-ttl', default=120, type=nonnegative_int, help='How long to keep idle models in memory in seconds (0 means forever)')
 
 # API mode
 parser_api = subparsers.add_parser('shared', help='Run in API mode')
@@ -179,6 +185,6 @@ parser_api.add_argument('--host', default='127.0.0.1', type=str, help='Host for 
 parser_api.add_argument('--port', default=5003, type=int, help='Port for API service')
 parser_api.add_argument('--nonce', default=os.getenv('MT_WEB_NONCE') or None, type=str, help='Nonce for securing internal API server communication, set to "None" to disable')
 parser_api.add_argument("--report", default=None,type=str, help='reports to server to register instance')
-parser_api.add_argument('--models-ttl', default='0', type=int, help='models TTL in memory in seconds')
+parser_api.add_argument('--models-ttl', default=120, type=nonnegative_int, help='How long to keep idle models in memory in seconds (0 means forever)')
 
 subparsers.add_parser('config-help', help='Print help information for config file')

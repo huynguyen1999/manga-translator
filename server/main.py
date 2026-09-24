@@ -497,6 +497,10 @@ class UpdateMetaRequest(BaseModel):
         return v
 
 
+class DeletePagesRequest(BaseModel):
+    folders: List[str] = Field(..., min_length=1, max_length=MAX_BATCH_ITEMS)
+
+
 class ReorderPagesRequest(BaseModel):
     pageIds: List[str]
 
@@ -504,6 +508,7 @@ class ExportCbzRequest(BaseModel):
     groupId: Optional[str] = None
     mangaTitle: Optional[str] = Field("manga", max_length=MAX_MANGA_TITLE_LENGTH)
     folders: Optional[List[str]] = None
+    original: bool = False
 
     @field_validator("mangaTitle", mode="before")
     @classmethod
@@ -1938,8 +1943,7 @@ def start_translator_client_proc(host: str, port: int, nonce: str, params: Names
         cmds.append('--ignore-errors')
     if params.verbose:
         cmds.append('--verbose')
-    if params.models_ttl:
-        cmds.append('--models-ttl=%s' % params.models_ttl)
+    cmds.append('--models-ttl=%s' % getattr(params, 'models_ttl', 120))
     if getattr(params, 'pre_dict', None):
         cmds.extend(['--pre-dict', params.pre_dict])
     if getattr(params, 'post_dict', None):
@@ -2233,6 +2237,28 @@ def _compact_file_backed_group(
         metadata["pageOrder"] = index
         _write_file_backed_meta(page["path"], metadata)
     return pages
+
+
+def _delete_file_backed_results(result_dir: Path, folders: list[str]) -> list[str]:
+    result_root = result_dir.resolve()
+    paths = [(folder, (result_root / folder).resolve()) for folder in folders]
+    if any(path.parent != result_root for _, path in paths):
+        raise ValueError("Invalid result folder")
+
+    deleted: list[str] = []
+    titles: set[str] = set()
+    for folder, folder_path in paths:
+        if not folder_path.is_dir() or final_file(folder_path) is None:
+            continue
+        metadata = _get_cached_meta(folder_path)
+        title = (metadata.get("mangaTitle") or "Ungrouped").strip() or "Ungrouped"
+        shutil.rmtree(folder_path)
+        _invalidate_meta_cache(folder)
+        deleted.append(folder)
+        titles.add(title)
+    for title in titles:
+        _compact_file_backed_group(result_root, title)
+    return deleted
 
 
 def _update_file_backed_meta(
@@ -4638,7 +4664,7 @@ def _build_cbz_archive(tmp_path: str, pages: list, safe_title: str):
             arcname = f"{idx+1:03d}_{clean_base}{ext}"
             zf.write(file_path, arcname=arcname)
 
-async def create_cbz_stream(pages: list, manga_title: str):
+async def create_cbz_stream(pages: list, manga_title: str, original: bool = False):
     """Generates a zip archive (CBZ) containing pages sorted naturally with ComicInfo.xml using FileResponse"""
     pages.sort(
         key=lambda p: (
@@ -4667,7 +4693,7 @@ async def create_cbz_stream(pages: list, manga_title: str):
     safe_filename = re.sub(r'[^a-zA-Z0-9_\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af\.\-]', '_', safe_title)
     if not safe_filename:
         safe_filename = "manga"
-    cbz_filename = f"{safe_filename}.cbz"
+    cbz_filename = f"{safe_filename}{'_original' if original else ''}.cbz"
 
     def cleanup(path: str):
         try:
@@ -4689,17 +4715,17 @@ async def create_cbz_stream(pages: list, manga_title: str):
 @app.post("/results/export/cbz", tags=["api"])
 @app.post("/api/results/export/cbz", tags=["api"])
 async def export_cbz_post(data: ExportCbzRequest):
-    """Export translated manga pages as a .cbz comic archive (POST)"""
+    """Export a manga group as a translated or original .cbz comic archive."""
     store = _postgres()
     if store is not None:
         group_value = (data.groupId or data.mangaTitle or "").strip()
         if data.groupId and data.mangaTitle and await store.resolve_group_id(group_value) is None:
             group_value = data.mangaTitle.strip()
         manga_title = await store.resolve_group_title(group_value) or group_value or "Manga"
-        pages = await store.export_pages(group_value, data.folders)
+        pages = await store.export_pages(group_value, data.folders, original=data.original)
         if not pages:
             raise HTTPException(404, detail="No manga pages found to export")
-        return await create_cbz_stream(pages, manga_title)
+        return await create_cbz_stream(pages, manga_title, original=data.original)
 
     result_dir = RESULT_ROOT
     if not result_dir.exists():
@@ -4732,7 +4758,7 @@ async def export_cbz_post(data: ExportCbzRequest):
                 if not orig_name or orig_name == "Unknown":
                     orig_name = f"{folder_name}.png"
                 page_path = final_file(item_path)
-                if _source_type(meta) == "original":
+                if data.original or _source_type(meta) == "original":
                     page_path = _input_file(item_path) or page_path
                 pages.append({
                     "originalName": orig_name,
@@ -4743,7 +4769,7 @@ async def export_cbz_post(data: ExportCbzRequest):
     if not pages:
         raise HTTPException(404, detail="No manga pages found to export")
 
-    return await create_cbz_stream(pages, manga_title)
+    return await create_cbz_stream(pages, manga_title, original=data.original)
 
 @app.get("/results/export/cbz", tags=["api"])
 @app.get("/api/results/export/cbz", tags=["api"])
@@ -4751,12 +4777,13 @@ async def export_cbz_get(
     manga: Optional[str] = Query(None, max_length=MAX_MANGA_TITLE_LENGTH),
     groupId: Optional[str] = None,
     folders: Optional[str] = None,
+    original: bool = False,
 ):
-    """Export translated manga pages as a .cbz comic archive (GET)"""
+    """Export a manga group as a translated or original .cbz comic archive."""
     folder_list = [f.strip() for f in folders.split(",") if f.strip()] if isinstance(folders, str) and folders.strip() else None
     manga_title = manga if isinstance(manga, str) and manga.strip() else "Manga"
     return await export_cbz_post(
-        ExportCbzRequest(groupId=groupId, mangaTitle=manga_title, folders=folder_list)
+        ExportCbzRequest(groupId=groupId, mangaTitle=manga_title, folders=folder_list, original=original)
     )
 
 @app.delete("/results/clear", tags=["api"])
@@ -4887,6 +4914,32 @@ async def delete_result(folder_name: str):
         return {"message": f"Deleted result directory: {folder_name}"}
     except Exception as e:
         raise HTTPException(500, detail=f"Error deleting result: {str(e)}")
+
+
+@app.post("/api/results/batch-delete", tags=["api"])
+async def delete_results(data: DeletePagesRequest):
+    folders = list(dict.fromkeys(data.folders))
+    if any(not folder or Path(folder).name != folder or "\\" in folder for folder in folders):
+        raise HTTPException(400, detail="Invalid result folder")
+
+    store = _postgres()
+    try:
+        if store is not None:
+            deleted = await store.delete_results(folders)
+            await asyncio.to_thread(_remove_result_directories, RESULT_ROOT, deleted)
+        else:
+            deleted = await asyncio.to_thread(_delete_file_backed_results, RESULT_ROOT, folders)
+    except ValueError as error:
+        raise HTTPException(400, detail=str(error)) from error
+
+    for folder in deleted:
+        _invalidate_meta_cache(folder)
+    return {"deleted": len(deleted), "folders": deleted}
+
+
+def _remove_result_directories(result_root: Path, folders: list[str]) -> None:
+    for folder in folders:
+        shutil.rmtree(result_root / folder, ignore_errors=True)
 
 # Keep API routes above the static mount so POST /result/.../save_edits is reachable.
 if RESULT_ROOT.exists():

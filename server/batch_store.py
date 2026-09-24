@@ -13,6 +13,7 @@ from pathlib import Path
 from server.image_variants import final_file
 from manga_translator.utils.image_storage import find_asset
 from manga_translator.config import MAX_MANGA_TITLE_LENGTH
+from manga_translator.pipeline.stages import PipelineStage, STAGE_ORDER, stage_from_progress
 from typing import Any, Callable
 
 
@@ -67,6 +68,48 @@ def _group_keys(item: dict[str, Any]) -> tuple[str, ...]:
     if item.get("mangaTitle"):
         keys.append(f"title:{item['mangaTitle']}")
     return tuple(keys or ("title:Ungrouped",))
+
+
+_BATCH_STAGE_ALIASES = {
+    "initialize": PipelineStage.INPUT,
+    "starting": PipelineStage.INPUT,
+    "queued": PipelineStage.INPUT,
+    "reserved": PipelineStage.TRANSLATION,
+    "awaiting_translation": PipelineStage.TRANSLATION,
+}
+
+
+def _batch_progress(items: list[dict[str, Any]]) -> dict[str, Any]:
+    def stage_for(item: dict[str, Any]) -> PipelineStage:
+        value = str(
+            item.get("retryFromStage")
+            or item.get("pipelineStage")
+            or item.get("stage")
+            or "initialize"
+        )
+        stage = stage_from_progress(value) or _BATCH_STAGE_ALIASES.get(value)
+        if stage is not None:
+            return stage
+        try:
+            return PipelineStage(value)
+        except ValueError:
+            return PipelineStage.INPUT
+
+    unfinished = [item for item in items if item.get("status") not in {"completed", "error"}]
+    if not unfinished:
+        return {}
+
+    current_stage = min(
+        (stage_for(item) for item in unfinished), key=STAGE_ORDER.index
+    )
+    current_index = STAGE_ORDER.index(current_stage)
+    return {
+        "currentStage": current_stage.value,
+        "currentStagePassedCount": sum(
+            item.get("status") == "completed" or STAGE_ORDER.index(stage_for(item)) > current_index
+            for item in items
+        ),
+    }
 
 
 class BatchStore:
@@ -417,6 +460,7 @@ class BatchStore:
             "processingCount": sum(item.get("status") == "processing" and item.get("stage") not in {"awaiting_translation", "reserved"} for item in items),
             "failedCount": sum(item.get("status") == "error" for item in items),
             "needsReviewCount": sum(bool(item.get("needsReview")) for item in items),
+            **_batch_progress(manifest.get("items", [])),
             "items": items,
         }
 
@@ -445,6 +489,7 @@ class BatchStore:
             "processingCount": sum(item.get("status") == "processing" and item.get("stage") not in {"awaiting_translation", "reserved"} for item in items),
             "failedCount": sum(item.get("status") == "error" for item in items),
             "needsReviewCount": sum(bool(item.get("needsReview")) for item in items),
+            **_batch_progress(items),
         }
 
     def _input_path(self, batch_id: str, item: dict[str, Any]) -> Path:

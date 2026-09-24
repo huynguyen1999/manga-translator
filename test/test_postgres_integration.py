@@ -11,6 +11,44 @@ from server.postgres_store import PostgresBatchStore, PostgresStore
 
 
 class PostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_page_deletes_in_one_group_do_not_deadlock(self):
+        database_url = os.getenv("TEST_DATABASE_URL")
+        if not database_url:
+            self.skipTest("Set TEST_DATABASE_URL to run PostgreSQL integration tests")
+        with tempfile.TemporaryDirectory() as root:
+            result_root = Path(root) / "results"
+            result_root.mkdir()
+            store = PostgresStore(database_url, result_root)
+            await store.start(check_schema=False)
+            folders = []
+            try:
+                await store.apply_migrations()
+                prefix = Path(root).name
+                title = f"Concurrent delete {prefix}"
+                for index in range(4):
+                    folder = result_root / f"{prefix}-concurrent-delete-{index}"
+                    folder.mkdir()
+                    Image.new("RGB", (2, 2), "white").save(folder / "final.png")
+                    (folder / "meta.json").write_text(json.dumps({"mangaTitle": title}))
+                    await store.sync_result_folder(folder, generate_variants=False)
+                    folders.append(folder.name)
+
+                self.assertEqual(
+                    await asyncio.gather(*(store.delete_result(folder) for folder in folders)),
+                    [True] * len(folders),
+                )
+                self.assertEqual(
+                    await store.pool.fetchval(
+                        "SELECT count(*) FROM pages WHERE folder=ANY($1::text[])", folders
+                    ),
+                    0,
+                )
+            finally:
+                if store.pool is not None and folders:
+                    await store.pool.execute("DELETE FROM pages WHERE folder=ANY($1::text[])", folders)
+                    await store.pool.execute("DELETE FROM manga_groups WHERE title=$1", title)
+                await store.close()
+
     async def test_sync_result_folder_migrates_manifest_stage_state_and_documents(self):
         database_url = os.getenv("TEST_DATABASE_URL")
         if not database_url:

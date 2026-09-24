@@ -218,6 +218,8 @@ export interface TranslationBatch {
   processingCount?: number;
   failedCount?: number;
   needsReviewCount?: number;
+  currentStage?: string;
+  currentStagePassedCount?: number;
   detailsLoaded?: boolean;
   status: TranslationBatchStatus;
   priority?: boolean;

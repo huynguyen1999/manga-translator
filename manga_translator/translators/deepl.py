@@ -1,3 +1,5 @@
+import json
+
 try:
     import deepl
 except ImportError:
@@ -54,4 +56,30 @@ class DeeplTranslator(CommonTranslator):
         self.translator = deepl.Translator(DEEPL_AUTH_KEY)
 
     async def _translate(self, from_lang, to_lang, queries):
-        return self.translator.translate_text('\n'.join(queries), target_lang = to_lang).text.split('\n')
+        if not queries:
+            return []
+
+        # DeepL limits each text request body to 128 KiB.
+        max_request_bytes = 128 * 1024
+        base_size = len(json.dumps({
+            'target_lang': to_lang, 'text': [], 'show_billed_characters': True,
+        }).encode('utf-8'))
+        batch_size = base_size
+        batches = []
+        batch = []
+        for query in queries:
+            query_size = len(json.dumps(query).encode('utf-8'))
+            if batch and batch_size + query_size + 1 > max_request_bytes:
+                batches.append(batch)
+                batch = []
+                batch_size = base_size
+            batch_size += query_size + (1 if batch else 0)
+            batch.append(query)
+        if batch:
+            batches.append(batch)
+
+        return [
+            result.text
+            for batch in batches
+            for result in self.translator.translate_text(batch, target_lang=to_lang)
+        ]
