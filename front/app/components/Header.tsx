@@ -7,7 +7,6 @@ interface HeaderProps {
   onToggleTheme: () => void;
   activeView?: "studio" | "gallery" | "search";
   gallerySection?: "manga" | "series";
-  onSelectView?: (view: "studio" | "gallery") => void;
   galleryCount?: number;
   jobCount?: number;
   jobAttentionCount?: number;
@@ -19,7 +18,6 @@ export const Header: React.FC<HeaderProps> = ({
   onToggleTheme,
   activeView = "studio",
   gallerySection = "manga",
-  onSelectView,
   galleryCount = 0,
   jobCount = 0,
   jobAttentionCount = 0,
@@ -64,7 +62,6 @@ export const Header: React.FC<HeaderProps> = ({
             <nav className="order-3 flex w-full min-w-0 items-center space-x-0.5 overflow-x-auto rounded-lg bg-zinc-100 p-1 text-xs font-medium dark:bg-zinc-800/70 sm:order-none sm:w-auto sm:space-x-1 sm:overflow-visible sm:text-sm">
               <Link
                 to="/studio"
-                onClick={() => onSelectView?.("studio")}
                 className={`flex min-w-0 flex-none items-center justify-center space-x-1 rounded-md px-2 py-1.5 transition-colors sm:space-x-1.5 sm:px-3 ${
                   activeView === "studio"
                     ? "bg-white dark:bg-zinc-700 text-zinc-900 dark:text-zinc-50 shadow-xs"
@@ -76,7 +73,6 @@ export const Header: React.FC<HeaderProps> = ({
               </Link>
               <Link
                 to="/gallery"
-                onClick={() => onSelectView?.("gallery")}
                 className={`flex min-w-0 flex-none items-center justify-center space-x-1 rounded-md px-2 py-1.5 transition-colors sm:space-x-1.5 sm:px-3 ${
                   activeView === "gallery" && gallerySection !== "series"
                     ? "bg-white dark:bg-zinc-700 text-zinc-900 dark:text-zinc-50 shadow-xs"
@@ -93,7 +89,6 @@ export const Header: React.FC<HeaderProps> = ({
               </Link>
               <Link
                 to="/gallery?view=series"
-                onClick={() => onSelectView?.("gallery")}
                 className={`flex min-w-0 flex-none items-center justify-center space-x-1 rounded-md px-2 py-1.5 transition-colors sm:space-x-1.5 sm:px-3 ${
                   activeView === "gallery" && gallerySection === "series"
                     ? "bg-white text-zinc-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-50"

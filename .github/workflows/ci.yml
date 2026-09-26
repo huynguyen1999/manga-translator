@@ -6,7 +6,11 @@ on:
     paths:
       - '.github/workflows/ci.yml'
       - 'manga_translator/**'
+      - 'server/**'
+      - 'front/app/**'
       - 'test/**'
+      - 'devscripts/check_line_limits.py'
+      - 'repository-state/line-count-baseline.json'
       - 'pyproject.toml'
       - 'requirements.txt'
       - 'requirements-dev.txt'
@@ -15,11 +19,30 @@ on:
     paths:
       - '.github/workflows/ci.yml'
       - 'manga_translator/**'
+      - 'server/**'
+      - 'front/app/**'
       - 'test/**'
+      - 'devscripts/check_line_limits.py'
+      - 'repository-state/line-count-baseline.json'
       - 'pyproject.toml'
       - 'requirements.txt'
       - 'requirements-dev.txt'
 jobs:
+  line-count-ratchet:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+    - name: Check application file line counts
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+      run: |
+        if git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+          python3 devscripts/check_line_limits.py --base "$BASE_SHA"
+        else
+          python3 devscripts/check_line_limits.py
+        fi
   build:
     runs-on: ubuntu-latest
     strategy:

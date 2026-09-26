@@ -247,6 +247,20 @@ class TestPipelineTiming(unittest.TestCase):
         self.assertIsNotNone(ctx.image_context)
         self.assertTrue(ctx.image_context.get("started_at"))
 
+    def test_manga_translator_render_delegates_prepared_page(self):
+        translator = object.__new__(MangaTranslator)
+        translator._current_image_context = None
+        translator._pipeline_run = None
+        ctx = Context()
+        ctx.text_regions = [object()]
+
+        async def complete_pipeline(render_ctx, _config):
+            return render_ctx
+
+        translator._complete_translation_pipeline = complete_pipeline
+        rendered = asyncio.run(translator.render(ctx, Config()))
+        self.assertIs(rendered, ctx)
+
     def test_manga_translator_prepare_textless_releases_run_safely(self):
         translator = object.__new__(MangaTranslator)
         translator._progress_hooks = []

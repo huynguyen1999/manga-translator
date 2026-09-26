@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 
 import cv2
 import numpy as np
@@ -15,10 +16,12 @@ from manga_translator.rendering import get_default_eng_font, render_page
 from manga_translator.rendering.bubble_layout import group_regions_by_bubbles, restore_bubble_assignments
 from manga_translator.rendering.layout import layout_page
 from manga_translator.rendering.layout.frozen import (
+    LAYOUT_ALGORITHM_REVISION,
     hydrate_layout,
     layout_input_fingerprints,
     serialize_frozen_layout,
 )
+from manga_translator.pipeline.stages import fingerprint
 from manga_translator.rendering.layout.solver import _shared_bubble_groups
 from manga_translator.utils import Context, TextBlock
 
@@ -124,6 +127,23 @@ def test_hydration_keeps_source_font_size_for_repeat_fingerprint():
     )
     assert repeated_inputs["fingerprint"] == layout_doc["input_fingerprint"]
     hydrate_layout(render_ctx, layout_doc, repeated_inputs["fingerprint"])
+
+
+def test_layout_algorithm_revision_invalidates_cached_layout():
+    image = np.full((300, 320, 3), 255, dtype=np.uint8)
+    region = _region()
+    config = Config(render=RenderConfig(font_size_minimum=0))
+    font_path = get_default_eng_font()
+    ctx = Context(img_rgb=image, text_regions=[region])
+    layout_doc = serialize_frozen_layout(ctx, config, font_path, [])
+    stale_doc = deepcopy(layout_doc)
+    stale_inputs = dict(stale_doc["input_fingerprints"])
+    assert stale_inputs.pop("algorithm") == LAYOUT_ALGORITHM_REVISION
+    stale_doc["input_fingerprint"] = fingerprint(stale_inputs)
+
+    current = layout_input_fingerprints([region], config, font_path, [], image.shape)
+    with pytest.raises(ValueError, match="stale"):
+        hydrate_layout(ctx, stale_doc, current["fingerprint"])
 
 
 def test_fingerprint_normalizes_region_provenance_before_layout_retry():

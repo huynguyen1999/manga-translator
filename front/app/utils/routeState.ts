@@ -126,7 +126,7 @@ export function parseAppPath(pathname: string, search = ''): ParsedRoute {
     const pageSize = Number(query.get('pageSize'));
     const gallerySearch = query.get('search')?.trim();
     const sort = query.get('sort');
-    const gallerySort: GallerySort = sort === 'alpha-desc' || sort === 'date-asc' || sort === 'date-desc'
+    const gallerySort: GallerySort = sort === 'alpha-asc' || sort === 'alpha-desc' || sort === 'date-asc' || sort === 'date-desc'
       ? sort
       : 'date-desc';
     const statusParam = query.get('status')?.trim();

@@ -5,7 +5,9 @@ from typing import Any, Dict, List, Union
 import cv2
 import numpy as np
 
-from .models import FreeTextZone, PageObstacleMap, PlacementMode
+from .geometry import BubbleGeometry, compute_placement_target
+from .models import BubbleLayoutGroup, FreeTextZone, PageObstacleMap, PlacementMode
+from .source_profile import build_original_layout_profile
 
 
 def create_free_text_layout_debug(
@@ -110,3 +112,117 @@ def create_free_text_layout_debug(
             cv2.putText(debug, label, (damage_pt[0] + 6, damage_pt[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
 
     return debug
+
+
+def create_placement_zones_visualization(
+    img_rgb: np.ndarray,
+    groups: List[BubbleLayoutGroup],
+) -> np.ndarray:
+    """Create a diagnostic debug visualization showing placement zones, centroids, and boundaries."""
+    if img_rgb is None:
+        return np.zeros((100, 100, 3), dtype=np.uint8)
+    vis = img_rgb.copy()
+    zone_colors = [
+        (255, 120, 0),    # Blue-orange palette
+        (0, 200, 100),
+        (220, 50, 220),
+        (255, 200, 0),
+        (50, 180, 255),
+        (180, 100, 255),
+    ]
+
+    for g_idx, group in enumerate(groups):
+        interior = group.interior
+        if interior is None or not np.any(interior):
+            continue
+
+        # Draw bubble safe interior boundary
+        int_cnts, _ = cv2.findContours(interior.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(vis, int_cnts, -1, (180, 180, 180), 1)
+
+        # Draw each placement zone
+        for z_idx, (region, zone) in enumerate(zip(group.regions, group.zones)):
+            color = zone_colors[z_idx % len(zone_colors)]
+            if zone is not None and np.any(zone):
+                # Tint zone area
+                tint = np.zeros_like(vis)
+                tint[zone > 0] = color
+                cv2.addWeighted(tint, 0.25, vis, 1.0, 0, vis)
+
+                # Zone contour
+                z_cnts, _ = cv2.findContours((zone > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(vis, z_cnts, -1, color, 2)
+
+            # Draw original source polygon & centroid
+            lines = getattr(region, "lines", None)
+            if lines is not None and len(lines):
+                cv2.polylines(vis, [np.asarray(line, np.int32) for line in lines], True, (0, 0, 255), 1)
+
+            profile = build_original_layout_profile(region, interior)
+            if profile is not None:
+                cx, cy = int(round(profile.centroid[0])), int(round(profile.centroid[1]))
+                cv2.circle(vis, (cx, cy), 4, (0, 0, 255), -1)
+                label = f"Z{z_idx+1}"
+                cv2.putText(vis, label, (cx + 6, cy + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2)
+
+            # Draw target capacity center (+) for zone
+            target_mask = zone if (zone is not None and np.any(zone)) else interior
+            if target_mask is not None and np.any(target_mask):
+                target_geom = compute_placement_target(
+                    BubbleGeometry(target_mask),
+                    int(getattr(region, "font_size", 12) or 12),
+                    source_profile=profile,
+                    is_single_region=(len(group.regions) == 1),
+                )
+                tcx = int(round(target_geom.center_x + target_geom.bbox[0] * 0))
+                # Add geom offset if BubbleGeometry was cropped
+                bg = BubbleGeometry(target_mask)
+                tcx = int(round(target_geom.center_x + bg.x_offset))
+                tcy = int(round(target_geom.center_y + bg.y_offset))
+                # Draw cross (+) in magenta
+                cv2.drawMarker(vis, (tcx, tcy), (255, 0, 255), cv2.MARKER_CROSS, 8, 1, cv2.LINE_AA)
+
+            # Draw placed lines, band slots, centers, and transition connectors if solver ran
+            placed_lines = None
+            if hasattr(region, "layout_segments") and region.layout_segments:
+                seg_lines = region.layout_segments[0].get("lines", [])
+                if seg_lines:
+                    placed_lines = seg_lines
+
+            if placed_lines:
+                prev_cx, prev_cy = None, None
+                all_lx = [int(pl["x"]) for pl in placed_lines]
+                all_ly = [int(pl["y"]) for pl in placed_lines]
+                all_rx = [int(pl["x"]) + int(pl["width"]) for pl in placed_lines]
+                all_by = [int(pl["y"]) + int(pl["height"]) for pl in placed_lines]
+                bx1, by1, bx2, by2 = min(all_lx), min(all_ly), max(all_rx), max(all_by)
+
+                # Draw block bounding box
+                cv2.rectangle(vis, (bx1, by1), (bx2, by2), (0, 255, 255), 1)
+                # Draw block center (x)
+                bcx = (bx1 + bx2) // 2
+                bcy = (by1 + by2) // 2
+                cv2.drawMarker(vis, (bcx, bcy), (0, 255, 255), cv2.MARKER_TILTED_CROSS, 7, 1, cv2.LINE_AA)
+
+                for l_idx, pl in enumerate(placed_lines):
+                    lx, ly, lw, lh = int(pl["x"]), int(pl["y"]), int(pl["width"]), int(pl["height"])
+                    # Slot bounding box
+                    cv2.rectangle(vis, (lx, ly), (lx + lw, ly + lh), color, 1)
+                    # Line center dot
+                    cx_i = lx + lw // 2
+                    cy_i = ly + lh // 2
+                    cv2.circle(vis, (cx_i, cy_i), 3, (0, 255, 0), -1)
+
+                    # Transition connector from previous line
+                    if prev_cx is not None and prev_cy is not None:
+                        # Draw connector line from previous center to current center
+                        cv2.line(vis, (prev_cx, prev_cy), (cx_i, cy_i), (0, 255, 255), 1, cv2.LINE_AA)
+                    prev_cx, prev_cy = cx_i, cy_i
+
+        # Draw lobe graph features if present
+        if group.lobe_graph is not None:
+            for neck in group.lobe_graph.necks:
+                nx, ny = neck["center"]
+                cv2.circle(vis, (nx, ny), 3, (255, 255, 0), -1)
+
+    return vis

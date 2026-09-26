@@ -10,9 +10,10 @@ from tqdm import tqdm
 
 from .ballon_extractor import extract_ballon_region
 from . import text_render
+from .stroke import get_text_stroke_width
 from .text_render_eng import render_textblock_list_eng
 from .text_render_pillow_eng import render_textblock_list_eng as render_textblock_list_eng_pillow
-from .bubble_layout import decode_rendered_box, restore_original, render_positioned_lines
+from .bubble_layout import decode_rendered_box, decode_safe_shape, restore_original, render_positioned_lines
 from ..config import Renderer
 from .constants import (
     DIRECTION_AUTO,
@@ -34,91 +35,17 @@ from ..utils import (
     rotate_polygons,
     LANGUAGE_ORIENTATION_PRESETS,
     is_preserved_region,
+    resolve_render_content,
+)
+from .fonts import (
+    FONT_NAME_MAP,
+    WILD_WORDS_FONT_NAMES,
+    get_default_eng_font,
+    parse_font_paths,
+    resolve_font_name_or_path,
 )
 
 logger = get_logger('render')
-
-WILD_WORDS_FONT_NAMES = [
-    'Wild Words.ttf',
-    'wild_words.ttf',
-    'wildwords.ttf',
-    'Wild Words Roman.ttf',
-    'wild_words_roman.ttf',
-    'CC Wild Words Roman.ttf',
-    'CCWildWords-Roman.ttf',
-    'CC Wild Words.ttf',
-    'CCWildWords.ttf',
-    'Wild Words.otf',
-    'wild_words.otf',
-    'wildwords.otf',
-]
-
-def get_default_eng_font() -> str:
-    """Return the default font path for English rendering, preferring Wild Words."""
-    fonts_dir = os.path.join(BASE_PATH, 'fonts')
-    for name in WILD_WORDS_FONT_NAMES:
-        candidate = os.path.join(fonts_dir, name)
-        if os.path.isfile(candidate):
-            return candidate
-    for fallback in ['anime_ace.ttf', 'comic shanns 2.ttf', 'NotoSansMonoCJK-VF.ttf.ttc']:
-        candidate = os.path.join(fonts_dir, fallback)
-        if os.path.isfile(candidate):
-            return candidate
-    return os.path.join(fonts_dir, 'Wild Words.ttf')
-
-FONT_NAME_MAP = {
-    'wildwords': WILD_WORDS_FONT_NAMES,
-    'wild_words': WILD_WORDS_FONT_NAMES,
-    'wild words': WILD_WORDS_FONT_NAMES,
-    'anime_ace': ['anime_ace.ttf'],
-    'anime_ace_3': ['anime_ace_3.ttf'],
-    'comic_shanns': ['comic shanns 2.ttf', 'comic_shanns_2.ttf', 'comic_shanns.ttf'],
-    'arial_unicode': ['Arial-Unicode-Regular.ttf', 'arial_unicode.ttf', 'ArialUnicode.ttf'],
-    'noto_sans': ['NotoSansMonoCJK-VF.ttf.ttc', 'NotoSansCJK-VF.ttf.ttc', 'NotoSansCJK.ttc'],
-    'msgothic': ['msgothic.ttc'],
-    'msyh': ['msyh.ttc'],
-}
-
-def resolve_font_name_or_path(font_name_or_path: Optional[str] = None) -> str:
-    """Resolve a font name, key, or path to a valid font file path, defaulting to Wild Words."""
-    if not font_name_or_path or font_name_or_path in ('default', 'auto', 'Sans-serif'):
-        return get_default_eng_font()
-
-    # If it's already an existing file path, return it directly
-    if os.path.isfile(font_name_or_path):
-        return os.path.abspath(font_name_or_path)
-
-    fonts_dir = os.path.join(BASE_PATH, 'fonts')
-    direct_candidate = os.path.join(fonts_dir, font_name_or_path)
-    if os.path.isfile(direct_candidate):
-        return direct_candidate
-
-    normalized = font_name_or_path.strip().lower().replace('-', '_').replace(' ', '_')
-    candidates = FONT_NAME_MAP.get(normalized, [])
-    for cand in candidates:
-        cand_path = os.path.join(fonts_dir, cand)
-        if os.path.isfile(cand_path):
-            return cand_path
-
-    # Try case-insensitive lookup in fonts_dir
-    if os.path.isdir(fonts_dir):
-        for fname in os.listdir(fonts_dir):
-            clean_fname = fname.lower().replace('-', '_').replace(' ', '_')
-            if clean_fname.startswith(normalized) or normalized in clean_fname:
-                full_p = os.path.join(fonts_dir, fname)
-                if os.path.isfile(full_p):
-                    return full_p
-
-    return get_default_eng_font()
-
-
-def parse_font_paths(path: str, default: List[str] = None) -> List[str]:
-    if path:
-        parsed = path.split(',')
-        parsed = list(filter(lambda p: os.path.isfile(p), parsed))
-    else:
-        parsed = default or []
-    return parsed
 
 def fg_bg_compare(fg, bg):
     fg_avg = np.mean(fg)
@@ -138,123 +65,13 @@ def count_text_length(text: str) -> float:
     return length
 
 
-def _bounds_from_region(region):
-    """Return an axis-aligned [x1, y1, x2, y2] for a region or polygon."""
-    if hasattr(region, 'xyxy'):
-        points = np.asarray(region.xyxy)
-    elif hasattr(region, 'lines'):
-        points = np.asarray(region.lines)
-    else:
-        points = np.asarray(region)
-    if points.size < 4:
-        return None
-    points = points.reshape(-1, 2)
-    return [
-        int(np.floor(points[:, 0].min())),
-        int(np.floor(points[:, 1].min())),
-        int(np.ceil(points[:, 0].max())),
-        int(np.ceil(points[:, 1].max())),
-    ]
-
-
-def _rects_overlap(left, right):
-    return min(left[2], right[2]) > max(left[0], right[0]) and min(left[3], right[3]) > max(left[1], right[1])
-
-
-@functools.lru_cache(maxsize=4096)
-def _horizontal_layout(font_key, font_size, text, width, height, language, hyphenate, line_spacing):
-    """Cache wrapping separately for each selected font chain."""
-    lines, widths = text_render.calc_horizontal(
-        font_size,
-        text,
-        max(1, int(width)),
-        max(1, int(height)),
-        language=language,
-        hyphenate=hyphenate,
-        allow_width_expansion=False,
-    )
-    spacing = int(font_size * (line_spacing or 0.01))
-    # FreeType glyphs include ascender/descender pixels beyond the nominal size.
-    line_height = int(np.ceil(font_size * 1.15)) * len(lines) + spacing * max(0, len(lines) - 1)
-    return max(widths) if widths else 0, line_height
-
-
-def _placement_rects(anchor, width, height, image_width, image_height, is_bubble: bool = False, anchor_center: tuple = None):
-    """Yield page-bounded rectangles that still contain the source region."""
-    x1, y1, x2, y2 = anchor
-    max_x = image_width
-    max_y = image_height
-    if width > max_x or height > max_y:
-        return []
-
-    if anchor_center is None:
-        anchor_center = ((x1 + x2) / 2, (y1 + y2) / 2)
-    if is_bubble:
-        # Strictly contained within bubble bounds: anchor center must stay inside bubble
-        if width > (x2 - x1) or height > (y2 - y1):
-            return []
-        cx = int(round(anchor_center[0] - width / 2))
-        cy = int(round(anchor_center[1] - height / 2))
-        cx = max(x1, min(x2 - width, cx))
-        cy = max(y1, min(y2 - height, cy))
-        candidates = [[cx, cy, cx + width, cy + height]]
-        for dy in (-4, 4, -8, 8, -12, 12):
-            for dx in (-4, 4, -8, 8):
-                ncx = max(x1, min(x2 - width, cx + dx))
-                ncy = max(y1, min(y2 - height, cy + dy))
-                cand = [ncx, ncy, ncx + width, ncy + height]
-                if cand not in candidates:
-                    candidates.append(cand)
-        return candidates
-
-    # For non-bubble regions, prefer centered placement, then fine nudges, and only then extremities
-    x_centered = max(0, min(max_x - width, int(round(anchor_center[0] - width / 2))))
-    y_centered = max(0, min(max_y - height, int(round(anchor_center[1] - height / 2))))
-
-    min_cand_x = max(0, min(x1, x2 - width))
-    max_cand_x = min(max_x - width, max(x1, x2 - width))
-    x_set = {x_centered, min_cand_x, max_cand_x}
-    x_step = max(6, int(width * 0.06))
-    for off in range(x_step, int(width), x_step):
-        if x_centered - off >= min_cand_x:
-            x_set.add(x_centered - off)
-        if x_centered + off <= max_cand_x:
-            x_set.add(x_centered + off)
-
-    min_cand_y = max(0, min(y1, y2 - height))
-    max_cand_y = min(max_y - height, max(y1, y2 - height))
-    y_set = {y_centered, min_cand_y, max_cand_y}
-    y_step = max(6, int(height * 0.06))
-    for off in range(y_step, int(height), y_step):
-        if y_centered - off >= min_cand_y:
-            y_set.add(y_centered - off)
-        if y_centered + off <= max_cand_y:
-            y_set.add(y_centered + off)
-
-    candidates = []
-    seen = set()
-    for candidate_x in x_set:
-        for candidate_y in y_set:
-            rect = (candidate_x, candidate_y, candidate_x + width, candidate_y + height)
-            if rect in seen:
-                continue
-            seen.add(rect)
-            if rect[0] <= x1 and rect[1] <= y1 and rect[2] >= x2 and rect[3] >= y2:
-                distance = ((rect[0] + rect[2]) / 2 - anchor_center[0]) ** 2 + ((rect[1] + rect[3]) / 2 - anchor_center[1]) ** 2
-                candidates.append((distance, list(rect)))
-    candidates.sort(key=lambda item: item[0])
-    return [rect for _, rect in candidates]
-
-
-def _points_for_rect(region, rect, image_width, image_height):
-    x1, y1, x2, y2 = rect
-    points = np.array([[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]], dtype=np.float32)
-    if abs(getattr(region, 'angle', 0)) > 3:
-        center = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
-        points = rotate_polygons(center, points.reshape(1, -1), -region.angle, to_int=False).reshape(-1, 4, 2)
-    points[..., 0] = points[..., 0].clip(0, image_width - 1)
-    points[..., 1] = points[..., 1].clip(0, image_height - 1)
-    return points.astype(np.int64)
+from .placement_geometry import (
+    _bounds_from_region,
+    _horizontal_layout,
+    _placement_rects,
+    _points_for_rect,
+    _rects_overlap,
+)
 
 
 def _find_horizontal_placement(
@@ -268,6 +85,7 @@ def _find_horizontal_placement(
     line_spacing,
     obstacles,
     is_bubble: bool = False,
+    allow_below_preferred: bool = True,
 ):
     image_height, image_width = image_shape[:2]
     source_w = max(1, base_rect[2] - base_rect[0])
@@ -326,91 +144,58 @@ def _find_horizontal_placement(
                     continue
                 if candidate_width > image_width or candidate_height > image_height:
                     continue
+                bubble_alpha = None
+                interior = getattr(region, '_bubble_interior', None) if is_bubble else None
+                if interior is not None:
+                    fg, bg = fg_bg_compare(*region.get_font_colors())
+                    raster = text_render.put_text_horizontal(
+                        candidate_font, text, candidate_width, candidate_height,
+                        region.alignment, region.direction == 'hr', fg, bg,
+                        getattr(region, 'target_lang', 'en_US'), hyphenate, line_spacing,
+                        font_size_minimum=candidate_font,
+                        stroke_width=get_text_stroke_width(
+                            candidate_font, bg, getattr(region, 'bg_colors', None)
+                        ),
+                    )
+                    if raster is None or raster.shape[:2] != (candidate_height, candidate_width):
+                        continue
+                    bubble_alpha = raster[:, :, 3] > 0
                 bubble_center = getattr(region, '_bubble_center', None) if is_bubble else None
                 for rect in _placement_rects(base_rect, candidate_width, candidate_height, image_width, image_height, is_bubble=is_bubble, anchor_center=bubble_center):
-                    interior = getattr(region, '_bubble_interior', None)
-                    if interior is not None:
+                    if bubble_alpha is not None:
                         x1, y1, x2, y2 = map(int, rect)
-                        if not np.all(interior[y1:y2 + 1, x1:x2 + 1]):
+                        if np.any(bubble_alpha & (interior[y1:y2, x1:x2] == 0)):
                             continue
-                    if active_obstacles and any(_rects_overlap(rect, obstacle) for obstacle in active_obstacles):
-                        continue
+                    if active_obstacles:
+                        if bubble_alpha is not None:
+                            overlap = False
+                            for ox1, oy1, ox2, oy2 in active_obstacles:
+                                ix1, iy1 = max(x1, ox1), max(y1, oy1)
+                                ix2, iy2 = min(x2, ox2), min(y2, oy2)
+                                if ix2 > ix1 and iy2 > iy1 and np.any(
+                                    bubble_alpha[iy1 - y1:iy2 - y1, ix1 - x1:ix2 - x1]
+                                ):
+                                    overlap = True
+                                    break
+                            if overlap:
+                                continue
+                        elif any(_rects_overlap(rect, obstacle) for obstacle in active_obstacles):
+                            continue
+                    if bubble_alpha is not None:
+                        region._horizontal_fit_box = raster
                     return candidate_font, rect
         return None
 
     target_font = int(target_font_size)
-    pref_min_font = max(int(np.ceil(target_font * 0.85)), target_font - 3, int(font_size_minimum), 1)
-    abs_min_font = max(int(font_size_minimum), 1)
+    pref_min_font = max(int(np.ceil(target_font * 0.90)), target_font - 2, int(font_size_minimum), 1)
 
     # Pass 1: Try preferred font range with obstacle avoidance
     res = search_placement(target_font, pref_min_font, effective_obstacles)
     if res is not None:
         return res
 
-    # Pass 2: Relax obstacles in preferred font range
-    if is_bubble and effective_obstacles:
-        res = search_placement(target_font, pref_min_font, active_obstacles=[])
-        if res is not None:
-            return res
-
-    # Pass 3: For speech bubbles, relax bubble bounds in preferred font range instead of shrinking font
-    if is_bubble:
-        def search_relaxed_bubble(font_start, font_end):
-            f_step = 2 if (font_start - font_end) >= 6 else 1
-            font_range = list(range(font_start, font_end - 1, -f_step))
-            if font_end not in font_range:
-                font_range.append(font_end)
-            bubble_center = getattr(region, '_bubble_center', None) or (
-                (base_rect[0] + base_rect[2]) / 2.0,
-                (base_rect[1] + base_rect[3]) / 2.0,
-            )
-            for candidate_font in font_range:
-                target_ar_w = max(source_w, int(round(source_h * 0.75)), candidate_font * 4)
-                for candidate_width in [target_ar_w, source_w, int(round(source_w * 1.3)), image_width]:
-                    if candidate_width <= 0:
-                        continue
-                    needed_width, needed_height = _horizontal_layout(
-                        text_render.FONT_SELECTION_KEY,
-                        candidate_font,
-                        text,
-                        min(candidate_width, image_width),
-                        image_height - 1,
-                        getattr(region, 'target_lang', 'en_US'),
-                        hyphenate,
-                        line_spacing,
-                    )
-                    if needed_width > image_width or needed_height > image_height:
-                        continue
-                    w = min(image_width, max(needed_width, 1))
-                    h = min(image_height, max(needed_height, 1))
-                    cx, cy = bubble_center
-                    x1 = int(round(cx - w / 2.0))
-                    y1 = int(round(cy - h / 2.0))
-                    if x1 < 0:
-                        x1 = 0
-                    if y1 < 0:
-                        y1 = 0
-                    if x1 + w > image_width:
-                        x1 = max(0, image_width - w)
-                    if y1 + h > image_height:
-                        y1 = max(0, image_height - h)
-                    rect = [x1, y1, x1 + w, y1 + h]
-                    return candidate_font, rect
-            return None
-
-        res = search_relaxed_bubble(target_font, pref_min_font)
-        if res is not None:
-            return res
-
-    # Pass 4: Emergency downscale to absolute minimum font size
-    if pref_min_font > abs_min_font:
-        res = search_placement(pref_min_font - 1, abs_min_font, effective_obstacles)
-        if res is not None:
-            return res
-        if is_bubble and effective_obstacles:
-            res = search_placement(pref_min_font - 1, abs_min_font, active_obstacles=[])
-            if res is not None:
-                return res
+    if not is_bubble and allow_below_preferred and pref_min_font > font_size_minimum:
+        return search_placement(pref_min_font - 1, max(1, int(font_size_minimum)), effective_obstacles)
 
     return None
 
@@ -480,6 +265,11 @@ def _detect_bubble_rect(
         ):
             return base_rect
 
+        bubble_crop = img[bubble_rect[1]:bubble_rect[3], bubble_rect[0]:bubble_rect[2]]
+        bubble_gray = cv2.cvtColor(bubble_crop, cv2.COLOR_RGB2GRAY) if bubble_crop.ndim == 3 else bubble_crop
+        if bubble_gray.size == 0 or float(np.mean(bubble_gray)) < 200:
+            return base_rect
+
         pad_x = min(15, max(3, int(rw * 0.05)))
         pad_y = min(15, max(3, int(rh * 0.05)))
         safe_rect = [
@@ -489,6 +279,12 @@ def _detect_bubble_rect(
             min(img.shape[0] - 1, bubble_rect[3] - pad_y),
         ]
         if safe_rect[2] > safe_rect[0] and safe_rect[3] > safe_rect[1]:
+            interior = np.zeros(img.shape[:2], np.uint8)
+            mx1, my1 = max(0, balloon_window[0]), max(0, balloon_window[1])
+            mx2 = min(img.shape[1], balloon_window[2])
+            my2 = min(img.shape[0], balloon_window[3])
+            interior[my1:my2, mx1:mx2] = (balloon_mask[:my2 - my1, :mx2 - mx1] > 0).astype(np.uint8)
+            region._bubble_interior = cv2.erode(interior, np.ones((7, 7), np.uint8))
             return safe_rect
     except Exception:
         pass
@@ -526,6 +322,7 @@ def _expand_horizontal_region(
     reserved_regions,
     placed_rects: list,
     text_regions: List['TextBlock'],
+    allow_below_preferred: bool = True,
 ):
     prepared_points = getattr(region, '_bubble_points', None)
     if prepared_points is not None and (
@@ -533,6 +330,7 @@ def _expand_horizontal_region(
         or getattr(region, '_bubble_segments', None)
     ):
         return True, np.asarray(prepared_points), int(region.font_size)
+    region.__dict__.pop("_horizontal_fit_box", None)
     orig_base_rect = _bounds_from_region(region)
     if orig_base_rect is None:
         orig_base_rect = [0, 0, img.shape[1] - 1, img.shape[0] - 1]
@@ -550,35 +348,24 @@ def _expand_horizontal_region(
         hyphenate=hyphenate,
         line_spacing=line_spacing or 0,
         obstacles=obstacles,
-        is_bubble=(base_rect != orig_base_rect),
+        # _detect_bubble_rect returns an expanded rectangle only after finding
+        # a closed, real border; keep that verified boundary hard as well as
+        # interiors supplied by the bubble detector.
+        is_bubble=(getattr(region, '_bubble_interior', None) is not None or base_rect != orig_base_rect),
+        allow_below_preferred=allow_below_preferred,
     )
-    # If bubble-expanded base_rect failed to place, retry with original region rect
-    if placement is None and base_rect != orig_base_rect:
-        placement = _find_horizontal_placement(
-            region,
-            orig_base_rect,
-            img.shape,
-            target_font_size,
-            font_size_minimum,
-            region.get_translation_for_rendering(),
-            hyphenate=hyphenate,
-            line_spacing=line_spacing or 0,
-            obstacles=obstacles,
-            is_bubble=False,
-        )
-
     if placement is None:
-        logger.warning(
-            f"Unable to find collision-free horizontal placement for '{region.translation[:40]}'. Flagging for review and using fallback placement."
-        )
+        logger.warning(f"Unable to place translated text within the preferred font range: '{region.translation[:40]}'")
         region.review_reason = getattr(region, "review_reason", None) or "text_does_not_fit"
         region.review_required = True
-        region._render_suppressed = False
-        dst_points = _points_for_rect(region, base_rect, img.shape[1], img.shape[0])
-        return True, dst_points, max(int(font_size_minimum), 1)
+        region._render_suppressed = True
+        return True, None, max(int(target_font_size), 1)
 
     new_font_size, placed_rect = placement
     region._render_suppressed = False
+    if new_font_size < target_font_size * 0.85:
+        region.review_reason = getattr(region, 'review_reason', None) or "font_below_readability_floor"
+        region.review_required = True
     dst_points = _points_for_rect(region, placed_rect, img.shape[1], img.shape[0])
     return True, dst_points, new_font_size
 
@@ -726,7 +513,8 @@ def resize_regions_to_font_size(
         if region.horizontal:
             single_axis_expanded, dst_points, target_font_size = _expand_horizontal_region(
                 img, region, target_font_size, font_size_minimum, hyphenate, line_spacing,
-                reserved_regions, placed_rects, text_regions
+                reserved_regions, placed_rects, text_regions,
+                allow_below_preferred=font_size_fixed is None,
             )
 
         if region.vertical and not single_axis_expanded:
@@ -778,10 +566,21 @@ async def dispatch(
         for region, dst_points in tqdm(zip(text_regions, dst_points_list), '[render]', total=len(text_regions)):
             if getattr(region, "_render_suppressed", False):
                 continue
-            if render_mask is not None:
-                # set render_mask to 1 for the region that is inside dst_points
-                cv2.fillConvexPoly(render_mask, dst_points.astype(np.int32), 1)
-            img = render(img, region, dst_points, hyphenate, line_spacing, disable_font_border, font_size_minimum=font_size_minimum)
+            before = img.copy()
+            try:
+                rendered = render(img.copy(), region, dst_points, hyphenate, line_spacing, disable_font_border, font_size_minimum=font_size_minimum)
+                if render_mask is not None:
+                    cv2.fillConvexPoly(render_mask, dst_points.astype(np.int32), 1)
+                img = rendered
+                region._render_outcome = "painted"
+            except Exception as exc:
+                img = before
+                region._render_suppressed = True
+                region.review_required = True
+                region.review_reason = getattr(region, "review_reason", None) or "render_failed"
+                region._render_failure_reason = f"{type(exc).__name__}: {exc}"
+                region._render_outcome = "failed"
+                logger.warning("Rendering failed for region %s: %s", getattr(region, "region_id", ""), exc)
         return img
 
 def _should_render_horizontally(region: TextBlock) -> bool:
@@ -842,6 +641,9 @@ def _render_text_box(
             hyphenate,
             line_spacing,
             font_size_minimum=font_size_minimum,
+            stroke_width=get_text_stroke_width(
+                region.font_size, bg, getattr(region, "bg_colors", None)
+            ),
         )
 
     temp_box = text_render.put_text_vertical(
@@ -852,6 +654,9 @@ def _render_text_box(
         fg,
         bg,
         line_spacing,
+        stroke_width=get_text_stroke_width(
+            region.font_size, bg, getattr(region, "bg_colors", None)
+        ),
     )
     h, w, _ = temp_box.shape
     r_temp = w / h
@@ -859,6 +664,14 @@ def _render_text_box(
 
 
 def _composite_box_to_image(img: np.ndarray, box: np.ndarray, dst_points: np.ndarray) -> np.ndarray:
+    if box is None or box.ndim != 3 or box.shape[2] != 4 or not np.any(box[:, :, 3]):
+        raise ValueError("render box has no visible RGBA pixels")
+    points = np.asarray(dst_points, dtype=np.float32).reshape(4, 2)
+    if (
+        np.any(points[:, 0] < 0) or np.any(points[:, 0] > img.shape[1])
+        or np.any(points[:, 1] < 0) or np.any(points[:, 1] > img.shape[0])
+    ):
+        raise ValueError("render bounds leave the page")
     src_points = np.array([[0, 0], [box.shape[1], 0], [box.shape[1], box.shape[0]], [0, box.shape[0]]]).astype(np.float32)
 
     x, y, w, h = cv2.boundingRect(dst_points.astype(np.int32))
@@ -870,16 +683,18 @@ def _composite_box_to_image(img: np.ndarray, box: np.ndarray, dst_points: np.nda
     if bw <= 0 or bh <= 0:
         return img
 
-    dst_local = dst_points.astype(np.float32) - np.array([x1, y1], dtype=np.float32)
+    dst_local = points - np.array([x1, y1], dtype=np.float32)
     M, _ = cv2.findHomography(src_points, dst_local, cv2.RANSAC, 5.0)
     if M is None:
         M, _ = cv2.findHomography(src_points, dst_local)
     if M is None:
-        return img
+        raise ValueError("render homography could not be computed")
 
     rgba_region = cv2.warpPerspective(box, M, (bw, bh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     canvas_region = rgba_region[:, :, :3]
     mask_region = rgba_region[:, :, 3:4].astype(np.float32) / 255.0
+    if not np.any(mask_region):
+        raise ValueError("render transform produced no visible pixels")
     img[y1:y2, x1:x2] = np.clip(
         (img[y1:y2, x1:x2].astype(np.float32) * (1 - mask_region) + canvas_region.astype(np.float32) * mask_region),
         0, 255
@@ -890,17 +705,21 @@ def _composite_box_to_image(img: np.ndarray, box: np.ndarray, dst_points: np.nda
 def _render_frozen_region(img: np.ndarray, region: TextBlock, font_path: str) -> np.ndarray:
     text_render.set_font(font_path)
     fg, bg = fg_bg_compare(*region.get_font_colors())
-    for segment in getattr(region, "layout_segments", []) or []:
+    segments = getattr(region, "layout_segments", []) or []
+    if not segments:
+        raise ValueError("frozen region has no segments")
+    prepared = []
+    for segment in segments:
         lines = segment.get("lines") or []
         x, y = int(segment.get("x", 0)), int(segment.get("y", 0))
         width, height = int(segment.get("width", 0)), int(segment.get("height", 0))
         if width <= 0 or height <= 0:
-            continue
+            raise ValueError("frozen segment has invalid bounds")
         box = decode_rendered_box(segment.get("rendered_png")) if not lines else None
-        if not lines and box is None:
-            continue
         if lines:
             font_size = int(segment.get("font_size", getattr(region, "font_size", 0)) or 0)
+            if font_size <= 0:
+                raise ValueError("frozen segment has invalid font size")
             box = render_positioned_lines(
                 lines,
                 [x, y, x + width, y + height],
@@ -910,11 +729,16 @@ def _render_frozen_region(img: np.ndarray, region: TextBlock, font_path: str) ->
                 float(getattr(region, "line_spacing", 0.0) or 0.0),
                 getattr(region, "target_lang", "ENG") or "ENG",
                 getattr(region, "direction", "") == "hr",
+                stroke_width=(getattr(region, "_solver_qa", None) or {}).get("layout_stroke_width") or get_text_stroke_width(font_size, bg, getattr(region, "bg_colors", None)),
             )
-        if box is not None and np.any(box[:, :, 3]):
-            points = _points_for_rect(region, [x, y, x + width, y + height], img.shape[1], img.shape[0])
-            img = _composite_box_to_image(img, box, points)
-    return img
+        if box is None or box.ndim != 3 or box.shape[2] != 4 or not np.any(box[:, :, 3]):
+            raise ValueError("frozen segment has no visible raster")
+        points = _points_for_rect(region, [x, y, x + width, y + height], img.shape[1], img.shape[0])
+        prepared.append((box, points))
+    output = img.copy()
+    for box, points in prepared:
+        output = _composite_box_to_image(output, box, points)
+    return output
 
 
 def render(
@@ -928,13 +752,22 @@ def render(
 ):
     prepared_segments = getattr(region, '_bubble_segments', None)
     if prepared_segments:
+        output = img.copy()
         for segment in prepared_segments:
+            if segment.get('box') is None or len(segment.get('bounds', [])) != 4:
+                raise ValueError("invalid prepared bubble segment")
             points = _points_for_rect(region, segment['bounds'], img.shape[1], img.shape[0])
-            img = _composite_box_to_image(img, segment['box'], points)
-        return img
+            output = _composite_box_to_image(output, segment['box'], points)
+        return output
+
+    verified_box = getattr(region, "_horizontal_fit_box", None)
+    if verified_box is not None:
+        return _composite_box_to_image(img, verified_box, dst_points)
 
     prepared_box = getattr(region, '_bubble_box', None)
-    if prepared_box is not None and np.any(prepared_box[:, :, 3]):
+    if prepared_box is not None:
+        if not np.any(prepared_box[:, :, 3]):
+            raise ValueError("prepared bubble render is empty")
         points = getattr(region, '_bubble_points', None)
         if points is not None:
             return _composite_box_to_image(img, prepared_box, points)
@@ -955,6 +788,8 @@ def render(
     box = _render_text_box(
         region, norm_h, norm_v, fg, bg, hyphenate, line_spacing, font_size_minimum, render_horizontally, r_orig
     )
+    if box is None:
+        raise ValueError("text renderer returned no raster")
     return _composite_box_to_image(img, box, dst_points)
 
 async def dispatch_eng_render(img_canvas: np.ndarray, original_img: np.ndarray, text_regions: List[TextBlock], font_path: str = '', line_spacing: int = 0, disable_font_border: bool = False) -> np.ndarray:
@@ -997,10 +832,27 @@ async def render_page(
 
     transform_text_case = getattr(getattr(config, "render", None), "transform_text_case", None)
     for region in (ctx.text_regions or []):
-        if is_preserved_region(region):
-            region.translation = region.text
-        elif transform_text_case and getattr(region, "translation", None) and isinstance(region.translation, str):
-            region.translation = transform_text_case(region.translation)
+        for attr in ("_render_failure_reason", "_render_outcome"):
+            if hasattr(region, attr):
+                delattr(region, attr)
+        region._render_content_override = resolve_render_content(region, transform=transform_text_case)
+        if (
+            getattr(region, "review_reason", None) == "Translation identical to original"
+            and resolve_render_content(region).strip().casefold()
+            == str(getattr(region, "text", "") or "").strip().casefold()
+        ):
+            region._render_suppressed = True
+
+    if getattr(getattr(config, "render", None), "renderer", Renderer.default) != Renderer.none:
+        text_render.set_font(active_font)
+        for region in (ctx.text_regions or []):
+            missing = text_render.missing_glyphs(resolve_render_content(region))
+            if missing:
+                codepoints = ", ".join(f"U+{ord(char):04X}" for char in missing[:8])
+                region._render_suppressed = True
+                region.review_required = True
+                region.review_reason = f"missing_glyph: {codepoints}"
+                region._render_failure_reason = region.review_reason
 
     regions = list(ctx.text_regions or [])
     restore_regions = [
@@ -1008,13 +860,33 @@ async def render_page(
         if getattr(region, "_render_suppressed", False)
         or (
             getattr(region, "review_required", False)
-            and not str(getattr(region, "translation", None) or "").strip()
+            and not resolve_render_content(region).strip()
         )
     ]
-    drawable_regions = [
-        region for region in regions
-        if not getattr(region, "_render_suppressed", False)
-        and str(getattr(region, "translation", None) or "").strip()
+    drawable_regions = []
+    owners = {}
+    for region in regions:
+        if getattr(region, "_render_suppressed", False) or not resolve_render_content(region).strip():
+            continue
+        source_ids = list(getattr(region, "source_region_ids", []) or [getattr(region, "region_id", "")])
+        duplicates = [source_id for source_id in source_ids if source_id in owners]
+        if duplicates:
+            region._render_suppressed = True
+            region.review_required = True
+            region.review_reason = f"duplicate render ownership: {', '.join(duplicates)}"
+            restore_regions.append(region)
+            continue
+        owners.update({source_id: getattr(region, "region_id", "") for source_id in source_ids})
+        drawable_regions.append(region)
+    restore_regions = [
+        region for region in restore_regions
+        if not any(
+            source_id in owners and owners[source_id] != getattr(region, "region_id", "")
+            for source_id in (
+                list(getattr(region, "source_region_ids", []) or [])
+                or [getattr(region, "region_id", "")]
+            )
+        )
     ]
     frozen_regions = [region for region in drawable_regions if getattr(region, "_layout_frozen", False)]
     frozen_ids = {id(region) for region in frozen_regions}
@@ -1026,6 +898,22 @@ async def render_page(
     render_canvas = ctx.img_inpainted.copy()
     if getattr(ctx, "img_rgb", None) is not None and restore_regions:
         render_canvas = restore_original(render_canvas, ctx.img_rgb, restore_regions)
+    for region in drawable_regions:
+        cleanup = decode_safe_shape(
+            getattr(region, "free_text_cleanup_mask", None),
+            render_canvas.shape[0], render_canvas.shape[1],
+        )
+        if cleanup is not None and np.any(cleanup):
+            ys, xs = np.nonzero(cleanup)
+            x1, y1 = max(0, int(xs.min()) - 2), max(0, int(ys.min()) - 2)
+            x2 = min(render_canvas.shape[1], int(xs.max()) + 3)
+            y2 = min(render_canvas.shape[0], int(ys.max()) + 3)
+            render_canvas[y1:y2, x1:x2] = cv2.inpaint(
+                render_canvas[y1:y2, x1:x2],
+                cleanup[y1:y2, x1:x2].astype(np.uint8) * 255,
+                2,
+                cv2.INPAINT_TELEA,
+            )
 
     render_cfg = getattr(config, "render", None)
     renderer_type = getattr(render_cfg, "renderer", Renderer.default)
@@ -1061,6 +949,24 @@ async def render_page(
     if renderer_type != Renderer.none:
         with _RENDER_LOCK:
             for region in frozen_regions:
-                output = _render_frozen_region(output, region, active_font)
+                try:
+                    output = _render_frozen_region(output, region, active_font)
+                    region._render_outcome = "painted"
+                except Exception as exc:
+                    region._render_suppressed = True
+                    region.review_required = True
+                    region.review_reason = getattr(region, "review_reason", None) or "render_failed"
+                    region._render_failure_reason = f"{type(exc).__name__}: {exc}"
+                    region._render_outcome = "failed"
+                    logger.warning("Frozen rendering failed for region %s: %s", getattr(region, "region_id", ""), exc)
 
+    failed_regions = [region for region in regions if getattr(region, "_render_failure_reason", None)]
+    if failed_regions and getattr(ctx, "img_rgb", None) is not None:
+        output = restore_original(output, ctx.img_rgb, failed_regions)
+
+    for region in regions:
+        if getattr(region, "_render_outcome", None) is None:
+            region._render_outcome = "suppressed" if getattr(region, "_render_suppressed", False) else "not_rendered"
+        if hasattr(region, "_render_content_override"):
+            delattr(region, "_render_content_override")
     return output

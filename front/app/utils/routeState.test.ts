@@ -29,6 +29,7 @@ console.log('Running routeState unit tests...');
   assert.equal(gallery.view, 'gallery');
   assert.equal(gallery.overlay, 'none');
   assert.equal(gallery.gallerySort, 'date-desc');
+  assert.equal(parseAppPath('/gallery', '?sort=alpha-asc').gallerySort, 'alpha-asc');
   assert.equal(DEFAULT_GALLERY_PAGE_SIZE, 25);
   assert.deepEqual(GALLERY_PAGE_SIZE_OPTIONS, [25, 50, 75, 100]);
 

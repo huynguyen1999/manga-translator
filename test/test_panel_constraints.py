@@ -5,6 +5,7 @@ from manga_translator.config import Config
 from manga_translator.geometry.panels import infer_panel_constraints
 from manga_translator.rendering.layout.models import (
     FreeTextZone,
+    OriginalLayoutProfile,
     PageObstacleMap,
     PanelConstraint,
     PlacementMode,
@@ -57,6 +58,19 @@ def test_panel_inference_assigns_source_centroid_to_nearest_frame_cell():
     assert second.bounds[2] < 150 and second.bounds[3] == 300
 
 
+def test_ocr_box_crossing_panel_lines_uses_the_frame_around_its_center():
+    image = np.full((300, 300, 3), 255, dtype=np.uint8)
+    cv2.line(image, (0, 100), (299, 100), (0, 0, 0), 3)
+    cv2.line(image, (0, 200), (299, 200), (0, 0, 0), 3)
+    region = _region((120, 60, 180, 240))
+
+    constraint = infer_panel_constraints(image, [region])[id(region)]
+
+    assert constraint.source == "cv"
+    assert 100 < constraint.bounds[1] < 110
+    assert 190 < constraint.bounds[3] < 200
+
+
 def test_ownership_zone_receives_its_panel_constraint():
     image = _page_with_two_by_two_panels()
     region = _region((215, 50, 235, 75))
@@ -71,7 +85,7 @@ def test_ownership_zone_receives_its_panel_constraint():
     assert constraint.source == "cv"
 
 
-def test_typography_wraps_within_panel_capacity_before_reducing_source_size():
+def test_typography_wraps_inside_panel_and_150_percent_source_height():
     region = _region((95, 60, 130, 78), "THESE PEOPLE ARE LIKELY THE CASTE TOP GUARDS")
     profile = build_original_layout_profile(region, np.ones((180, 220), dtype=np.uint8))
     panel = PanelConstraint("left", (0, 0, 150, 180), confidence=0.9, source="cv", margin=4)
@@ -81,11 +95,48 @@ def test_typography_wraps_within_panel_capacity_before_reducing_source_size():
     )
 
     assert candidates
-    assert candidates[0].font_size == profile.font_size
+    assert all(candidate.font_size <= profile.font_size for candidate in candidates)
     assert all(max(line.width for line in candidate.lines) <= 142 for candidate in candidates)
-    assert any(candidate.font_size == profile.font_size and len(candidate.lines) > 1 for candidate in candidates)
-    assert all(max(line.y + line.height for line in candidate.lines) <= 172 for candidate in candidates)
+    assert any(len(candidate.lines) > 1 for candidate in candidates)
+    assert all(max(line.y + line.height for line in candidate.lines) <= profile.block_height * 1.5 for candidate in candidates)
     assert candidates[0].qa["panel_constraint"]["source"] == "cv"
+
+
+def test_short_panel_rewraps_wider_before_reducing_source_font():
+    region = _region((95, 60, 130, 260), "THESE PEOPLE ARE LIKELY THE CASTE TOP GUARDS")
+    profile = build_original_layout_profile(region, np.ones((300, 500), dtype=np.uint8))
+    panel = PanelConstraint("short", (0, 40, 430, 210), confidence=0.9, source="cv", margin=4)
+
+    candidates = _free_text_typography_candidates(
+        region.translation, profile, Config(), (300, 500), panel_constraint=panel
+    )
+
+    assert candidates
+    assert any(candidate.font_size == profile.font_size for candidate in candidates)
+    assert any(max(line.width for line in candidate.lines) > profile.block_width for candidate in candidates)
+    assert all(max(line.y + line.height for line in candidate.lines) <= 162 for candidate in candidates)
+
+
+def test_panel_search_keeps_intermediate_font_fallbacks():
+    profile = OriginalLayoutProfile(55, 1, [], (783, 532), (693, 398, 873, 666), 180, 268, 0.2)
+    panel = PanelConstraint("strip", (0, 427, 1280, 627), confidence=0.9, source="cv", margin=12)
+
+    candidates = _free_text_typography_candidates(
+        "THERE'S NO MAN IN THE WORLD WHO WOULD REFUSE...", profile, Config(), (1808, 1280), panel_constraint=panel
+    )
+
+    sizes = {candidate.font_size for candidate in candidates}
+    assert candidates[0].font_size == profile.font_size
+    assert 24 in sizes
+    assert min(sizes) < 24
+
+    unconstrained = _free_text_typography_candidates(
+        "THERE'S NO MAN IN THE WORLD WHO WOULD REFUSE...", profile, Config(), (1808, 1280)
+    )
+    assert 24 in {candidate.font_size for candidate in unconstrained}
+    short_profile = OriginalLayoutProfile(28, 1, [], (150, 50), (0, 0, 300, 100), 300, 100, 0.2)
+    short_text = _free_text_typography_candidates("SHORT LINE", short_profile, Config(), (400, 400))
+    assert short_text[0].font_size == short_profile.font_size
 
 
 def test_hard_valid_checks_whole_paragraph_box_even_when_glyphs_fit():
@@ -133,6 +184,7 @@ def test_free_text_solver_wraps_and_clamps_inside_detected_panel():
     region = _region((118, 95, 140, 112), "THESE PEOPLE ARE LIKELY THE CASTE TOP GUARDS")
     inpaint_mask = np.zeros(image.shape[:2], dtype=np.uint8)
     cv2.fillPoly(inpaint_mask, [np.asarray(region.lines[0], dtype=np.int32)], 255)
+    source_profile = build_original_layout_profile(region, np.ones(image.shape[:2], dtype=np.uint8))
     ctx = Context(img_rgb=image, text_regions=[region], inpaint_mask=inpaint_mask)
     config = Config()
     config.render.font_size_minimum = 8
@@ -146,8 +198,10 @@ def test_free_text_solver_wraps_and_clamps_inside_detected_panel():
     assert constraint.source == "cv"
     assert constraint.bounds[2] < 150
     assert region._free_text_solver_applied
-    assert region.font_size >= round(source_font_size * 0.9)
-    lines = region.layout_segments[0]["lines"]
+    assert config.render.font_size_minimum <= region.font_size <= source_font_size
+    segment = region.layout_segments[0]
+    assert segment["height"] <= source_profile.block_height * 1.5
+    lines = segment["lines"]
     assert len(lines) > 1
     safe_left = constraint.bounds[0] + constraint.margin
     safe_top = constraint.bounds[1] + constraint.margin
@@ -157,3 +211,42 @@ def test_free_text_solver_wraps_and_clamps_inside_detected_panel():
     assert min(line["y"] for line in lines) >= safe_top
     assert max(line["x"] + line["width"] for line in lines) <= safe_right
     assert max(line["y"] + line["height"] for line in lines) <= safe_bottom
+
+
+def test_vertical_ocr_translation_uses_geometry_font_and_renders_as_free_text():
+    image = np.full((1808, 1280, 3), 255, dtype=np.uint8)
+    for x in range(715, 850, 24):
+        cv2.rectangle(image, (x, 425), (x + 5, 640), (20, 20, 20), -1)
+    text = "THERE'S NO MAN IN THE WORLD WHO WOULD REFUSE..."
+    region = TextBlock(
+        lines=[[[693, 398], [873, 398], [873, 666], [693, 666]]],
+        texts=["そんな断る男とかいないだろ．．．"],
+        translation=text,
+        target_lang="ENG",
+        font_size=180,
+    )
+    region.region_id = "744ed9b863f34be8b63f1aae6b0321e7"
+    region.source_font_size = 180
+    region.source_regions = [{
+        "id": region.region_id,
+        "bbox": [693, 398, 873, 666],
+        "source_text": region.text,
+    }]
+    inpaint_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(inpaint_mask, [np.asarray(region.lines[0], dtype=np.int32)], 255)
+    ctx = Context(img_rgb=image, text_regions=[region], inpaint_mask=inpaint_mask, mask=inpaint_mask)
+    config = Config()
+    config.render.font_size_minimum = 8
+
+    apply_shape_aware_bubble_layout(
+        ctx, config, font_path=get_default_eng_font(), solver_max_y_trials=8,
+    )
+
+    assert region._free_text_solver_applied
+    assert region._render_suppressed is False
+    assert region.font_size == 55
+    segment = region.layout_segments[0]
+    assert segment["height"] <= 268 * 1.5
+    assert [line["text"] for line in segment["lines"]] == [
+        "THERE'S NO", "MAN IN THE", "WORLD", "WHO WOULD", "REFUSE...",
+    ]

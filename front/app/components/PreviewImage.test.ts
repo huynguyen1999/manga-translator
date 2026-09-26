@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { countOriginalTextRegions, parseDetectionRegions, parseTextRegions } from "@/utils/textRegions";
+import { countOriginalTextRegions, parseBubbleDetections, parseDetectionRegions, parseTextRegions } from "@/utils/textRegions";
 import { getConfidenceStyle } from "@/components/PreviewImage";
 
 // Helper functions that mirror PreviewImage calculation logic
@@ -129,11 +129,12 @@ console.log("Text-region DB shape test passed successfully!");
 
 assert.deepEqual(parseDetectionRegions([
   { pts: [[81, 855], [112, 855], [112, 1093], [81, 1093]], confidence: 0.94 },
-  { lines: [[[118, 855], [148, 855], [148, 1064], [118, 1064]]] },
+  { index: 4, lines: [[[118, 855], [148, 855], [148, 1064], [118, 1064]]] },
 ]), [
-  { points: [[81, 855], [112, 855], [112, 1093], [81, 1093]], confidence: 0.94 },
-  { points: [[118, 855], [148, 855], [148, 1064], [118, 1064]], confidence: null },
+  { id: "detection_1", points: [[81, 855], [112, 855], [112, 1093], [81, 1093]], confidence: 0.94 },
+  { id: "detection_5", points: [[118, 855], [148, 855], [148, 1064], [118, 1064]], confidence: null },
 ], "Raw detector polygons survive even when OCR omits one and parse confidence");
+assert.equal(parseBubbleDetections([{ index: 2, polygon: [[0, 0], [10, 0], [10, 10]] }])[0].id, "speech_bubble_3");
 console.log("Detector-region parsing test passed successfully!");
 
 // Test getConfidenceStyle tiers
@@ -146,4 +147,3 @@ assert.equal(getConfidenceStyle(0.45).stroke, "#ef4444");
 assert.equal(getConfidenceStyle(null).tier, "detected");
 assert.equal(getConfidenceStyle(undefined).tier, "detected");
 console.log("getConfidenceStyle tests passed successfully!");
-

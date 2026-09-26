@@ -8,7 +8,6 @@ import { AppOverlayPortal } from "@/components/AppOverlayPortal";
 
 interface PipelineRerunDialogProps {
   images: FinishedImage[];
-  groupId?: string;
   mangaTitle?: string;
   onClose: () => void;
   onSubmit: (options: {
@@ -89,7 +88,6 @@ const PRESETS: PresetOption[] = [
 
 export const PipelineRerunDialog: React.FC<PipelineRerunDialogProps> = ({
   images,
-  groupId,
   mangaTitle,
   onClose,
   onSubmit,

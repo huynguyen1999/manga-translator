@@ -9,23 +9,6 @@ _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-sys.modules["manga_translator.manga_translator"] = MagicMock()
-
-for submod in [
-    "manga_translator.translators.deepl",
-    "manga_translator.translators.groq",
-    "manga_translator.translators.chatgpt",
-    "manga_translator.translators.sugoi",
-    "py3langid",
-    "langcodes",
-    "einops",
-    "loguru",
-]:
-    if submod not in sys.modules:
-        m = MagicMock()
-        m.__spec__ = None
-        sys.modules[submod] = m
-
 from manga_translator.config import Translator, TranslatorConfig, Config
 from manga_translator.translators.common import MissingAPIKeyException
 from manga_translator.translators.deepseek import DeepseekTranslator

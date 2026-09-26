@@ -1,6 +1,7 @@
 """Offline checks for incomplete pages: no translation provider or model needed."""
 import asyncio
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import unittest
 from manga_translator.config import Config, Translator
@@ -30,6 +31,103 @@ def setup_page():
 
 
 class TranslationCompletenessTests(unittest.TestCase):
+    def test_batch_facade_uses_standard_mode_and_saves_page_context(self):
+        translator, config, ctx = setup_page()
+        translator._saved_image_contexts = {}
+        translator.disable_memory_optimization = False
+        translator.batch_size = 2
+        translator.batch_concurrent = False
+        ctx.image_context = {"file_md5": "page-md5"}
+        config.translator._translator_gen = SimpleNamespace(chain=[])
+        expected = [(ctx, config)]
+        translator._batch_translate_contexts = AsyncMock(return_value=expected)
+        translator._concurrent_translate_contexts = AsyncMock()
+
+        result = asyncio.run(translator.translate_batch_contexts(expected))
+
+        self.assertEqual(result, expected)
+        self.assertEqual(translator._saved_image_contexts, {"page-md5": ctx.image_context})
+        translator._batch_translate_contexts.assert_awaited_once_with(expected, 2)
+        translator._concurrent_translate_contexts.assert_not_awaited()
+
+    def test_batch_facade_keeps_professional_mode_dispatch(self):
+        translator, config, ctx = setup_page()
+        translator._saved_image_contexts = {}
+        translator.disable_memory_optimization = False
+        translator.batch_size = 20
+        config.translator.translation_quality = "professional"
+        ctx.result_documents = {}
+        expected = [(ctx, config)]
+        translator._apply_post_translation_processing = AsyncMock(return_value=ctx.text_regions)
+        with patch(
+            "manga_translator.professional_translation.translate_professionally",
+            new=AsyncMock(return_value=expected),
+        ) as professional:
+            result = asyncio.run(translator.translate_batch_contexts(expected))
+
+        self.assertEqual(result, expected)
+        professional.assert_awaited_once_with(expected, progress=translator._report_progress)
+        translator._report_progress.assert_has_awaits([
+            call("analyzing-story"),
+            call("after-translating"),
+        ])
+
+    def test_batch_memory_error_falls_back_to_individual_pages(self):
+        translator, config, ctx = setup_page()
+        translator._saved_image_contexts = {}
+        translator.disable_memory_optimization = False
+        translator.batch_size = 2
+        translator.batch_concurrent = False
+        config.translator._translator_gen = SimpleNamespace(chain=[])
+        translator._batch_translate_contexts = AsyncMock(side_effect=MemoryError("batch too large"))
+        translator._translate_page_with_retries = AsyncMock(return_value=["Shut up!"])
+        translator._empty_device_cache = Mock()
+
+        result = asyncio.run(translator.translate_batch_contexts([(ctx, config)]))
+
+        self.assertEqual(result, [(ctx, config)])
+        self.assertEqual(ctx.text_regions[0].translation, "Shut up!")
+        self.assertEqual(ctx.text_regions[0].target_lang, config.translator.target_lang)
+        translator._translate_page_with_retries.assert_awaited_once_with(config, ctx)
+        translator._empty_device_cache.assert_called_once_with()
+
+    def test_none_translation_stage_preserves_annotations(self):
+        translator, config, ctx = setup_page()
+        translator.prep_manual = False
+        translator._model_usage_timestamps = {}
+        config.translator.translator = Translator.none
+
+        annotation = TextBlock(
+            [[[40, 10], [60, 10], [60, 90], [40, 90]]], texts=['48'], font_size=20
+        )
+        annotation.translation_policy = 'preserve'
+        ctx.text_regions.append(annotation)
+
+        result = asyncio.run(translator._run_text_translation(config, ctx))
+
+        self.assertIs(result, ctx.text_regions)
+        self.assertEqual(ctx.text_regions[0].translation, '')
+        self.assertEqual(annotation.translation, '48')
+        self.assertEqual(annotation.target_lang, config.translator.target_lang)
+        self.assertEqual(annotation._alignment, config.render.alignment)
+        self.assertEqual(annotation._direction, config.render.direction)
+        self.assertIn(('translation', Translator.none), translator._model_usage_timestamps)
+
+    def test_postprocessing_stage_keeps_facade_and_preserved_text(self):
+        translator, config, ctx = setup_page()
+        annotation = TextBlock(
+            [[[40, 10], [60, 10], [60, 90], [40, 90]]], texts=['48'], font_size=20
+        )
+        annotation.translation_policy = 'preserve'
+        ctx.text_regions.append(annotation)
+        translator._translate_page_with_retries = AsyncMock(return_value=['Shut up!', 'discarded'])
+
+        result = asyncio.run(translator._apply_post_translation_processing(ctx, config))
+
+        self.assertIs(result, ctx.text_regions)
+        self.assertEqual(ctx.text_regions[0].translation, 'Shut up!')
+        self.assertEqual(annotation.translation, '48')
+
     def test_cached_inpainted_image_without_mask_rebuilds_mask_and_inpaints(self):
         import tempfile
         from pathlib import Path
@@ -215,3 +313,24 @@ class TranslationCompletenessTests(unittest.TestCase):
         ctx.mask = np.zeros((120, 120), dtype=np.uint8)
         with self.assertRaisesRegex(TranslationFailure, 'No erasing mask'):
             asyncio.run(translator._run_inpainting(config, ctx))
+
+    def test_suppressed_or_unchanged_text_does_not_require_erasure(self):
+        import numpy as np
+        for suppressed, unchanged in ((True, False), (False, True)):
+            translator, config, ctx = setup_page()
+            ctx.img_rgb = np.full((120, 120, 3), 255, dtype=np.uint8)
+            ctx.mask = np.zeros((120, 120), dtype=np.uint8)
+            region = ctx.text_regions[0]
+            region.translation = region.text if unchanged else 'VISIBLE TRANSLATION'
+            region.review_required = True
+            region.review_reason = (
+                'Translation identical to original' if unchanged else 'no_joint_layout'
+            )
+            region._render_suppressed = suppressed
+            translator.verbose = False
+            translator._mps_call = AsyncMock(return_value=[ctx.img_rgb.copy()])
+
+            result = asyncio.run(translator._run_inpainting(config, ctx))
+
+            self.assertEqual(result.shape, ctx.img_rgb.shape)
+            translator._mps_call.assert_awaited_once()

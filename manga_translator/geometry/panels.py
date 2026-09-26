@@ -76,6 +76,9 @@ def _detect_boundaries(image: np.ndarray, regions: Iterable[Any]) -> List[_Bound
     ):
         kernel_shape = (1, kernel_size) if axis == "h" else (kernel_size, 1)
         opened = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones(kernel_shape, np.uint8))
+        gap_size = max(3, int(round(dimension * 0.35)))
+        close_shape = (1, gap_size) if axis == "h" else (gap_size, 1)
+        opened = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, np.ones(close_shape, np.uint8))
         count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(opened, 8)
         for label in range(1, count):
             x, y, box_width, box_height, _area = stats[label]
@@ -95,7 +98,7 @@ def _detect_boundaries(image: np.ndarray, regions: Iterable[Any]) -> List[_Bound
                 coord_start, coord_end = int(x), int(x + box_width)
                 support = dark[span_start:span_end, coord_start:coord_end]
                 continuity = float(np.mean(np.any(support > 0, axis=1))) if support.size else 0.0
-            if continuity < 0.72:
+            if continuity < 0.50:
                 continue
             length_score = min(1.0, length / max(1.0, dimension * 0.18))
             confidence = 0.55 * continuity + 0.45 * length_score
@@ -119,26 +122,29 @@ def _constraint_for_region(
     cx, cy = float(xs.mean()), float(ys.mean())
     found: List[_Boundary] = []
 
-    def nearest(axis: str, cross_coordinate: float, source_low: int, source_high: int, side: str, dimension: int, source_extent: int):
+    def nearest(axis: str, span_coordinate: float, anchor_coordinate: float, side: str, dimension: int, source_extent: int):
         minimum_length = max(24, int(round(dimension * 0.045)), int(round(min(source_extent * 1.2, dimension * 0.18))))
         candidates = []
         for boundary in boundaries:
             if boundary.axis != axis or boundary.span_end - boundary.span_start < minimum_length:
                 continue
-            if not (boundary.span_start <= cross_coordinate <= boundary.span_end):
+            if not (boundary.span_start <= span_coordinate <= boundary.span_end):
                 continue
-            if side == "before" and boundary.coord_end <= source_low:
-                distance = source_low - boundary.coord_end
+            if side == "before" and boundary.coord_end <= anchor_coordinate:
+                distance = anchor_coordinate - boundary.coord_end
                 candidates.append((distance, boundary))
-            elif side == "after" and boundary.coord_start >= source_high:
-                distance = boundary.coord_start - source_high
+            elif side == "after" and boundary.coord_start >= anchor_coordinate:
+                distance = boundary.coord_start - anchor_coordinate
                 candidates.append((distance, boundary))
         return min(candidates, key=lambda item: item[0])[1] if candidates else None
 
-    left = nearest("v", cy, sx1, sx2, "before", height, sy2 - sy1)
-    right = nearest("v", cy, sx1, sx2, "after", height, sy2 - sy1)
-    top = nearest("h", cx, sy1, sy2, "before", width, sx2 - sx1)
-    bottom = nearest("h", cx, sy1, sy2, "after", width, sx2 - sx1)
+    left = nearest("v", cy, cx, "before", height, sy2 - sy1)
+    right = nearest("v", cy, cx, "after", height, sy2 - sy1)
+    top = nearest("h", cx, cy, "before", width, sx2 - sx1)
+    bottom = nearest("h", cx, cy, "after", width, sx2 - sx1)
+
+    font_size = max(1, int(getattr(region, "font_size", 12) or 12))
+    margin = max(2, min(12, int(round(font_size * 0.2))))
     found = [boundary for boundary in (left, right, top, bottom) if boundary is not None]
 
     if left is None and right is None and top is None and bottom is None:
@@ -150,11 +156,12 @@ def _constraint_for_region(
         right.coord_start if right is not None else width,
         bottom.coord_start if bottom is not None else height,
     )
-    if bounds[0] > sx1 or bounds[1] > sy1 or bounds[2] < sx2 or bounds[3] < sy2:
+    overlap = max(0, min(sx2, bounds[2]) - max(sx1, bounds[0])) * max(
+        0, min(sy2, bounds[3]) - max(sy1, bounds[1])
+    )
+    if not (bounds[0] <= cx < bounds[2] and bounds[1] <= cy < bounds[3]) or overlap < (sx2 - sx1) * (sy2 - sy1) * 0.5:
         return PanelConstraint("page", (0, 0, width, height))
 
-    font_size = max(1, int(getattr(region, "font_size", 12) or 12))
-    margin = max(2, min(12, int(round(font_size * 0.2))))
     confidence = float(sum(item.confidence for item in found) / len(found))
     panel_id = "cv:" + ":".join(str(value) for value in bounds)
     return PanelConstraint(panel_id, bounds, confidence=confidence, source="cv", margin=margin)

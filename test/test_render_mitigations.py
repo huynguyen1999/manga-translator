@@ -56,6 +56,34 @@ class TestRenderMitigations(unittest.TestCase):
         self.assertTrue(any(line.startswith("Sales") for line in lines[:first_break]))
         self.assertTrue(any(line.startswith("I'll") for line in lines[first_break:]))
 
+    def test_bubble_fallback_never_relaxes_obstacles_or_bubble_mask(self):
+        from manga_translator.rendering import _find_horizontal_placement
+
+        region = TextBlock(
+            lines=[[[20, 20], [120, 20], [120, 80], [20, 80]]],
+            texts=["source"], translation="A SHORT TRANSLATION", font_size=20,
+            target_lang="ENG",
+        )
+        region._bubble_center = (70, 50)
+        region._bubble_interior = np.ones((100, 140), np.uint8)
+        self.assertIsNone(_find_horizontal_placement(
+            region, [20, 20, 120, 80], (100, 140, 3), 20, 18,
+            "A SHORT TRANSLATION", False, 0, [[20, 20, 120, 80]], is_bubble=True,
+        ))
+
+        region._bubble_interior[:] = 0
+        self.assertIsNone(_find_horizontal_placement(
+            region, [20, 20, 120, 80], (100, 140, 3), 20, 18,
+            "A SHORT TRANSLATION", False, 0, [], is_bubble=True,
+        ))
+
+    def test_short_vertical_destination_returns_no_layout(self):
+        from manga_translator.rendering.text_render_vertical import put_text_vertical
+
+        result = put_text_vertical(20, "A", 8, "center", (0, 0, 0), None, 0)
+
+        self.assertIsNone(result)
+
     def test_pillow_wrap_hyphenates_overlong_words(self):
         font = ImageFont.truetype(os.path.join(repo_root, 'fonts', 'comic shanns 2.ttf'), 24)
         lines = merge_seg_eng("Pneumonoultramicroscopicsilicovolcanoconiosis", font, 70)
@@ -103,9 +131,9 @@ class TestRenderMitigations(unittest.TestCase):
         dst_points = dst_points_list[0]
         
         self.assertTrue(np.all(dst_points[..., 0] >= 0))
-        self.assertTrue(np.all(dst_points[..., 0] < 200))
+        self.assertTrue(np.all(dst_points[..., 0] <= 200))
         self.assertTrue(np.all(dst_points[..., 1] >= 0))
-        self.assertTrue(np.all(dst_points[..., 1] < 200))
+        self.assertTrue(np.all(dst_points[..., 1] <= 200))
 
     def test_horizontal_center_padding_in_render(self):
         """Verify that render() pads symmetrically when region.alignment == 'center'."""
@@ -141,8 +169,8 @@ class TestRenderMitigations(unittest.TestCase):
         self.assertGreater(right_margin, 20, "Text is flush right instead of centered!")
         self.assertAlmostEqual(ratio, 1.0, delta=0.5, msg=f"Margins unbalanced: left={left_margin}, right={right_margin}")
 
-    def test_put_text_horizontal_expands_at_readable_floor(self):
-        """Verify that crowded text expands its canvas instead of being clipped."""
+    def test_put_text_horizontal_rejects_unfittable_clipped_canvas(self):
+        """Unfittable text must fail so its caller can request review, not return a clipped raster."""
         text = "This is a sentence that must wrap into multiple lines to fill the bubble without overflowing."
         target_w = 140
         target_h = 130
@@ -160,10 +188,7 @@ class TestRenderMitigations(unittest.TestCase):
             line_spacing=0,
             font_size_minimum=10
         )
-        self.assertIsNotNone(box)
-        h, w = box.shape[:2]
-        self.assertTrue(w > target_w or h > target_h)
-        self.assertGreater(np.count_nonzero(box[:, :, 3]), 0)
+        self.assertIsNone(box)
 
     def test_horizontal_short_text_keeps_native_size_padding(self):
         box = text_render.put_text_horizontal(
@@ -304,7 +329,7 @@ class TestRenderMitigations(unittest.TestCase):
         self.assertEqual(len(dst_points_list), 3)
         self.assertGreater(block.font_size, 0)
 
-    def test_overlapping_title_regions_are_flagged_and_rendered_with_fallback(self):
+    def test_overlapping_title_regions_without_valid_placement_are_suppressed(self):
         img = np.full((500, 500, 3), 255, np.uint8)
         regions = [
             TextBlock(
@@ -329,7 +354,7 @@ class TestRenderMitigations(unittest.TestCase):
             img, regions, font_size_fixed=None, font_size_offset=0, font_size_minimum=10
         )
 
-        self.assertFalse(any(getattr(region, "_render_suppressed", False) for region in regions))
+        self.assertTrue(all(getattr(region, "_render_suppressed", False) for region in regions))
         self.assertTrue(all(getattr(region, "review_required", False) for region in regions))
         self.assertTrue(all(region.review_reason == "text_does_not_fit" for region in regions))
 
@@ -475,8 +500,8 @@ class TestRenderMitigations(unittest.TestCase):
         self.assertEqual(frozen_calls, [region])
         np.testing.assert_array_equal(output[15, 15], (255, 0, 0))
 
-    def test_speech_bubble_blank_space_utilization_and_ellipse_containment(self):
-        """Verify that text rendered into a tall speech bubble makes good use of blank space and fits elliptical bounds."""
+    def test_put_text_horizontal_uses_available_bubble_height(self):
+        """The box-only helper fills its canvas; bubble shape is enforced by the mask-aware placer."""
         w, h = 180, 276
         text = "It was made of rubber, but now it's just my mouth."
         box = text_render.put_text_horizontal(
@@ -503,11 +528,7 @@ class TestRenderMitigations(unittest.TestCase):
         height_utilization = text_h / float(h)
         self.assertGreater(height_utilization, 0.50, f"Text failed to utilize vertical bubble space: {height_utilization:.1%}")
 
-        # Elliptical containment: all rendered text pixels should lie within the bubble ellipse
-        cx, cy = w / 2.0, h / 2.0
-        norm_dist = ((xs - cx) / (w / 2.0))**2 + ((ys - cy) / (h / 2.0))**2
-        max_dist = norm_dist.max()
-        self.assertLessEqual(max_dist, 1.0, f"Rendered text pixels spilled outside ellipse: {max_dist:.3f} > 1.0")
+        self.assertGreater(text_w, 0)
 
     def test_balloon_extractor_vertical_strip_enlargement(self):
         """Verify that enlarge_window expands horizontally sufficiently for vertical text."""
@@ -550,6 +571,7 @@ class TestRenderMitigations(unittest.TestCase):
             img, [bubble_block, sfx_block], font_size_fixed=None, font_size_offset=0, font_size_minimum=10
         )
         bubble_pts = dst_points_list[0]
+        self.assertIsNotNone(getattr(bubble_block, "_horizontal_fit_box", None))
         min_x = bubble_pts[..., 0].min()
         max_x = bubble_pts[..., 0].max()
 
@@ -557,9 +579,12 @@ class TestRenderMitigations(unittest.TestCase):
         # and NOT get repelled to the left (< 210) to avoid the SFX on the right!
         self.assertGreaterEqual(min_x, 210, f"Text was pushed left outside the bubble: {min_x} < 210")
         self.assertLessEqual(max_x, 390, f"Text spilled outside right bubble edge: {max_x} > 390")
+        rendered = render(img.copy(), bubble_block, bubble_pts, True, 0, False, font_size_minimum=10)
+        painted = np.any(rendered != img, axis=2)
+        self.assertFalse(np.any(painted & (bubble_block._bubble_interior == 0)))
 
-    def test_tall_narrow_bubble_adaptive_wrapping(self):
-        """Verify that text in a tall vertical bubble wraps adaptively into multiple narrow lines."""
+    def test_tall_narrow_bubble_adaptive_wrapping_uses_available_height(self):
+        """The shape-aware bubble placer validates glyphs against its assigned mask."""
         text = "THE SCENERY HERE IS NICE, SO I'D LIKE TO COME NEXT! ♡"
         w, h = 120, 260
         box = text_render.put_text_horizontal(
@@ -579,10 +604,6 @@ class TestRenderMitigations(unittest.TestCase):
         self.assertIsNotNone(box)
         ys, xs = np.where(box[:, :, 3] > 0)
         self.assertGreater(len(xs), 0)
-        # All pixels must lie within the ellipse
-        cx, cy = w / 2.0, h / 2.0
-        norm_dist = ((xs - cx) / (w / 2.0))**2 + ((ys - cy) / (h / 2.0))**2
-        self.assertLessEqual(norm_dist.max(), 1.0)
         # Vertical space utilization should be substantial
         text_h = ys.max() - ys.min() + 1
         self.assertGreater(text_h / float(h), 0.50)

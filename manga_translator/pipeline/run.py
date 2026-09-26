@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +18,15 @@ from PIL import Image
 from ..config import Config
 from ..mask_builder import build_inpaint_masks
 from .stages import PipelineStage, downstream_stages
+from .serialization import (
+    _json_default,
+    deserialize_textblocks,
+    deserialize_textlines,
+    serialize_editor_regions,
+    serialize_regions,
+)
 from .cpu import CPU_PRIORITY_BACKGROUND, run_cpu_stage
-from ..utils import Context, Quadrilateral, TextBlock, dump_image, load_image
+from ..utils import Context, dump_image, load_image
 from ..utils.image_storage import find_asset, save_jpeg
 from ..utils.device_memory import log_memory_stats
 from ..utils.log import get_logger
@@ -86,101 +93,6 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _json_default(value: Any):
-    if isinstance(value, Enum):
-        return value.value
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, (list, tuple)):
-        return [_json_default(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _json_default(item) for key, item in value.items()}
-    if hasattr(value, "tolist"):
-        return value.tolist()
-    return str(value)
-
-
-def serialize_regions(regions) -> list[dict[str, Any]]:
-    """Keep useful OCR/translation/layout facts without serializing model objects."""
-    from ..rendering.bubble_layout import encode_safe_shape
-    result = []
-    for index, region in enumerate(regions or []):
-        item: dict[str, Any] = {"index": index}
-        for key in (
-            "region_id", "source_region_ids", "source_regions", "group_id", "group_members", "bubble_id",
-            "text", "text_raw", "translation", "confidence", "font_size", "source_font_size",
-            "calibrated_font_size", "angle", "direction", "alignment", "target_lang", "source_lang",
-            "bubble_bounds", "layout_bounds", "layout_segments", "review_required", "review_reason",
-            "placement_mode", "line_spacing", "letter_spacing", "font_family", "bold", "italic",
-            "provenance", "source_style", "source_line_styles", "retention", "retention_reason",
-            "translation_policy",
-        ):
-            value = getattr(region, key, None)
-            if value is None and key == "confidence":
-                value = getattr(region, "prob", None)
-            if value is not None:
-                item[key] = _json_default(value)
-        fg_col, bg_col = region.get_font_colors() if hasattr(region, "get_font_colors") else (getattr(region, "fg_color", None), getattr(region, "bg_color", None))
-        if fg_col is not None:
-            item["fg_color"] = _json_default(fg_col)
-        if bg_col is not None:
-            item["bg_color"] = _json_default(bg_col)
-        interior = getattr(region, "_bubble_interior", None)
-        if interior is not None and np.any(interior):
-            item["bubble_safe_shape"] = encode_safe_shape(interior)
-        elif getattr(region, "bubble_safe_shape", None):
-            item["bubble_safe_shape"] = region.bubble_safe_shape
-        for key in ("xywh", "pts", "lines"):
-            value = getattr(region, key, None)
-            if value is not None:
-                item[key] = _json_default(value)
-        result.append(item)
-    return result
-
-
-def serialize_editor_regions(regions) -> list[dict[str, Any]]:
-    """Minimal editor payload for resumed runs that skip the normal save path."""
-    from ..rendering.bubble_layout import encode_safe_shape, encode_rendered_box
-    result = []
-    for index, region in enumerate(regions or []):
-        xywh = getattr(region, "xywh", [0, 0, 0, 0])
-        xywh = _json_default(xywh)
-        result.append({
-            "id": getattr(region, "group_id", f"bubble_{index}"),
-            "x": xywh[0],
-            "y": xywh[1],
-            "width": xywh[2],
-            "height": xywh[3],
-            "lines": _json_default(getattr(region, "lines", [])),
-            "original_text": getattr(region, "text", ""),
-            "translation": getattr(region, "translation", ""),
-            "confidence": _json_default(getattr(region, "confidence", getattr(region, "prob", None))),
-            "font_size": getattr(region, "font_size", 24),
-            "font_family": getattr(region, "font_family", ""),
-            "fg_color": _json_default(getattr(region, "fg_colors", (0, 0, 0))),
-            "bg_color": _json_default(getattr(region, "bg_colors", (0, 0, 0))),
-            "alignment": getattr(region, "alignment", getattr(region, "_alignment", "auto")),
-            "line_spacing": getattr(region, "line_spacing", 1.0),
-            "letter_spacing": getattr(region, "letter_spacing", 1.0),
-            "bold": bool(getattr(region, "bold", False)),
-            "italic": bool(getattr(region, "italic", False)),
-            "target_lang": getattr(region, "target_lang", ""),
-            "direction": getattr(region, "direction", "h"),
-            "layout_segments": [
-                {**_json_default(segment), "rendered_png": encode_rendered_box(box["box"])}
-                for segment, box in zip(getattr(region, "layout_segments", []),
-                                        getattr(region, "_bubble_segments", []))
-            ],
-            "bubble_safe_shape": encode_safe_shape(getattr(region, "_bubble_interior", None)),
-            "review_required": bool(getattr(region, "review_required", False)),
-            "review_reason": getattr(region, "review_reason", None),
-            "provenance": getattr(region, "provenance", None),
-            "translation_remap": getattr(region, "translation_remap", None),
-            "translation_source": getattr(region, "translation_source", None),
-        })
-    return result
-
-
 ACTIVE_RUNS: dict[str, PipelineRun] = {}
 _DOCUMENT_SAVER: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
 
@@ -217,71 +129,6 @@ async def save_result_documents(
             encoding="utf-8",
         )
         os.replace(temporary, destination / name)
-
-
-def deserialize_textlines(data: list[dict[str, Any]]) -> list[Quadrilateral]:
-    textlines = []
-    for item in data or []:
-        pts = item.get("pts")
-        if pts is None and "lines" in item:
-            pts = item["lines"]
-        if pts is not None:
-            pts_arr = np.array(pts, dtype=np.int32)
-            if len(pts_arr.shape) == 3:
-                pts_arr = pts_arr[0]
-            txt = str(item.get("text") or item.get("text_raw") or "")
-            prob = float(item.get("confidence") or item.get("prob") or 1.0)
-            line = Quadrilateral(pts_arr, txt, prob)
-            if item.get("source_style") is not None:
-                line.source_style = item["source_style"]
-            textlines.append(line)
-    return textlines
-
-
-def deserialize_textblocks(data: list[dict[str, Any]]) -> list[TextBlock]:
-    blocks = []
-    for item in data or []:
-        lines = item.get("lines")
-        if lines is None and "pts" in item:
-            lines = [item["pts"]]
-        if lines is None:
-            lines = []
-        texts = [str(item.get("text") or item.get("text_raw") or item.get("original_text") or "")]
-        tb = TextBlock(
-            lines=lines,
-            texts=texts,
-            translation=str(item.get("translation") or ""),
-            font_size=float(item.get("font_size", -1) or -1),
-            angle=float(item.get("angle", 0) or 0),
-            fg_color=tuple(item.get("fg_color") or (0, 0, 0)),
-            bg_color=tuple(item.get("bg_color") or (0, 0, 0)),
-            line_spacing=float(item.get("line_spacing", 1.0) or 1.0),
-            letter_spacing=float(item.get("letter_spacing", 1.0) or 1.0),
-            font_family=str(item.get("font_family") or ""),
-            bold=bool(item.get("bold", False)),
-            italic=bool(item.get("italic", False)),
-            direction=str(item.get("direction") or "auto"),
-            alignment=str(item.get("alignment") or "auto"),
-            target_lang=str(item.get("target_lang") or ""),
-            prob=float(item.get("confidence") or item.get("prob") or 1.0),
-        )
-        tb.region_id = str(item.get("region_id") or "")
-        for key in ("source_style", "source_line_styles"):
-            if key in item:
-                setattr(tb, key, item[key])
-        for key in (
-            "group_id", "group_members", "source_region_ids", "source_regions", "bubble_id",
-            "source_font_size", "calibrated_font_size", "placement_mode",
-            "bubble_bounds", "layout_bounds", "layout_segments",
-            "bubble_safe_shape", "review_required", "review_reason",
-            "retention", "retention_reason", "translation_policy",
-        ):
-            if key in item and item[key] is not None:
-                setattr(tb, key, item[key])
-        if not getattr(tb, "group_id", None):
-            tb.group_id = str(item.get("id") or tb.region_id or "")
-        blocks.append(tb)
-    return blocks
 
 
 class PipelineRun:
@@ -666,372 +513,22 @@ class PipelineRun:
         precomputed_inpainting: np.ndarray | None = None,
         stage_already_running: bool = False,
     ) -> dict[str, Any]:
-        valid_stages = {
-            "colorization",
-            "upscaling",
-            "detection",
-            "ocr",
-            "textline_merge",
-            "bubble_detection",
-            "translation",
-            "mask_generation",
-            "layout",
-            "inpainting",
-            "rendering",
-        }
-        if stage_id not in valid_stages:
-            raise ValueError(f"Stage '{stage_id}' is not retryable")
+        from .retry import execute_retry_stage
 
-        if isinstance(new_config, dict):
-            base_config = dict(self.manifest.get("config", {}) or {})
-            base_config.update(new_config)
-            config = Config.parse_obj(base_config)
-        else:
-            config = new_config
-
-        self.config = config
-        self.manifest["config"] = config.dict() if hasattr(config, "dict") else dict(config)
-
-        stage = self._stage(stage_id)
-        if stage_already_running:
-            if stage.get("status") != "running":
-                raise RuntimeError(f"Stage {stage_id} was not marked running before batched inference")
-        else:
-            stage["status"] = "running"
-        stage["startedAt"] = _now()
-        self.started[stage_id] = time.monotonic()
-        self._memory_begin(stage_id)
-        self.refresh()
-
-        ctx = self._ensure_context()
-
-        try:
-            if stage_id == "colorization":
-                if ctx.input is None:
-                    raise RuntimeError("No input image available for colorization")
-                ctx.img_colorized = await translator._run_colorizer(config, ctx)
-                colorized = np.array(ctx.img_colorized)
-                if len(colorized.shape) == 3 and colorized.shape[2] == 3:
-                    colorized = cv2.cvtColor(colorized, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(str(self.path / "colorized.png"), colorized)
-
-            elif stage_id == "upscaling":
-                if ctx.img_colorized is None:
-                    ctx.img_colorized = ctx.input
-                if ctx.img_colorized is None:
-                    raise RuntimeError("No image available for upscaling")
-                ctx.upscaled = (
-                    precomputed_upscale
-                    if precomputed_upscale is not None
-                    else await translator._run_upscaling(config, ctx)
-                )
-                ctx.img_rgb, ctx.img_alpha = load_image(ctx.upscaled)
-                upscaled = np.array(ctx.upscaled)
-                if len(upscaled.shape) == 3 and upscaled.shape[2] == 3:
-                    upscaled = cv2.cvtColor(upscaled, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(str(self.path / "upscaled.png"), upscaled)
-
-            elif stage_id == "detection":
-                if ctx.img_rgb is None:
-                    raise RuntimeError("No image canvas available for detection")
-                if precomputed_detection is None:
-                    ctx.textlines, ctx.mask_raw, ctx.mask = await translator._run_detection(config, ctx)
-                else:
-                    ctx.textlines, ctx.mask_raw, ctx.mask = precomputed_detection
-                if ctx.mask_raw is not None:
-                    cv2.imwrite(str(self.path / "mask_raw.png"), ctx.mask_raw)
-                canvas = np.asarray(ctx.upscaled)
-                if len(canvas.shape) == 3 and canvas.shape[2] == 3:
-                    canvas = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(str(self.path / "original_canvas.png"), canvas)
-                self.write_json("detection.json", serialize_regions(ctx.textlines))
-
-            elif stage_id == "ocr":
-                if ctx.img_rgb is None:
-                    raise RuntimeError("No image canvas available for OCR")
-                if not getattr(ctx, "textlines", None):
-                    detection = self._document("detection.json")
-                    if detection is not None:
-                        ctx.textlines = deserialize_textlines(detection)
-                if not getattr(ctx, "textlines", None):
-                    ctx.textlines = []
-                    self.write_json("ocr.json", [])
-                else:
-                    ctx.textlines = (
-                        precomputed_ocr
-                        if precomputed_ocr is not None
-                        else await translator._run_ocr(config, ctx)
-                    )
-                    self.write_json("ocr.json", serialize_regions(ctx.textlines))
-
-            elif stage_id == "textline_merge":
-                if ctx.img_rgb is None:
-                    raise RuntimeError("No image canvas available for textline merge")
-                if not getattr(ctx, "textlines", None):
-                    source = self._document("ocr.json") or self._document("detection.json")
-                    if source is not None:
-                        ctx.textlines = deserialize_textlines(source)
-                if not getattr(ctx, "textlines", None):
-                    raise RuntimeError("No textlines available to merge")
-                ctx.text_regions = await translator._run_textline_merge(config, ctx)
-                bubble_data = self._document("bubble_detections.json")
-                if bubble_data is not None:
-                    from ..detection.bubble import deserialize_bubble_detections
-                    from ..rendering.bubble_layout import group_regions_by_bubbles
-
-                    ctx.bubble_detections = deserialize_bubble_detections(
-                        bubble_data, ctx.img_rgb.shape
-                    )
-                    ctx.text_regions = group_regions_by_bubbles(
-                        ctx.text_regions,
-                        ctx.bubble_detections,
-                        group=bool(getattr(config.bubble_detection, "group_regions", False)),
-                    )
-                elif not defer_bubble_detection:
-                    await translator._detect_speech_bubbles(config, ctx, report_progress=False)
-                ctx._bubble_detection_done = True
-                self.write_json("text_regions_merged.json", serialize_regions(ctx.text_regions))
-
-            elif stage_id == "bubble_detection":
-                if ctx.img_rgb is None:
-                    raise RuntimeError("No image canvas available for bubble detection")
-                if not getattr(ctx, "text_regions", None):
-                    merged = self._document("text_regions_merged.json")
-                    if merged is not None:
-                        ctx.text_regions = deserialize_textblocks(merged)
-                await translator._detect_speech_bubbles(
-                    config,
-                    ctx,
-                    report_progress=False,
-                    precomputed_detections=precomputed_bubbles,
-                )
-                detections = getattr(ctx, "bubble_detections", None) or []
-                from ..detection.bubble import serialize_bubble_detections
-
-                self.write_json("bubble_detections.json", serialize_bubble_detections(detections))
-                if ctx.text_regions:
-                    self.write_json("text_regions_merged.json", serialize_regions(ctx.text_regions))
-                if detections:
-                    bubble_mask = np.zeros(ctx.img_rgb.shape[:2], np.uint8)
-                    for detection in detections:
-                        bubble_mask = np.maximum(bubble_mask, np.asarray(detection.mask, dtype=np.uint8))
-                    cv2.imwrite(str(self.path / "bubble_mask.png"), bubble_mask)
-
-            elif stage_id == "translation":
-                if not getattr(ctx, "text_regions", None):
-                    merged = self._document("text_regions_merged.json")
-                    if merged is not None:
-                        ctx.text_regions = deserialize_textblocks(merged)
-                if not getattr(ctx, "text_regions", None):
-                    raise RuntimeError("No text regions available for translation")
-                translation_request = [
-                    {"index": index, "text": getattr(region, "text", "")}
-                    for index, region in enumerate(ctx.text_regions)
-                ]
-                ctx.text_regions = await translator._run_text_translation(config, ctx)
-                self.record_translation(
-                    config,
-                    translation_request,
-                    [
-                        {"index": index, "translation": getattr(region, "translation", "")}
-                        for index, region in enumerate(ctx.text_regions or [])
-                    ],
-                    ctx,
-                )
-                self.write_json("translations.json", serialize_regions(ctx.text_regions if isinstance(ctx.text_regions, list) else []))
-
-            elif stage_id == "mask_generation":
-                if ctx.img_rgb is None:
-                    raise RuntimeError("No image canvas available for mask generation")
-                if not getattr(ctx, "text_regions", None):
-                    merged = self._document("text_regions_merged.json")
-                    if merged is not None:
-                        ctx.text_regions = deserialize_textblocks(merged)
-                if getattr(ctx, "mask_raw", None) is None:
-                    mask_raw_path = self.path / "mask_raw.png"
-                    if mask_raw_path.is_file():
-                        ctx.mask_raw = cv2.imread(str(mask_raw_path), cv2.IMREAD_GRAYSCALE)
-                if not getattr(ctx, "bubble_detections", None):
-                    bubble_data = self._document("bubble_detections.json")
-                    if bubble_data is not None:
-                        from ..detection.bubble import deserialize_bubble_detections
-
-                        ctx.bubble_detections = deserialize_bubble_detections(
-                            bubble_data, ctx.img_rgb.shape
-                        )
-                bundle = await run_cpu_stage(
-                    build_inpaint_masks,
-                    image=ctx.img_rgb,
-                    detector_textlines=getattr(ctx, "textlines", None),
-                    detector_mask=getattr(ctx, "mask_raw", None),
-                    text_regions=ctx.text_regions or [],
-                    bubble_detections=getattr(ctx, "bubble_detections", None),
-                    config=config,
-                    page_geometry=getattr(ctx, "page_geometry", None),
-                    priority=CPU_PRIORITY_BACKGROUND,
-                )
-                ctx.mask_bundle = bundle
-                ctx.mask_profile = bundle.profile
-                ctx.page_geometry = bundle.page_geometry
-                ctx.text_mask = bundle.text_mask
-                ctx.bubble_mask = bundle.bubble_cleanup_mask
-                ctx.detector_rescue_mask = bundle.detector_rescue_mask
-                ctx.bubble_residual_mask = bundle.bubble_residual_mask
-                ctx.protected_edge_mask = bundle.protected_edge_mask
-                ctx.mask = bundle.final_inpaint_mask
-                ctx.inpaint_mask = bundle.final_inpaint_mask
-                cv2.imwrite(str(self.path / "text_mask.png"), ctx.text_mask)
-                cv2.imwrite(str(self.path / "bubble_mask.png"), ctx.bubble_mask)
-                cv2.imwrite(str(self.path / "mask_final.png"), ctx.mask)
-                cv2.imwrite(str(self.path / "detector_rescue_mask.png"), ctx.detector_rescue_mask)
-                cv2.imwrite(str(self.path / "bubble_residual_mask.png"), ctx.bubble_residual_mask)
-                cv2.imwrite(str(self.path / "protected_bubble_edge.png"), ctx.protected_edge_mask)
-                self.write_json("profiling.json", bundle.profile)
-                ctx.cleanup_mask_diagnostics()
-                bundle = None
-
-            elif stage_id == "layout":
-                from ..rendering.layout import layout_page
-                from ..rendering.layout.frozen import serialize_frozen_layout
-
-                if getattr(ctx, "inpaint_mask", None) is None:
-                    mask_final_path = self.path / "mask_final.png"
-                    if mask_final_path.is_file():
-                        ctx.inpaint_mask = cv2.imread(str(mask_final_path), cv2.IMREAD_GRAYSCALE)
-                        ctx.mask = ctx.inpaint_mask
-                if not getattr(ctx, "text_regions", None):
-                    source = self._document("translations.json") or self._document("text_regions_merged.json")
-                    if source is not None:
-                        ctx.text_regions = deserialize_textblocks(source)
-                if not getattr(ctx, "text_regions", None):
-                    raise RuntimeError("No text regions available for layout")
-                bubble_data = self._document("bubble_detections.json")
-                if bubble_data is not None:
-                    from ..detection.bubble import deserialize_bubble_detections
-                    from ..rendering.bubble_layout import restore_bubble_assignments
-
-                    ctx.bubble_detections = deserialize_bubble_detections(bubble_data, ctx.img_rgb.shape)
-                    if ctx.bubble_detections:
-                        restore_bubble_assignments(ctx.text_regions, ctx.bubble_detections)
-                    ctx._bubble_detection_done = True
-                else:
-                    bubble_data = []
-                transform = getattr(getattr(config, "render", None), "transform_text_case", None)
-                if transform:
-                    for region in ctx.text_regions:
-                        if getattr(region, "translation", None):
-                            region.translation = transform(region.translation)
-                await run_cpu_stage(
-                    layout_page,
-                    ctx,
-                    config,
-                    getattr(translator, "font_path", None)
-                    or getattr(getattr(config, "render", None), "font_path", None),
-                    priority=CPU_PRIORITY_BACKGROUND,
-                )
-                font_path = (
-                    getattr(translator, "font_path", None)
-                    or getattr(getattr(config, "render", None), "font_path", None)
-                )
-                if not font_path:
-                    from ..rendering import get_default_eng_font
-                    font_path = get_default_eng_font()
-                self.write_json("layout.json", serialize_frozen_layout(
-                    ctx, config, font_path, bubble_data
-                ))
-
-            elif stage_id == "inpainting":
-                if ctx.img_rgb is None:
-                    raise RuntimeError("No image canvas available for inpainting")
-                if getattr(ctx, "mask", None) is None:
-                    mask_final_path = self.path / "mask_final.png"
-                    if mask_final_path.is_file():
-                        ctx.mask = cv2.imread(str(mask_final_path), cv2.IMREAD_GRAYSCALE)
-                if getattr(ctx, "protected_edge_mask", None) is None:
-                    protected_path = self.path / "protected_bubble_edge.png"
-                    if protected_path.is_file():
-                        ctx.protected_edge_mask = cv2.imread(str(protected_path), cv2.IMREAD_GRAYSCALE)
-                if not getattr(ctx, "text_regions", None):
-                    regions = self._document("translations.json") or self._document("text_regions_merged.json")
-                    if regions is not None:
-                        ctx.text_regions = deserialize_textblocks(regions)
-                ctx.img_inpainted = (
-                    precomputed_inpainting
-                    if precomputed_inpainting is not None
-                    else await translator._run_inpainting(config, ctx)
-                )
-                if ctx.img_inpainted is not None:
-                    save_jpeg(ctx.img_inpainted, self.path / "inpainted.jpg")
-                    (self.path / "inpainted.png").unlink(missing_ok=True)
-
-            elif stage_id == "rendering":
-                from ..rendering.layout.frozen import hydrate_layout, layout_input_fingerprints
-
-                if getattr(ctx, "img_inpainted", None) is None:
-                    inpainted_path = find_asset(self.path, "inpainted")
-                    if inpainted_path is not None:
-                        with Image.open(inpainted_path) as image:
-                            ctx.img_inpainted = np.array(image.convert("RGB"))
-                    elif ctx.img_rgb is not None:
-                        ctx.img_inpainted = ctx.img_rgb.copy()
-                if not getattr(ctx, "text_regions", None):
-                    translations = self._document("translations.json")
-                    if translations is not None:
-                        ctx.text_regions = deserialize_textblocks(translations)
-                if ctx.img_inpainted is None:
-                    raise RuntimeError("No inpainted canvas available for rendering")
-                layout_data = self._document("layout.json")
-                if layout_data is not None:
-                    bubble_data = self._document("bubble_detections.json")
-                    if bubble_data is not None:
-                        from ..detection.bubble import deserialize_bubble_detections
-                        from ..rendering.bubble_layout import restore_bubble_assignments
-
-                        ctx.bubble_detections = deserialize_bubble_detections(bubble_data, ctx.img_rgb.shape)
-                        if ctx.bubble_detections:
-                            restore_bubble_assignments(ctx.text_regions or [], ctx.bubble_detections)
-                        ctx._bubble_detection_done = True
-                    else:
-                        bubble_data = []
-                    font_path = (
-                        getattr(translator, "font_path", None)
-                        or getattr(getattr(config, "render", None), "font_path", None)
-                    )
-                    if not font_path:
-                        from ..rendering import get_default_eng_font
-                        font_path = get_default_eng_font()
-                    mask_path = self.path / "mask_final.png"
-                    if mask_path.is_file():
-                        ctx.inpaint_mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-                    input_fingerprints = layout_data.get("input_fingerprints", {}) if isinstance(layout_data, dict) else {}
-                    inputs = layout_input_fingerprints(
-                        ctx.text_regions or [], config, font_path, bubble_data,
-                        getattr(ctx.img_rgb, "shape", None),
-                        getattr(ctx, "inpaint_mask", None),
-                        input_fingerprints.get("mask") if getattr(ctx, "inpaint_mask", None) is None else None,
-                    )
-                    hydrate_layout(ctx, layout_data, inputs["fingerprint"])
-                    ctx._bubble_detection_done = True
-                    ctx._bubble_layout_ready = True
-                ctx.img_rendered = await translator._run_text_rendering(config, ctx)
-                ctx.result = dump_image(ctx.input, ctx.img_rendered, ctx.img_alpha)
-                self.write_json("text_regions.json", serialize_editor_regions(ctx.text_regions))
-                final_img = np.array(ctx.result)
-                save_jpeg(final_img, self.path / "final.jpg")
-                self.write_json("meta.json", translator._build_result_metadata(config, ctx))
-
-            self._finish(stage_id, "completed")
-            await self.checkpoint()
-            return {
-                "status": "ok",
-                "stage": stage_id,
-                "durationMs": stage.get("durationMs", 0),
-                "manifest": self.manifest,
-            }
-        except Exception as exc:
-            self._finish(stage_id, "failed", str(exc))
-            await self.checkpoint()
-            raise
+        return await execute_retry_stage(
+            self,
+            stage_id,
+            new_config,
+            translator,
+            runtime=sys.modules[__name__],
+            defer_bubble_detection=defer_bubble_detection,
+            precomputed_ocr=precomputed_ocr,
+            precomputed_upscale=precomputed_upscale,
+            precomputed_detection=precomputed_detection,
+            precomputed_bubbles=precomputed_bubbles,
+            precomputed_inpainting=precomputed_inpainting,
+            stage_already_running=stage_already_running,
+        )
 
     async def retry_from_stage(
         self,

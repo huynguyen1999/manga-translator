@@ -1,0 +1,47 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "ai-color-palette",
+        "value": "*",
+        "files": [
+          "front/app/components/PageDetailModal.tsx"
+        ],
+        "createdAt": "2026-09-24T17:56:06.004Z",
+        "reason": "DESIGN.md approves Indigo as the studio accent; the flagged headings sit on indigo-tinted detail panels."
+      },
+      {
+        "rule": "gray-on-color",
+        "value": "*",
+        "files": [
+          "front/app/components/ResultGallery.tsx"
+        ],
+        "createdAt": "2026-09-24T17:56:10.881Z",
+        "reason": "Flagged controls use readable zinc text on neutral or subtle theme surfaces and provide contrasting text for their colored hover/focus states; the detector cannot pair Tailwind variants."
+      },
+      {
+        "rule": "design-system-font",
+        "value": "bangers",
+        "createdAt": "2026-09-25T05:46:50.272Z",
+        "reason": "Existing editor font option for manga action text; referenced by the editor style selector."
+      },
+      {
+        "rule": "design-system-font",
+        "value": "comic neue",
+        "createdAt": "2026-09-25T05:46:50.292Z",
+        "reason": "Existing default comic lettering option in the editor; referenced by the editor style selector and canvas."
+      },
+      {
+        "rule": "ai-color-palette",
+        "value": "*",
+        "files": [
+          "front/app/features/page-detail/tabs/TimingTab.tsx"
+        ],
+        "createdAt": "2026-09-25T18:48:35.562Z",
+        "reason": "Agent: DESIGN.md documents Electric Iris indigo as the studio's primary accent; this timing heading follows the established palette."
+      }
+    ]
+  }
+}

@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import os
 import sys
+import types
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,32 +11,73 @@ _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-import types
-_mt_pkg = types.ModuleType("manga_translator")
-_mt_pkg.__path__ = [os.path.abspath(os.path.join(_repo_root, "manga_translator"))]
-sys.modules["manga_translator"] = _mt_pkg
-
-_trans_pkg = types.ModuleType("manga_translator.translators")
-_trans_pkg.__path__ = [os.path.abspath(os.path.join(_repo_root, "manga_translator", "translators"))]
-sys.modules["manga_translator.translators"] = _trans_pkg
-
-for _pkg in ["langcodes", "py3langid", "einops"]:
-    if _pkg not in sys.modules:
-        try:
-            __import__(_pkg)
-        except ImportError:
-            sys.modules[_pkg] = MagicMock()
-
-# Import translators modules cleanly via importlib
 _file_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "manga_translator", "translators", "gemini_keys.py"))
-_spec = importlib.util.spec_from_file_location("gemini_keys", _file_path)
+_spec = importlib.util.spec_from_file_location("_test_gemini_keys", _file_path)
 gemini_keys = importlib.util.module_from_spec(_spec)
-sys.modules["gemini_keys"] = gemini_keys
 _spec.loader.exec_module(gemini_keys)
 
 GeminiKeyManager = gemini_keys.GeminiKeyManager
 mask_key = gemini_keys.mask_key
 parse_gemini_keys = gemini_keys.parse_gemini_keys
+
+_MISSING = object()
+_original_modules = {}
+_preexisting_modules = set()
+_temporary_modules = set()
+
+
+def setUpModule():
+    global _preexisting_modules
+    _preexisting_modules = set(sys.modules)
+
+    packages = {
+        "manga_translator": os.path.join(_repo_root, "manga_translator"),
+        "manga_translator.translators": os.path.join(_repo_root, "manga_translator", "translators"),
+    }
+    for name, path in packages.items():
+        package = types.ModuleType(name)
+        package.__path__ = [path]
+        _original_modules[name] = sys.modules.get(name, _MISSING)
+        sys.modules[name] = package
+
+    for name in ["langcodes", "py3langid", "einops"]:
+        if name in sys.modules:
+            continue
+        try:
+            __import__(name)
+        except ImportError:
+            sys.modules[name] = MagicMock()
+            _temporary_modules.add(name)
+
+
+def tearDownModule():
+    for name in tuple(sys.modules):
+        if name not in _preexisting_modules and name.startswith("manga_translator."):
+            sys.modules.pop(name, None)
+    for name in _temporary_modules:
+        sys.modules.pop(name, None)
+    for name, original in _original_modules.items():
+        if original is _MISSING:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = original
+
+
+def _load_translator_keys():
+    path = os.path.join(_repo_root, "manga_translator", "translators", "keys.py")
+    module_name = "manga_translator.translators.keys"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    original = sys.modules.get(module_name, _MISSING)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if original is _MISSING:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = original
+    return module
 
 
 class TestGeminiTranslatorRotationIntegration(unittest.TestCase):
@@ -171,20 +213,14 @@ class TestGeminiTranslatorRotationIntegration(unittest.TestCase):
     def test_models_export_and_defaults(self):
         # Test without GEMINI_MODELS
         with patch("dotenv.load_dotenv"), patch.dict(os.environ, {}, clear=True), patch.dict(sys.modules, {"langcodes": MagicMock()}):
-            _keys_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "manga_translator", "translators", "keys.py"))
-            _spec_keys = importlib.util.spec_from_file_location("keys", _keys_path)
-            keys_module = importlib.util.module_from_spec(_spec_keys)
-            _spec_keys.loader.exec_module(keys_module)
+            keys_module = _load_translator_keys()
 
             self.assertEqual(keys_module.GEMINI_MODELS, ["gemini-1.5-flash-002"])
             self.assertEqual(keys_module.GEMINI_MODEL, "gemini-1.5-flash-002")
 
         # Test with GEMINI_MODELS specifying models to jump around
         with patch("dotenv.load_dotenv"), patch.dict(os.environ, {"GEMINI_MODELS": "gemini-1.5-flash-002, gemini-3.5-flash-lite, gemini-3.1-flash-lite"}, clear=True), patch.dict(sys.modules, {"langcodes": MagicMock()}):
-            _keys_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "manga_translator", "translators", "keys.py"))
-            _spec_keys = importlib.util.spec_from_file_location("keys", _keys_path)
-            keys_module = importlib.util.module_from_spec(_spec_keys)
-            _spec_keys.loader.exec_module(keys_module)
+            keys_module = _load_translator_keys()
 
             self.assertEqual(
                 keys_module.GEMINI_MODELS,

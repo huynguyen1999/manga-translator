@@ -19,9 +19,6 @@ from server.postgres_store import (
 
 
 class _GroupsPool:
-    async def fetchrow(self, *_args):
-        return {"total_groups": 1, "total_images": 1}
-
     async def fetch(self, *_args):
         return [{
             "id": "page-id",
@@ -38,6 +35,8 @@ class _GroupsPool:
             "page_count": 1,
             "latest_finished_at": dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
             "group_id": "group-id",
+            "total_groups": 1,
+            "total_images": 1,
         }]
 
 
@@ -126,6 +125,86 @@ class _ReconcilePool(_ManifestPool):
 
 
 class PostgresStoreGroupsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_untracked_result_indexing_remains_available_through_store_facade(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            folder = Path(tmpdir) / "new-result"
+            folder.mkdir()
+            (folder / "final.jpg").write_bytes(b"image")
+            database = PostgresStore("unused", tmpdir)
+            database.pool = SimpleNamespace(fetch=AsyncMock(return_value=[]))
+            database.sync_result_folder = AsyncMock(return_value={})
+
+            result = await database.index_untracked_results()
+
+        self.assertEqual(result, {"indexed": 1, "skipped": 0})
+        database.sync_result_folder.assert_awaited_once_with(
+            database.result_root / "new-result", generate_variants=False
+        )
+
+    async def test_page_state_queries_remain_available_through_store_facade(self):
+        database = PostgresStore("unused", "/tmp/results")
+        database.pool = SimpleNamespace(
+            fetchval=AsyncMock(side_effect=['[{"text":"Hi"}]', "page-a"]),
+            execute=AsyncMock(side_effect=["UPDATE 1", "UPDATE 1", "UPDATE 1"]),
+        )
+
+        self.assertEqual(await database.get_text_regions("page-a"), [{"text": "Hi"}])
+        self.assertTrue(await database.update_text_regions("page-a", [{"text": "Bye"}]))
+        self.assertTrue(await database.update_review_status("page-a", "approved", None))
+        self.assertTrue(await database.update_review_status(
+            "page-a", "approved", "2026-09-25T10:00:00Z"
+        ))
+        self.assertEqual(await database.get_page_id("page-a"), "page-a")
+        self.assertEqual(database.pool.execute.await_count, 3)
+
+    async def test_reorder_pages_remains_available_through_store_facade(self):
+        connection = SimpleNamespace(
+            transaction=lambda: _AsyncContext(None),
+            fetchval=AsyncMock(return_value="group-a"),
+            fetch=AsyncMock(return_value=[{"id": "page-a"}, {"id": "page-b"}]),
+            execute=AsyncMock(),
+            executemany=AsyncMock(),
+        )
+        database = PostgresStore("unused", "/tmp/results")
+        database.pool = SimpleNamespace(acquire=lambda: _AsyncContext(connection))
+
+        result = await database.reorder_pages("group-a", ["page-b", "page-a"])
+
+        self.assertEqual(result, [
+            {"id": "page-b", "pageOrder": 1},
+            {"id": "page-a", "pageOrder": 2},
+        ])
+        connection.executemany.assert_awaited_once_with(
+            "UPDATE pages SET page_order=$2, updated_at=now() WHERE id=$1",
+            [("page-b", 1), ("page-a", 2)],
+        )
+
+    async def test_page_order_compaction_respects_reserved_batch_positions(self):
+        connection = SimpleNamespace(
+            fetch=AsyncMock(side_effect=[
+                [{"id": "page-a"}, {"id": "page-b"}, {"id": "page-c"}],
+                [{"page_order": 1}, {"page_order": 3}],
+            ]),
+            executemany=AsyncMock(),
+        )
+
+        await PostgresStore._compact_page_order(connection, "group-a")
+
+        self.assertEqual(connection.executemany.await_args_list[0].args[1], [
+            ("page-a", -1), ("page-b", -2), ("page-c", -3),
+        ])
+        self.assertEqual(connection.executemany.await_args_list[1].args[1], [
+            ("page-a", 2), ("page-b", 4), ("page-c", 5),
+        ])
+
+    async def test_pipeline_stage_state_stays_available_through_store_facade(self):
+        state = [{"stage": "ocr", "status": "completed"}]
+        database = PostgresStore("unused", "/tmp/results")
+        database.pool = SimpleNamespace(fetch=AsyncMock(return_value=state))
+
+        self.assertEqual(await database.get_pipeline_stage_state("page-a"), state)
+        database.pool.fetch.assert_awaited_once()
+
     async def test_group_pages_exposes_relational_group_over_stale_metadata(self):
         database = PostgresStore("unused", "/tmp/results")
         database.pool = SimpleNamespace(fetch=AsyncMock(return_value=[{
@@ -241,6 +320,21 @@ class PostgresStoreGroupsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(inserts[0][5], '[{"text":"new"}]')
         saved_legacy = connection.executemany.await_args.args[1]
         self.assertEqual(saved_legacy[0][1], "translation_detail.json")
+
+    async def test_save_documents_creates_pipeline_run_for_unowned_folder(self):
+        connection = SimpleNamespace(
+            transaction=lambda: _AsyncContext(None),
+            fetchval=AsyncMock(return_value="run-id"),
+            execute=AsyncMock(),
+            executemany=AsyncMock(),
+        )
+        store = PostgresStore("unused", "/tmp/results")
+        store.pool = SimpleNamespace(acquire=lambda: _AsyncContext(connection))
+        with patch.object(store, "_document_owner", AsyncMock(return_value=None)):
+            await store.save_documents("new-folder", {"ocr.json": []})
+
+        self.assertIn("INSERT INTO pipeline_runs", connection.execute.await_args_list[0].args[0])
+        self.assertEqual(connection.executemany.await_args.args[1][0][0], "run-id")
 
     def test_manifest_stage_rows_normalize_and_filter_checkpoints(self):
         rows = _pipeline_manifest_stage_rows({
@@ -542,16 +636,18 @@ class PostgresStoreGroupsTest(unittest.IsolatedAsyncioTestCase):
     async def test_list_groups_with_status(self):
         database = PostgresStore("unused", "/tmp/results")
         pool = AsyncMock()
-        pool.fetchrow = AsyncMock(return_value={"total_groups": 10, "total_images": 50})
-        pool.fetch = AsyncMock(return_value=[])
+        pool.fetch = AsyncMock(return_value=[{
+            "group_id": None,
+            "total_groups": 10,
+            "total_images": 50,
+        }])
         database.pool = pool
 
         res = await database.list_groups(limit=25, offset=0, status="translated")
         self.assertEqual(res["totalGroups"], 10)
         self.assertEqual(res["totalImages"], 50)
-        # Verify effective_status parameter is passed as $3 in fetchrow and $5 in fetch
-        fetchrow_args = pool.fetchrow.call_args[0]
-        self.assertEqual(fetchrow_args[3], "translated")
+        pool.fetchrow.assert_not_awaited()
+        # Verify effective_status is passed as $5 in the grouped page query.
         fetch_args = pool.fetch.call_args[0]
         self.assertEqual(fetch_args[5], "translated")
         self.assertIn("tp.source_type = 'translated'", fetch_args[0])
@@ -589,6 +685,7 @@ class PostgresStoreGroupsTest(unittest.IsolatedAsyncioTestCase):
             "processing_count": 0,
             "failed_count": 0,
             "needs_review_count": 0,
+            "stage_items": "[]",
         }])
         database.pool = pool
         store = PostgresBatchStore(database, "/tmp/batches", "/tmp/results")

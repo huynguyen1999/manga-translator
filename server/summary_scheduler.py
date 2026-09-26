@@ -111,7 +111,11 @@ class SummaryScheduler:
             req_data = self.request_cls(
                 groupId=group_id,
                 mangaTitle=clean_title,
-                summaryModel=job.get("model"),
+                summaryModel=(
+                    f"{job['provider']}:{job['model']}"
+                    if job.get("provider") and job.get("model")
+                    else job.get("model")
+                ),
                 regenerate=bool(job.get("jobRegenerate", False)),
                 refreshText=bool(job.get("jobRefreshText", False)),
             )

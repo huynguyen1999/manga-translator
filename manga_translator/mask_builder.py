@@ -103,31 +103,24 @@ def _constrained_text_growth(
         for region in (text_regions or [])
         if (interior := getattr(region, "_bubble_interior", None)) is not None
     }.values())
+    free_text_seed = np.zeros_like(binary)
+    cv2.fillPoly(free_text_seed, [np.asarray(line, dtype=np.int32) for region in text_regions or []
+                                  if not np.any(getattr(region, "_bubble_interior", None))
+                                  for line in region.lines], 1)
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1)
     )
     height, width = seed.shape[:2]
     for label in range(1, count):
         x, y, w, h = [int(value) for value in stats[label, :4]]
-        x0, y0 = max(0, x - radius), max(0, y - radius)
-        x1, y1 = min(width, x + w + radius), min(height, y + h + radius)
+        x0, y0, x1, y1 = max(0, x - radius), max(0, y - radius), min(width, x + w + radius), min(height, y + h + radius)
         source = labels[y:y + h, x:x + w] == label
         component = (labels[y0:y1, x0:x1] == label).astype(np.uint8)
         grown = cv2.dilate(component, kernel) > 0
-        owners = [
-            interior
-            for interior in interiors
-            if np.any(source & (interior[y:y + h, x:x + w] > 0))
-        ]
-        if owners:
-            allowed = np.zeros(grown.shape, dtype=bool)
-            for interior in owners:
-                local = interior[y0:y1, x0:x1] > 0
-                np.logical_or(allowed, local, out=allowed)
-        else:
-            allowed = np.ones(grown.shape, dtype=bool)
-        result_crop = result[y0:y1, x0:x1]
-        result_crop[grown & allowed & (protected_edges[y0:y1, x0:x1] == 0)] = 255
+        has_free_text_source = np.any(source & (free_text_seed[y:y + h, x:x + w] > 0))
+        owners = [interior for interior in interiors if np.any(source & (interior[y:y + h, x:x + w] > 0))]
+        allowed = np.logical_or.reduce([interior[y0:y1, x0:x1] > 0 for interior in owners]) if owners and not has_free_text_source else np.ones(grown.shape, dtype=bool)
+        result[y0:y1, x0:x1][grown & allowed & (protected_edges[y0:y1, x0:x1] == 0)] = 255
     return result
 
 

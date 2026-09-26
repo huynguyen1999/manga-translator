@@ -70,6 +70,74 @@ export interface PipelineRerunRequest {
   settingsOverrides?: Partial<TranslationSettings>;
 }
 
+export const resultFor = (item: QueuedImage) =>
+  item.status !== "finished"
+    ? null
+    : item.result instanceof Blob && item.result.size < 1000 && item.folder
+    ? apiUrl(`/result/${item.folder}/final.png`)
+    : typeof item.result === "string" ? apiUrl(item.result) : (item.result || (item.folder ? apiUrl(`/result/${item.folder}/final.png`) : null));
+
+export const jobThumbnailCandidates = (item: QueuedImage): string[] => {
+  const result = resultFor(item);
+  const candidates = [
+    item.batchPreviewUrl ? apiUrl(item.batchPreviewUrl) : null,
+    item.folder ? apiUrl(`/result/${item.folder}/batch.webp`) : null,
+    typeof result === "string" ? result : null,
+  ];
+  return [...new Set(candidates.filter((url): url is string => Boolean(url)))];
+};
+
+const getBatchTimestamp = (batch: TranslationBatch): number => {
+  const t = batch.addedAt instanceof Date ? batch.addedAt.getTime() : typeof batch.addedAt === "number" ? batch.addedAt : 0;
+  if (!Number.isNaN(t) && t > 0) return t;
+  const u = batch.updatedAt instanceof Date ? batch.updatedAt.getTime() : typeof batch.updatedAt === "number" ? batch.updatedAt : 0;
+  if (!Number.isNaN(u) && u > 0) return u;
+  return 0;
+};
+
+const getStatusRank = (status: TranslationBatch["status"]): number => {
+  switch (status) {
+    case "processing":
+    case "uploading":
+    case "stopping":
+      return 0; // Active working batches first
+    case "waiting":
+    case "paused":
+      return 1; // Queued/paused next
+    case "error":
+      return 2; // Errors
+    case "completed":
+    default:
+      return 3; // Completed summaries
+  }
+};
+
+export const sortBatchesLatestFirst = (batches: TranslationBatch[]): TranslationBatch[] =>
+  batches
+    .filter((batch) => !batch.dismissed)
+    .slice()
+    .sort((a, b) => {
+      // 1. Priority batches on top
+      const prioDiff = (b.priority ? 1 : 0) - (a.priority ? 1 : 0);
+      if (prioDiff !== 0) return prioDiff;
+
+      // 2. Active batches (uploading/processing/waiting) before completed
+      const rankDiff = getStatusRank(a.status) - getStatusRank(b.status);
+      if (rankDiff !== 0) return rankDiff;
+
+      // 3. Latest submission on top
+      const timeDiff = getBatchTimestamp(b) - getBatchTimestamp(a);
+      if (timeDiff !== 0) return timeDiff;
+
+      return b.id.localeCompare(a.id);
+    });
+
+export const canChangeBatchTranslator = (batch: TranslationBatch): boolean =>
+  ["waiting", "processing", "paused"].includes(batch.status) ||
+  (batch.status === "error" && (
+    (batch.failedCount ?? 0) > 0 || batch.items.some((item) => item.status === "error")
+  ));
+
 export const getBatchKind = (batch: { id: string; kind?: TranslationBatchKind | null }): TranslationBatchKind =>
   batch.kind ?? (batch.id.startsWith("upload-") || batch.id.startsWith("original-") ? "manga-upload" : batch.id.startsWith("rerun-") || batch.id.startsWith("rerender-") ? "pipeline-rerun" : "translation");
 
@@ -485,7 +553,10 @@ export const updateBatchItem = async (batchId: string, itemId: string, excludeCo
 
 export const removeBatchItem = async (batchId: string, itemId: string) => {
   const response = await fetch(apiUrl(`/api/batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemId)}`), { method: "DELETE" });
-  if (!response.ok) throw new Error(`Page removal failed (${response.status})`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.detail || `Page removal failed (${response.status})`);
+  }
 };
 
 export const removeServerBatch = async (batchId: string) => {

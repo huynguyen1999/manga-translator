@@ -1140,6 +1140,52 @@ class PipelineStepRunnerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             _validate_render_integrity(ctx, strict=True)
 
+    def test_render_integrity_accepts_frozen_free_text_after_workspace_cleanup(self):
+        ctx = Context()
+        ctx.img_rgb = np.full((64, 64, 3), 255, dtype=np.uint8)
+        ctx.inpaint_mask = np.zeros((64, 64), dtype=np.uint8)
+        cv2.rectangle(ctx.inpaint_mask, (10, 10), (30, 30), 255, -1)
+        region = TextBlock(
+            lines=np.array([[[10, 10], [30, 10], [30, 30], [10, 30]]], dtype=np.int32),
+            texts=["原文"], translation="TRANSLATION", target_lang="ENG",
+        )
+        region.placement_mode = PlacementMode.FREE_TEXT
+        region._free_text_solver_applied = True
+        region._layout_input_text = "TRANSLATION"
+        region._bubble_box = (10, 10, 30, 30)
+        region._bubble_points = np.array([[10, 10], [30, 10], [30, 30], [10, 30]])
+        region._free_text_zone = None  # layout_page deliberately releases this search workspace
+        ctx.text_regions = [region]
+
+        self.assertEqual(_validate_render_integrity(ctx, strict=True), [])
+
+    def test_render_integrity_accepts_free_text_suppressed_for_review(self):
+        ctx = Context()
+        region = TextBlock(
+            lines=np.array([[[10, 10], [30, 10], [30, 30], [10, 30]]], dtype=np.int32),
+            texts=["原文"], translation="TRANSLATION", target_lang="ENG",
+        )
+        region.placement_mode = PlacementMode.FREE_TEXT
+        region._render_suppressed = True
+        region.review_required = True
+        region.review_reason = "no_joint_layout"
+        ctx.text_regions = [region]
+
+        self.assertEqual(_validate_render_integrity(ctx, strict=True), [])
+
+    def test_render_integrity_accepts_unchanged_filtered_text_without_erasure(self):
+        ctx = Context()
+        region = TextBlock(
+            lines=np.array([[[10, 10], [30, 10], [30, 30], [10, 30]]], dtype=np.int32),
+            texts=["PAL"], translation="PAL", target_lang="ENG",
+        )
+        region.placement_mode = PlacementMode.FREE_TEXT
+        region.review_required = True
+        region.review_reason = "Translation identical to original"
+        ctx.text_regions = [region]
+
+        self.assertEqual(_validate_render_integrity(ctx, strict=True), [])
+
     def test_free_text_damage_aware_placement_conceals_erased_area(self):
         ctx = Context()
         shape = (240, 240)
@@ -1167,12 +1213,13 @@ class PipelineStepRunnerTests(unittest.TestCase):
         qa = free_region._solver_qa
         self.assertIn("damage_coverage", qa)
         self.assertIn("core_damage_coverage", qa)
-        self.assertGreaterEqual(qa["damage_coverage"], 0.10)
-        self.assertAlmostEqual(qa["damage_coverage"], qa["coverage_ink"])
-        self.assertGreater(qa["coverage_block"], qa["damage_coverage"])
-        self.assertGreaterEqual(qa["core_damage_coverage"], 0.15)
+        self.assertEqual(qa["damage_coverage"], 1.0)
+        self.assertEqual(qa["cleanup_mask_coverage"], 1.0)
+        self.assertGreater(qa["coverage_ink"], 0.0)
+        self.assertGreater(qa["coverage_block"], qa["coverage_ink"])
+        self.assertGreaterEqual(qa["placement_anchor_coverage"], 0.10)
         self.assertLessEqual(qa["center_error_px"], 2.0)
-        self.assertLessEqual(free_region.font_size, round(14 * 1.15))
+        self.assertLessEqual(free_region.font_size, 14)
 
     def test_shadow_compare_returns_the_exhaustive_layout(self):
         def run(shadow):

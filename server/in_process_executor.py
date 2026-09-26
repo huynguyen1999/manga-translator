@@ -127,6 +127,25 @@ class InProcessExecutorInstance:
             lambda: self.translator.extract_text(image, config)
         )
 
+    async def extract_text_batch(self, images_with_configs, batch_size: int, on_progress=None) -> List[Context]:
+        self.translator._is_streaming_mode = False
+        api_loop = asyncio.get_running_loop()
+
+        async def report_progress(stage, index):
+            if on_progress is None:
+                return
+            # The translator runs on its own loop; summary state belongs to the API loop.
+            future = asyncio.run_coroutine_threadsafe(on_progress(stage, index), api_loop)
+            await asyncio.wrap_future(future)
+
+        return await self._run_translation(
+            lambda: self.translator.extract_text_batch(
+                images_with_configs,
+                batch_size=batch_size,
+                on_progress=report_progress if on_progress is not None else None,
+            )
+        )
+
     async def sent_stream(self, image: Image.Image, config: Config, sender: NotifyType):
         loop = asyncio.get_running_loop()
 

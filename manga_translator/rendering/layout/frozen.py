@@ -12,7 +12,12 @@ import numpy as np
 from ...pipeline.stages import PipelineStage, fingerprint, settings_for_stage
 from ..bubble_layout import encode_rendered_box, encode_safe_shape
 from .models import FrozenLayout, FrozenLayoutSegment, FrozenLine, FrozenRegionLayout
+from .render_status import flag_review, flag_suppressed_review, frozen_render_state
 from .regions import prepare_regions
+from ...utils import resolve_render_content
+
+
+LAYOUT_ALGORITHM_REVISION = 3
 
 
 def _jsonable(value):
@@ -60,8 +65,13 @@ def layout_input_fingerprints(
         source_font_size = getattr(region, "source_font_size", None)
         if source_font_size is None:
             source_font_size = getattr(region, "font_size", None)
-        text = str(getattr(region, "translation", "") or "")
-        translations.append({"region_id": region_id, "text": transform(text) if transform else text})
+        text = resolve_render_content(region, transform=transform)
+        translations.append({
+            "region_id": region_id,
+            "text": text,
+            "policy": getattr(region, "translation_policy", None),
+            "source_text": getattr(region, "source_text_snapshot", ""),
+        })
         associations.append({"region_id": region_id, "bubble_id": getattr(region, "bubble_id", None)})
         source_geometry.append({
             "region_id": region_id,
@@ -90,6 +100,7 @@ def layout_input_fingerprints(
     )
     bubble_config = getattr(config, "bubble_detection", None)
     inputs = {
+        "algorithm": LAYOUT_ALGORITHM_REVISION,
         "translations": fingerprint(translations),
         "source_geometry": fingerprint(source_geometry),
         "styles": fingerprint(styles),
@@ -116,6 +127,7 @@ def serialize_frozen_layout(ctx, config, font_path, bubble_detections=None) -> d
     from .. import fg_bg_compare
 
     regions = []
+    render_ownership: dict[str, str] = {}
     for region in getattr(ctx, "text_regions", []) or []:
         segments = []
         all_lines = []
@@ -183,9 +195,20 @@ def serialize_frozen_layout(ctx, config, font_path, bubble_detections=None) -> d
         interior = getattr(region, "_bubble_interior", None)
         placement_mode = getattr(region, "placement_mode", None)
         placement_mode = getattr(placement_mode, "value", placement_mode)
-        state = "FROZEN" if segments else "UNSOLVED"
+        state, render_content = frozen_render_state(region, segments)
+        region_id = str(getattr(region, "region_id", "") or "")
+        source_region_ids = list(getattr(region, "source_region_ids", []) or [region_id])
+        duplicate_ids = [source_id for source_id in source_region_ids if source_id in render_ownership]
+        if state == "FROZEN" and not getattr(region, "_render_suppressed", False):
+            if duplicate_ids:
+                region._render_suppressed = True
+                flag_review(region, f"duplicate render ownership: {', '.join(duplicate_ids)}")
+                state = "UNSOLVED"
+                segments = []
+            else:
+                render_ownership.update({source_id: region_id for source_id in source_region_ids})
         regions.append(FrozenRegionLayout(
-            region_id=str(getattr(region, "region_id", "") or ""),
+            region_id=region_id,
             bubble_id=str(getattr(region, "bubble_id", "") or "") or None,
             state=state,
             placement_mode=str(placement_mode) if placement_mode is not None else None,
@@ -208,6 +231,12 @@ def serialize_frozen_layout(ctx, config, font_path, bubble_detections=None) -> d
             hyphenation=dict(getattr(region, "_hyphenation_diagnostics", {}) or {}),
             render_suppressed=bool(getattr(region, "_render_suppressed", False)),
             bubble_safe_shape=encode_safe_shape(interior) if interior is not None else getattr(region, "bubble_safe_shape", None),
+            source_region_ids=source_region_ids,
+            source_text_snapshot=str(getattr(region, "source_text_snapshot", "") or ""),
+            render_content=render_content,
+            render_content_sha256=hashlib.sha256(render_content.encode("utf-8")).hexdigest(),
+            qa_metrics=dict(getattr(region, "_solver_qa", {}) or {}),
+            free_text_cleanup_mask=getattr(region, "free_text_cleanup_mask", None),
         ))
 
     layout_mask = getattr(ctx, "inpaint_mask", None)
@@ -218,7 +247,9 @@ def serialize_frozen_layout(ctx, config, font_path, bubble_detections=None) -> d
         getattr(getattr(ctx, "img_rgb", None), "shape", None),
         layout_mask,
     )
-    return asdict(FrozenLayout(2, inputs["fingerprint"], inputs, regions))
+    diagnostics = getattr(getattr(ctx, "layout", None), "diagnostics", None)
+    diagnostics_doc = asdict(diagnostics) if diagnostics is not None else {}
+    return asdict(FrozenLayout(2, inputs["fingerprint"], inputs, regions, render_ownership, diagnostics_doc))
 
 
 def hydrate_layout(ctx, persisted_layout, expected_fingerprint: str | None = None) -> None:
@@ -239,6 +270,13 @@ def hydrate_layout(ctx, persisted_layout, expected_fingerprint: str | None = Non
         region = by_id.get(str(item.get("region_id", "")))
         if region is None:
             continue
+        if "render_content" in item:
+            expected_content = str(item.get("render_content", "") or "")
+            digest = hashlib.sha256(expected_content.encode("utf-8")).hexdigest()
+            if digest != item.get("render_content_sha256", digest):
+                raise ValueError(f"Frozen render content checksum failed for {item.get('region_id', '')}")
+            if resolve_render_content(region) != expected_content:
+                raise ValueError(f"Frozen render content is stale for {item.get('region_id', '')}")
         if item.get("source_font_size") is not None:
             region.source_font_size = int(item["source_font_size"] or 0)
         elif getattr(region, "source_font_size", None) is None:
@@ -257,6 +295,12 @@ def hydrate_layout(ctx, persisted_layout, expected_fingerprint: str | None = Non
         region._solver_status = item.get("solver_status")
         region._hyphenation_diagnostics = item.get("hyphenation") or {}
         region._render_suppressed = bool(item.get("render_suppressed", False))
+        flag_suppressed_review(region)
+        region.source_region_ids = list(item.get("source_region_ids") or getattr(region, "source_region_ids", []) or [])
+        if item.get("source_text_snapshot") is not None:
+            region.source_text_snapshot = str(item.get("source_text_snapshot") or "")
+        region._solver_qa = dict(item.get("qa_metrics") or {})
+        region.free_text_cleanup_mask = item.get("free_text_cleanup_mask")
         if item.get("fg_color") is not None:
             region.fg_colors = item["fg_color"]
         if item.get("bg_color") is not None:

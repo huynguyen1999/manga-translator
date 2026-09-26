@@ -540,6 +540,9 @@ class TestFrontendBackendApiSync(unittest.TestCase):
         self.assertEqual(regions[0]["text"], "Updated bubble text")
 
     def test_layout_preview_flows_text_across_linked_segments(self):
+        Image.new("RGB", (320, 180), color="blue").save(
+            self.results_dir / "folder_alpha_1" / "final.png"
+        )
         payload = {
             "translation": "One day, we met again.",
             "font_size": 16,

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import type { MangaGroupSummary, TranslationBatch } from "@/types";
+import { createServerBatchEventHandlers } from "@/features/batches/useServerBatchEvents";
 import type { ServerBatch } from "./serverBatches";
 import { mergeServerBatches, toTranslationBatch } from "./serverBatches";
 
@@ -101,5 +103,40 @@ assert.equal(finishedServerBatch.items[0].result, "/result/2026-09-20_001/final.
 assert.equal(finishedServerBatch.items[1].status, "finished");
 assert.equal(finishedServerBatch.items[1].folder, "2026-09-20_002");
 assert.equal(finishedServerBatch.items[1].result, "/result/2026-09-20_002/final.jpg");
+
+const { items: _items, ...remoteSummary } = serverBatch(false);
+const localBatches = {
+  current: [toTranslationBatch({ ...remoteSummary, status: "processing" })],
+};
+const pageCache = new Map<string, {
+  groups: MangaGroupSummary[];
+  totalGroups: number;
+  totalImages: number;
+}>();
+pageCache.set("cached-page", { groups: [], totalGroups: 0, totalImages: 0 });
+let galleryRevision = 0;
+let summaryRefreshes = 0;
+const eventHandlers = createServerBatchEventHandlers({
+  translationBatchSnapshotRef: { current: null },
+  optimisticBatchTranslatorsRef: { current: new Map() },
+  optimisticDismissedBatchIdsRef: { current: new Set() },
+  optimisticDeletedBatchIdsRef: { current: new Set() },
+  setTranslationBatches: (update) => {
+    localBatches.current = typeof update === "function" ? update(localBatches.current) : update;
+  },
+  galleryPageCacheRef: { current: pageCache },
+  setGalleryRevision: (update) => {
+    galleryRevision = typeof update === "function" ? update(galleryRevision) : update;
+  },
+  loadMangaSummaries: async () => { summaryRefreshes += 1; },
+});
+eventHandlers.onBatches([remoteSummary]);
+assert.equal(localBatches.current[0].status, "completed");
+assert.equal(pageCache.size, 0);
+assert.equal(galleryRevision, 1);
+assert.equal(summaryRefreshes, 1);
+eventHandlers.onBatches([remoteSummary]);
+assert.equal(galleryRevision, 1);
+assert.equal(summaryRefreshes, 1);
 
 console.log("batch detail merge tests passed successfully!");

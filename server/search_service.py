@@ -145,6 +145,18 @@ class SearchService:
         if result == "UPDATE 0":
             raise ValueError("No active embedding job with that ID")
 
+    async def remove_group(self, group_id):
+        async with self.submit_lock:
+            if self.task and not self.task.done():
+                raise ValueError("Wait for embedding to finish before removing indexed data")
+            from qdrant_client import models
+            async with self.write_lock:
+                await self.ensure_collection()
+                await self.qdrant().delete(COLLECTION, models.FilterSelector(filter=models.Filter(must=[
+                    models.FieldCondition(key="groupId", match=models.MatchValue(value=group_id)),
+                ])), wait=True)
+                return await self.db.delete_sources(group_id)
+
     async def run_job(self, job_id):
         try:
             await self.db.job_state(job_id, "running")

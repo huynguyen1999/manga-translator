@@ -224,7 +224,6 @@ class SearchResult:
 @dataclass
 class LayoutCandidate:
     """One solver candidate before it is committed to a region."""
-
     font_size: int
     y_origin: int
     line_spacing: float
@@ -234,6 +233,7 @@ class LayoutCandidate:
     status: str = "ok"
     valid: bool = True
     qa: Dict[str, float] = field(default_factory=dict)
+    layout_bounds: Optional[Tuple[int, int, int, int]] = None
 
 
 @dataclass
@@ -314,6 +314,12 @@ class FrozenRegionLayout:
     hyphenation: Dict[str, Any] = field(default_factory=dict)
     render_suppressed: bool = False
     bubble_safe_shape: Optional[Any] = None
+    source_region_ids: List[str] = field(default_factory=list)
+    source_text_snapshot: str = ""
+    render_content: str = ""
+    render_content_sha256: str = ""
+    qa_metrics: Dict[str, Any] = field(default_factory=dict)
+    free_text_cleanup_mask: Optional[Any] = None
 
 
 @dataclass
@@ -322,6 +328,8 @@ class FrozenLayout:
     input_fingerprint: str
     input_fingerprints: Dict[str, str]
     regions: List[FrozenRegionLayout] = field(default_factory=list)
+    render_ownership: Dict[str, str] = field(default_factory=dict)
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

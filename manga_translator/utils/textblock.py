@@ -11,7 +11,7 @@ try:
 except ImportError:
     langid = None
 
-from .generic2 import color_difference, is_right_to_left_char, is_valuable_char
+from .generic2 import color_difference, is_right_to_left_char, is_valuable_char, resolve_render_content
 
 # determines render direction
 LANGUAGE_ORIENTATION_PRESETS = {
@@ -93,6 +93,8 @@ class TextBlock(object):
                     self.text += txt
                 else:
                     self.text += ' ' + txt
+        self.source_text_snapshot = str(kwargs.get("source_text_snapshot", self.text) or "")
+        self.source_geometry = copy.deepcopy(kwargs.get("source_geometry")) if kwargs.get("source_geometry") else None
         self.prob = prob
 
         # Identity/provenance belongs to the region model, not to a dev runner.
@@ -113,6 +115,12 @@ class TextBlock(object):
                 'source_text': str(self.text or ''),
                 'reading_order': 0,
             }]
+        if self.source_geometry is None:
+            self.source_geometry = {
+                "polygons": self.lines.tolist(),
+                "bbox": self.source_regions[0]["bbox"] if self.source_regions else [],
+                "centroid": self.source_regions[0]["centroid"] if self.source_regions else [],
+            }
 
         self.translation = translation
 
@@ -320,7 +328,7 @@ class TextBlock(object):
         return self._source_lang
 
     def get_translation_for_rendering(self):
-        text = self.translation
+        text = resolve_render_content(self)
         if self.direction.endswith('r'):
             # The render direction is right to left so left-to-right
             # text/number chunks need to be reversed to look normal.

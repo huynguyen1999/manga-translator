@@ -141,6 +141,17 @@ export default function SearchLab() {
     finally { setBusy(false); }
   };
 
+  const removeIndex = async (item: SearchManga) => {
+    if (!window.confirm(`Remove all Search Lab embeddings for “${item.title}”? The manga and its pages will stay in Gallery.`)) return;
+    setBusy(true); setError('');
+    try {
+      await searchRequest(`/manga/${encodeURIComponent(item.id)}/index`, undefined, undefined, 'DELETE');
+      setResponse(null);
+      setRefresh(value => value + 1);
+    } catch (caught) { setError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
   const search = async (nextMode = mode) => {
     if (!query.trim()) return;
     queryAbort.current?.abort();
@@ -178,6 +189,8 @@ export default function SearchLab() {
               onChange={event => { setStatusFilter(event.target.value as SearchStatusFilter); setOffset(0); }}
             >
               <option value="all">All manga</option>
+              <option value="indexed">Indexed</option>
+              <option value="not-indexed">Not indexed</option>
               <option value="summarized">Summarized</option>
               <option value="not-summarized">Not summarized</option>
             </select>
@@ -196,11 +209,12 @@ export default function SearchLab() {
               <input type="checkbox" className="mt-1 h-4 w-4 shrink-0 accent-indigo-600" checked={selected.has(item.id)} onChange={event => { const checked = event.target.checked; setSelected(previous => { const next = new Set(previous); if (checked) next.add(item.id); else next.delete(item.id); return next; }); }} />
               <MangaThumbnail coverUrl={item.coverUrl} title={item.title} />
               <span className="min-w-0 flex-1"><span className="block break-words text-sm font-medium">{item.title}</span>
-                <span className="mt-1 block text-xs leading-5 text-zinc-600 dark:text-zinc-400">{item.indexedPages} / {item.pageCount} pages indexed · {item.originalCount} originals<br />Summary: {item.summaryOutdated || item.summaryStale ? 'outdated' : item.summaryIndexed ? 'indexed' : item.summaryAvailable ? 'ready to embed' : 'missing'}</span>
+                <span className="mt-1 block text-xs leading-5 text-zinc-600 dark:text-zinc-400"><span className="font-medium">{item.summaryIndexed || item.indexedPages ? 'Indexed' : 'Not indexed'}</span> · {item.indexedPages} / {item.pageCount} pages · {item.originalCount} originals<br />Summary: {item.summaryOutdated || item.summaryStale ? 'outdated' : item.summaryIndexed ? 'indexed' : item.summaryAvailable ? 'ready to embed' : 'missing'}</span>
                 {item.outdated && <span className="block text-xs text-amber-800 dark:text-amber-300">Refresh embeddings to use current content</span>}
                 {(!item.summaryAvailable || item.summaryStale) && <Link className="mt-1.5 inline-block text-xs text-indigo-700 underline underline-offset-2 dark:text-indigo-300" onClick={event => event.stopPropagation()} to={`/gallery/manga/${encodeURIComponent(item.id)}`}>Generate summary in Gallery</Link>}
               </span>
             </label>
+            {(item.summaryIndexed || item.indexedPages > 0) && <button className="ml-20 mt-2 rounded-md px-2 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 disabled:opacity-50 dark:text-rose-300 dark:hover:bg-rose-950/40" aria-label={`Remove indexed data for ${item.title}`} title={activeJob ? 'Wait for embedding to finish' : undefined} disabled={busy || !!activeJob} onClick={() => void removeIndex(item)}>Remove indexed data</button>}
           </div>)}
         </div>
         <div className="flex items-center justify-between gap-2 text-xs">

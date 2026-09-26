@@ -343,7 +343,7 @@ class BatchStore:
 
         if self.result_root.is_dir():
             for folder in self.result_root.iterdir():
-                if not folder.is_dir() or final_file(folder) is None:
+                if not folder.is_dir() or (folder / ".ai-case").is_file() or final_file(folder) is None:
                     continue
                 try:
                     metadata = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
@@ -418,6 +418,7 @@ class BatchStore:
                     "name": item["name"],
                     "mangaGroupId": item.get("mangaGroupId"),
                     "pageId": item.get("pageId"),
+                    "isolatedRerun": bool(item.get("isolatedRerun", False)),
                     "pageOrder": item.get("pageOrder"),
                     "sourcePath": item.get("sourcePath"),
                     "mangaTitle": item.get("mangaTitle", manifest.get("mangaTitle", "Ungrouped")),
@@ -750,6 +751,9 @@ class BatchStore:
             if not manifest_path.is_file():
                 continue
             manifest = self._read_manifest(manifest_path)
+            if manifest.get("status") == "stopping":
+                shutil.rmtree(path)
+                continue
             changed = False
             for item in manifest.get("items", []):
                 if item.get("status") != "processing":

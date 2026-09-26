@@ -9,6 +9,10 @@ from pathlib import Path
 
 TEXT_MODEL = "BAAI/bge-small-en-v1.5"
 TEXT_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
+QWEN_TEXT_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+QWEN_TEXT_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+GTE_TEXT_MODEL = "thenlper/gte-base"
+GTE_TEXT_REVISION = "8bd7d0ccf716162b629db940a086503c6a06419a"
 IMAGE_MODEL = "google/siglip-base-patch16-256"
 IMAGE_REVISION = "b078df89e446d623010d890864d4207fe6399f61"
 PROFILE = "bge-small-siglip-base-v1"
@@ -16,6 +20,12 @@ COLLECTION = "manga_search_v1"
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 VECTOR_NAMES = {"summary": "summary_dense", "image": "page_image"}
 DIMENSIONS = {"summary": 384, "image": 768}
+TEXT_MODEL_OPTIONS = {
+    "bge": (TEXT_MODEL, TEXT_REVISION, 384),
+    "qwen3": (QWEN_TEXT_MODEL, QWEN_TEXT_REVISION, 1024),
+    "gte": (GTE_TEXT_MODEL, GTE_TEXT_REVISION, 768),
+}
+QWEN_QUERY_INSTRUCTION = "Given a manga search query, retrieve relevant manga summaries that match its meaning."
 
 
 def fingerprint(value: str | bytes) -> str:
@@ -89,10 +99,14 @@ def prepare_image(path: Path):
 class SearchEncoders:
     """Production calls run on the shared model executor; local tools use it directly."""
 
-    def __init__(self, device=None):
+    def __init__(self, device=None, text_model="bge"):
+        if text_model not in TEXT_MODEL_OPTIONS:
+            raise ValueError(f"Unknown text model: {text_model}")
         self.models = {}
         self.processors = {}
         self.device = device
+        self.text_model = text_model
+        self.text_dimension = TEXT_MODEL_OPTIONS[text_model][2]
 
     def _load(self, modality):
         import torch
@@ -106,10 +120,12 @@ class SearchEncoders:
             else:
                 self.device = "cpu"
         if modality not in self.models:
-            name, revision = (TEXT_MODEL, TEXT_REVISION) if modality == "summary" else (IMAGE_MODEL, IMAGE_REVISION)
+            name, revision, _ = (TEXT_MODEL_OPTIONS[self.text_model] if modality == "summary"
+                                 else (IMAGE_MODEL, IMAGE_REVISION, None))
             loader = AutoTokenizer if modality == "summary" else AutoProcessor
             cache = os.getenv("MANGA_SEARCH_MODEL_CACHE", str(Path(__file__).resolve().parents[1] / "models" / "search"))
-            self.processors[modality] = loader.from_pretrained(name, revision=revision, cache_dir=cache)
+            options = {"padding_side": "left"} if modality == "summary" and self.text_model == "qwen3" else {}
+            self.processors[modality] = loader.from_pretrained(name, revision=revision, cache_dir=cache, **options)
             self.models[modality] = AutoModel.from_pretrained(name, revision=revision, cache_dir=cache).eval().to(self.device)
         return self.models[modality], self.processors[modality]
 
@@ -118,7 +134,12 @@ class SearchEncoders:
 
         model, processor = self._load(modality)
         if modality == "summary":
-            texts = [QUERY_PREFIX + value if query else value for value in values]
+            if query and self.text_model == "qwen3":
+                texts = [f"Instruct: {QWEN_QUERY_INSTRUCTION}\nQuery: {value}" for value in values]
+            elif query and self.text_model == "bge":
+                texts = [QUERY_PREFIX + value for value in values]
+            else:
+                texts = values
             for value in texts:
                 validate_query(value, processor, 512)
             inputs = processor(texts, padding=True, truncation=False, return_tensors="pt").to(self.device)
@@ -130,7 +151,14 @@ class SearchEncoders:
             inputs = processor(images=[prepare_image(Path(value)) for value in values], return_tensors="pt").to(self.device)
         with torch.inference_mode():
             if modality == "summary":
-                features = model(**inputs).last_hidden_state[:, 0]
+                hidden = model(**inputs).last_hidden_state
+                if self.text_model == "qwen3":
+                    features = hidden[:, -1]
+                elif self.text_model == "gte":
+                    mask = inputs["attention_mask"].unsqueeze(-1)
+                    features = (hidden * mask).sum(dim=1) / mask.sum(dim=1)
+                else:
+                    features = hidden[:, 0]
             elif query:
                 features = model.get_text_features(**inputs)
             else:
@@ -138,7 +166,8 @@ class SearchEncoders:
             if not isinstance(features, torch.Tensor):
                 features = features.pooler_output
             vectors = features.float().cpu().tolist()
-        return [validate_vector(vector, DIMENSIONS[modality]) for vector in vectors]
+        dimension = self.text_dimension if modality == "summary" else DIMENSIONS[modality]
+        return [validate_vector(vector, dimension) for vector in vectors]
 
     def chunks(self, text):
         _, tokenizer = self._load("summary")

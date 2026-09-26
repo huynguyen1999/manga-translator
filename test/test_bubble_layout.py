@@ -132,7 +132,9 @@ class BubbleLayoutTests(unittest.TestCase):
         self.assertEqual(mask[85, 125], 255)
         self.assertEqual(mask[15, 150], 0)
         x1, y1, x2, y2 = map(int, group.layout_bounds)
-        self.assertTrue(np.all(group._bubble_interior[y1:y2+1, x1:x2+1]))
+        alpha = group._bubble_box[:, :, 3] > 0
+        interior = group._bubble_interior[y1:y2, x1:x2] > 0
+        self.assertFalse(np.any(alpha & ~interior))
 
     def test_missing_column_flags_review_and_prepares_render(self):
         image = page()
@@ -165,7 +167,8 @@ class BubbleLayoutTests(unittest.TestCase):
         groups = prepare_bubbles(page(), [block(160, "A long translation " * 200), block(120)], FONT, CONFIG)
         self.assertEqual(groups[0].review_reason, "text_does_not_fit")
         self.assertTrue(groups[0].review_required)
-        self.assertIsNotNone(groups[0]._bubble_box)
+        self.assertTrue(groups[0]._render_suppressed)
+        self.assertFalse(hasattr(groups[0], "_bubble_box"))
 
     def test_open_background_is_not_merged(self):
         image = np.full((260, 300, 3), 255, np.uint8)
@@ -584,6 +587,23 @@ class BubbleLayoutTests(unittest.TestCase):
         self.assertFalse(groups[0].review_required, groups[0].review_reason)
         self.assertGreaterEqual(groups[0].font_size, 22)
 
+    def test_calibrated_source_font_is_not_inflated_for_long_translation(self):
+        image = np.full((400, 400, 3), 80, np.uint8)
+        cv2.ellipse(image, (200, 200), (140, 160), 0, 0, 360, (255, 255, 255), -1)
+        mask = np.zeros(image.shape[:2], np.uint8)
+        cv2.ellipse(mask, (200, 200), (140, 160), 0, 0, 360, 255, -1)
+        region = block(200, "I'll make you regret... not choosing me.", y=150)
+        region.font_size = 14
+        region.source_font_size = 14
+        region.calibrated_font_size = 14
+        region._bubble_mask = mask
+        dynamic_config = SimpleNamespace(font_size_minimum=12, font_size=None, font_size_offset=0,
+                                         no_hyphenation=False, line_spacing=0)
+
+        prepared = prepare_bubbles(image, [region], FONT, dynamic_config)[0]
+
+        self.assertLessEqual(prepared.font_size, 14)
+
     def test_proportional_multi_lobe_word_allocation(self):
         # Top lobe is small (~25% area), bottom lobe is large (~75% area)
         image = np.full((450, 300, 3), 255, np.uint8)
@@ -632,7 +652,7 @@ class BubbleLayoutTests(unittest.TestCase):
         layout_cy = (group.layout_bounds[1] + group.layout_bounds[3]) / 2.0
         self.assertLess(abs(layout_cy - 120), 25.0)
 
-    def test_per_lobe_adaptive_font_sizing_preserves_main_lobe_size(self):
+    def test_per_lobe_adaptive_font_sizing_preserves_consistent_font_size(self):
         # A multi-lobe bubble with a narrower top lobe and a wide lower lobe
         image = np.full((450, 300, 3), 255, np.uint8)
         mask = np.zeros(image.shape[:2], np.uint8)
@@ -658,10 +678,11 @@ class BubbleLayoutTests(unittest.TestCase):
         self.assertIn("font_size", group.layout_segments[1])
         # Font sizes must be consistent between lobes (disparity <= 5px)
         self.assertLessEqual(abs(group.layout_segments[0]["font_size"] - group.layout_segments[1]["font_size"]), 5)
-        # Punctuation-aware split keeps clauses intact
-        self.assertTrue(group.layout_segments[0]["text"].endswith((",", ".")))
+        # The preferred font floor keeps both lobes at target size and wraps only at word boundaries.
+        self.assertEqual(" ".join(segment["text"] for segment in group.layout_segments), sentence)
+        self.assertTrue(all(segment["font_size"] >= 20 for segment in group.layout_segments))
 
-    def test_asymmetric_two_lobe_semantic_allocation(self):
+    def test_asymmetric_two_lobe_below_preferred_floor_is_flagged_for_review(self):
         # Asymmetric 2-lobe bubble: shifted-right upper lobe + shifted-left large bottom lobe
         image = np.full((500, 360, 3), 255, np.uint8)
         mask = np.zeros(image.shape[:2], np.uint8)
@@ -681,28 +702,11 @@ class BubbleLayoutTests(unittest.TestCase):
         groups = prepare_bubbles(image, [region], FONT, dynamic_config)
         self.assertEqual(len(groups), 1)
         group = groups[0]
-        self.assertFalse(group.review_required, group.review_reason)
-        self.assertEqual(len(group.layout_segments), 2)
-
-        top_seg = group.layout_segments[0]
-        bot_seg = group.layout_segments[1]
-
-        # Semantic break must place sentence 1 in upper lobe and sentence 2 in lower lobe
-        self.assertTrue(top_seg["text"].endswith(("right?", "right? ")))
-        self.assertTrue(bot_seg["text"].startswith("I won't"))
-
-        # Upper lobe center must be shifted right relative to lower lobe center
-        top_cx = top_seg["x"] + top_seg["width"] / 2.0
-        bot_cx = bot_seg["x"] + bot_seg["width"] / 2.0
-        self.assertGreater(top_cx, 190.0)
-        self.assertLess(bot_cx, 180.0)
-        self.assertGreater(top_cx - bot_cx, 25.0)
-
-        # Segments must be safely inside bubble interior
-        for seg in [top_seg, bot_seg]:
-            x1, y1 = seg["x"], seg["y"]
-            x2, y2 = x1 + seg["width"], y1 + seg["height"]
-            self.assertTrue(np.all(group._bubble_interior[y1:y2, x1:x2]))
+        self.assertTrue(group.review_required)
+        self.assertEqual(group.review_reason, "text_does_not_fit")
+        self.assertGreaterEqual(group.font_size, 18)
+        self.assertIsNotNone(group._bubble_box)
+        self.assertFalse(group._render_suppressed)
 
     def test_geometry_profiling_and_neck_detection(self):
         from manga_translator.rendering.bubble_layout import build_geometry_profile
@@ -767,8 +771,8 @@ class BubbleLayoutTests(unittest.TestCase):
         self.assertLessEqual(abs(font_wide - font_narrow), 5)
         self.assertGreaterEqual(font_narrow, int(font_wide * 0.85))
 
-    def test_narrow_bubble_relaxed_overflow_preserves_target_font(self):
-        # A narrow bubble with text that would otherwise be severely shrunk
+    def test_narrow_bubble_that_cannot_fit_is_suppressed_for_review(self):
+        # A narrow bubble must not draw an overflowing fallback raster.
         image = np.full((500, 400, 3), 255, np.uint8)
         mask = np.zeros(image.shape[:2], np.uint8)
         cv2.ellipse(mask, (200, 200), (45, 120), 0, 0, 360, 255, -1)
@@ -785,7 +789,9 @@ class BubbleLayoutTests(unittest.TestCase):
         group = groups[0]
         # Font size must stay close to target (>= 85% of target = 20px) rather than dropping to 10px
         self.assertGreaterEqual(group.font_size, int(target_font * 0.85))
-        self.assertIsNotNone(getattr(group, '_bubble_box', None))
+        self.assertTrue(group.review_required)
+        self.assertTrue(group._render_suppressed)
+        self.assertIsNone(getattr(group, '_bubble_box', None))
 
     def test_calculate_mask_moments_and_aspect_alignment(self):
         from manga_translator.rendering.bubble_layout import calculate_mask_moments, calculate_text_moments

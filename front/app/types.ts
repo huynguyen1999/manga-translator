@@ -362,6 +362,7 @@ export interface MangaSummary {
   jobProgress?: number | null;
   jobMessage?: string | null;
   jobCurrentPage?: number | null;
+  jobStagePassedCount?: number | null;
   jobPageCount?: number | null;
   jobPagesWithText?: number | null;
   jobExtractionRequired?: boolean;
@@ -394,6 +395,7 @@ export interface SummaryJob {
   jobMessage?: string | null;
   jobError?: string | null;
   jobCurrentPage?: number | null;
+  jobStagePassedCount?: number | null;
   jobPageCount?: number | null;
   jobPagesWithText?: number | null;
   jobExtractionRequired?: boolean;

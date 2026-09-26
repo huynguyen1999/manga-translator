@@ -33,41 +33,18 @@ interface PreviewImageProps {
   fullOriginal?: string | null;
   fullResult?: string | null;
   fullInpainted?: string | null;
+  resultPlaceholder?: string | null;
   coordinateSize?: { width: number; height: number } | null;
   useFullResolution?: boolean;
 }
 
 export function getConfidenceStyle(conf: number | null | undefined) {
   if (typeof conf !== "number" || isNaN(conf)) {
-    return {
-      stroke: "#f59e0b",
-      fill: "#f59e0b",
-      dot: "bg-amber-400",
-      tier: "detected",
-    };
+    return { stroke: "#f59e0b", fill: "#f59e0b", dot: "bg-amber-400", tier: "detected" };
   }
-  if (conf >= 0.85) {
-    return {
-      stroke: "#10b981", // High (Emerald)
-      fill: "#10b981",
-      dot: "bg-emerald-400",
-      tier: "high",
-    };
-  }
-  if (conf >= 0.65) {
-    return {
-      stroke: "#f59e0b", // Medium (Amber)
-      fill: "#f59e0b",
-      dot: "bg-amber-400",
-      tier: "medium",
-    };
-  }
-  return {
-    stroke: "#ef4444", // Low (Rose)
-    fill: "#ef4444",
-    dot: "bg-rose-400",
-    tier: "low",
-  };
+  if (conf >= 0.85) return { stroke: "#10b981", fill: "#10b981", dot: "bg-emerald-400", tier: "high" };
+  if (conf >= 0.65) return { stroke: "#f59e0b", fill: "#f59e0b", dot: "bg-amber-400", tier: "medium" };
+  return { stroke: "#ef4444", fill: "#ef4444", dot: "bg-rose-400", tier: "low" };
 }
 
 export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
@@ -100,6 +77,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     fullOriginal,
     fullResult,
     fullInpainted,
+    resultPlaceholder,
     coordinateSize,
     useFullResolution = false,
   }) => {
@@ -125,11 +103,14 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     const [detectedTextLines, setDetectedTextLines] = useState<DetectedRegionLine[] | null>(null);
     const [detectedBubbleRegions, setDetectedBubbleRegions] = useState<DetectedBubbleRegion[]>([]);
     const [bubbleRegionsStatus, setBubbleRegionsStatus] = useState<"idle" | "loading" | "loaded" | "error">("idle");
+    const bubbleRegionsLoadedForRef = useRef<string | null>(null);
     const [isLoadingRegions, setIsLoadingRegions] = useState(false);
     const [internalShowBubbleBoxes, setInternalShowBubbleBoxes] = useState(false);
     const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
     const [hoveredRegionIndex, setHoveredRegionIndex] = useState<number | null>(null);
-    const [copiedKind, setCopiedKind] = useState<"original" | "translation" | null>(null);
+    const [selectedRegionIndex, setSelectedRegionIndex] = useState<number | null>(null);
+    const [selectedBubbleId, setSelectedBubbleId] = useState<string | null>(null);
+    const [copiedKind, setCopiedKind] = useState<"original" | "translation" | "id" | null>(null);
 
     // Image measurement state for precise overlay anchoring
     const [imageRect, setImageRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
@@ -169,7 +150,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     // Reset image fallback state when either resolution tier changes.
     useEffect(() => {
       setResultLoadFailed(false);
-      setResultLoaded(false);
+      setResultLoaded(Boolean(imgRef.current?.complete && imgRef.current.naturalWidth > 0));
       setPreviewFallbacks({ original: false, result: false, inpainted: false });
     }, [result, fullResult, originalUrl, inpaintedUrl, fullOriginal, fullInpainted, retryCount, useFullResolution]);
 
@@ -248,6 +229,13 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     const effectiveInpaintedUrl = useFullResolution || previewFallbacks.inpainted ? fullInpainted ? apiUrl(fullInpainted) : inpaintedUrl : inpaintedUrl;
     const hasMultiple = [effectiveOriginalUrl, effectiveResultUrl, effectiveInpaintedUrl].filter(Boolean).length >= 2;
     const hasBoth = Boolean(effectiveOriginalUrl && effectiveResultUrl);
+
+    useEffect(() => {
+      if (!effectiveResultUrl || !resultPlaceholder || resultLoaded || resultLoadFailed) return;
+      const timeout = window.setTimeout(() => setResultLoadFailed(true), 15_000);
+      return () => window.clearTimeout(timeout);
+    }, [effectiveResultUrl, resultLoaded, resultLoadFailed, resultPlaceholder, retryCount, useFullResolution]);
+
     const displayUrl =
       (viewMode === "inpainted" && effectiveInpaintedUrl)
         ? effectiveInpaintedUrl
@@ -257,9 +245,10 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
 
     const isShowingTranslatedResult = Boolean(effectiveResultUrl && displayUrl === effectiveResultUrl);
     const resultFeedback = isShowingTranslatedResult && !resultLoaded ? (
-      <div role="status" className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-zinc-100/90 dark:bg-zinc-950/90 text-zinc-600 dark:text-zinc-300">
-        <span>{resultLoadFailed ? "Image could not be loaded" : "Loading image…"}</span>
-        {showComparisonControls && (
+      <div role="status" className={`absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 text-zinc-600 dark:text-zinc-300 ${resultPlaceholder ? "" : "bg-zinc-100/90 dark:bg-zinc-950/90"}`}>
+        {resultPlaceholder && <img src={apiUrl(resultPlaceholder)} alt="" className="absolute inset-0 h-full w-full object-contain" />}
+        <span className={resultPlaceholder ? "z-10 rounded bg-black/55 px-3 py-2 text-sm text-white backdrop-blur-sm" : ""}>{resultLoadFailed ? "Image could not be loaded" : resultPlaceholder ? "Loading sharper image…" : "Loading image…"}</span>
+        {resultLoadFailed && showComparisonControls && (
           <button type="button" className="rounded bg-indigo-600 px-3 py-2 text-sm text-white"
             onClick={(event) => { event.stopPropagation(); setRetryCount((count) => count + 1); }}>
             Retry image
@@ -329,6 +318,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
           : [[[block.x, block.y], [block.x + block.width, block.y], [block.x + block.width, block.y + block.height], [block.x, block.y + block.height]] as Array<[number, number]>];
         const confidence = typeof block.confidence === "number" ? block.confidence : (typeof block.prob === "number" ? block.prob : null);
         return lines.map((pts) => ({
+          id: `detection_${block.id}`,
           points: pts,
           confidence,
         }));
@@ -431,7 +421,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     }, [folder, onOriginalRegionCountLoaded]);
 
     useEffect(() => {
-      if (!showBubbleRegions) return;
+      if (!showBubbleRegions || (bubbleRegionsStatus === "loaded" && bubbleRegionsLoadedForRef.current === folder)) return;
       if (!folder) {
         setDetectedBubbleRegions([]);
         setBubbleRegionsStatus("error");
@@ -449,6 +439,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
         .then((data) => {
           if (!isMounted) return;
           setDetectedBubbleRegions(parseBubbleDetections(data));
+          bubbleRegionsLoadedForRef.current = folder;
           setBubbleRegionsStatus("loaded");
         })
         .catch((error) => {
@@ -491,6 +482,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
           setNaturalSize((previous) => previous?.width === nextSize.width && previous.height === nextSize.height
             ? previous
             : nextSize);
+          if (imgRef.current.complete) setResultLoaded(true);
         }
       });
     }, []);
@@ -531,7 +523,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       updateImageRect();
     };
 
-    const handleCopy = async (text: string, kind: "original" | "translation") => {
+    const handleCopy = async (text: string, kind: "original" | "translation" | "id") => {
       if (!text) return;
       try {
         if (navigator?.clipboard?.writeText) {
@@ -555,13 +547,15 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
 
     useEffect(() => {
       const handleKeyDown = (e: KeyboardEvent) => {
-        if (e.key === "Escape" && selectedBlockId) {
+        if (e.key === "Escape" && (selectedBlockId || selectedRegionIndex !== null || selectedBubbleId)) {
           setSelectedBlockId(null);
+          setSelectedRegionIndex(null);
+          setSelectedBubbleId(null);
         }
       };
       window.addEventListener("keydown", handleKeyDown);
       return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [selectedBlockId]);
+    }, [selectedBlockId, selectedRegionIndex, selectedBubbleId]);
 
     const hasBubbleData = effectiveBlocks.length > 0 || isLoadingRegions || Boolean(effectiveTextRegionsUrl);
     const handleSourceError = (kind: "original" | "result" | "inpainted") => {
@@ -631,7 +625,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
-        onClick={() => setSelectedBlockId(null)}
+        onClick={() => { setSelectedBlockId(null); setSelectedRegionIndex(null); setSelectedBubbleId(null); }}
       >
         {!effectiveShowOriginal && !effectiveShowInpainted && resultFeedback}
         {showBubbleRegions && bubbleRegionsStatus !== "idle" && (
@@ -889,20 +883,46 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                 viewBox={`0 0 ${bubbleCoordinateSize?.width ?? imageCoordinateSize.width} ${bubbleCoordinateSize?.height ?? imageCoordinateSize.height}`}
                 preserveAspectRatio="none"
               >
-                {detectedBubbleRegions.flatMap((region) => region.polygons.map((polygon, polygonIdx) => (
-                  <polygon
-                    key={`${region.id}-${polygonIdx}`}
-                    points={polygon.map(([x, y]) => `${x},${y}`).join(" ")}
-                    fill="#a78bfa"
-                    fillOpacity={0.08}
-                    stroke="#c084fc"
-                    strokeOpacity={0.95}
-                    strokeWidth={2.5}
-                    vectorEffect="non-scaling-stroke"
-                  >
-                    <title>{`Speech bubble #${Number(region.id) + 1}`}</title>
-                  </polygon>
-                )))}
+                {detectedBubbleRegions.flatMap((region) => region.polygons.map((polygon, polygonIdx) => {
+                  const labelX = Math.min(...polygon.map(([x]) => x));
+                  const labelY = Math.max(16, Math.min(...polygon.map(([, y]) => y)) - 5);
+                  return (
+                    <g key={`${region.id}-${polygonIdx}`}>
+                      <polygon
+                        points={polygon.map(([x, y]) => `${x},${y}`).join(" ")}
+                        fill="#a78bfa"
+                        fillOpacity={selectedBubbleId === region.id ? 0.22 : 0.04}
+                        stroke="#c084fc"
+                        strokeOpacity={selectedBubbleId === region.id ? 1 : 0.65}
+                        strokeWidth={selectedBubbleId === region.id ? 3 : 1.5}
+                        vectorEffect="non-scaling-stroke"
+                        pointerEvents="all"
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`Speech bubble ${region.id}`}
+                        className="cursor-pointer"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setSelectedBubbleId(selectedBubbleId === region.id ? null : region.id);
+                          setSelectedRegionIndex(null);
+                          setSelectedBlockId(null);
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            setSelectedBubbleId(selectedBubbleId === region.id ? null : region.id);
+                            setSelectedRegionIndex(null);
+                            setSelectedBlockId(null);
+                          }
+                        }}
+                      >
+                        <title>{region.id}</title>
+                      </polygon>
+                      {selectedBubbleId === region.id && <text x={labelX} y={labelY} fill="white" stroke="#18181b" strokeWidth={4}
+                        paintOrder="stroke" fontSize={18} fontWeight={700} fontFamily="monospace">{region.id}</text>}
+                    </g>
+                  );
+                }))}
               </svg>
             )}
 
@@ -918,31 +938,53 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                     const line = region.points;
                     if (line.length < 3) return null;
                     const confStyle = getConfidenceStyle(region.confidence);
-                    const isHovered = hoveredRegionIndex === lineIdx;
+                    const isHovered = hoveredRegionIndex === lineIdx || selectedRegionIndex === lineIdx;
+                    const labelX = Math.min(...line.map(([x]) => x));
+                    const labelY = Math.max(16, Math.min(...line.map(([, y]) => y)) - 5);
 
                     return (
-                      <polygon
-                        key={`source-${lineIdx}`}
-                        points={line.map(([x, y]) => `${x},${y}`).join(" ")}
-                        fill={isHovered ? confStyle.fill : "transparent"}
-                        fillOpacity={isHovered ? 0.25 : 0}
-                        stroke={confStyle.stroke}
-                        strokeDasharray={isHovered ? "none" : "6 4"}
-                        strokeOpacity={isHovered ? 1 : 0.75}
-                        strokeWidth={isHovered ? 2.5 : 1.5}
-                        vectorEffect="non-scaling-stroke"
-                        pointerEvents="all"
-                        className="pointer-events-auto cursor-pointer transition-all duration-150"
-                        onMouseEnter={() => setHoveredRegionIndex(lineIdx)}
-                        onMouseLeave={() => setHoveredRegionIndex(null)}
-                      />
+                      <g key={`source-${region.id}-${lineIdx}`}>
+                        <polygon
+                          points={line.map(([x, y]) => `${x},${y}`).join(" ")}
+                          fill={isHovered ? confStyle.fill : "transparent"}
+                          fillOpacity={isHovered ? 0.25 : 0}
+                          stroke={confStyle.stroke}
+                          strokeDasharray={isHovered ? "none" : "6 4"}
+                          strokeOpacity={isHovered ? 1 : 0.75}
+                          strokeWidth={isHovered ? 2.5 : 1.5}
+                          vectorEffect="non-scaling-stroke"
+                          pointerEvents="all"
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Original region ${region.id}`}
+                          className="pointer-events-auto cursor-pointer transition-all duration-150"
+                          onMouseEnter={() => setHoveredRegionIndex(lineIdx)}
+                          onMouseLeave={() => setHoveredRegionIndex(null)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedRegionIndex(selectedRegionIndex === lineIdx ? null : lineIdx);
+                            setSelectedBubbleId(null);
+                            setSelectedBlockId(null);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              setSelectedRegionIndex(selectedRegionIndex === lineIdx ? null : lineIdx);
+                              setSelectedBubbleId(null);
+                              setSelectedBlockId(null);
+                            }
+                          }}
+                        />
+                        {selectedRegionIndex === lineIdx && <text x={labelX} y={labelY} fill="white" stroke="#18181b" strokeWidth={4}
+                          paintOrder="stroke" fontSize={18} fontWeight={700} fontFamily="monospace">{region.id}</text>}
+                      </g>
                     );
                   })}
                 </svg>
 
                 {/* Floating tooltip displayed only on hover for the active region */}
-                {hoveredRegionIndex !== null && (() => {
-                  const region = originalTextLines[hoveredRegionIndex];
+                {selectedRegionIndex !== null && (() => {
+                  const region = originalTextLines[selectedRegionIndex];
                   if (!region || region.points.length < 3) return null;
                   const xs = region.points.map(([x]) => x);
                   const ys = region.points.map(([, y]) => y);
@@ -958,8 +1000,8 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
 
                   return (
                     <div
-                      key={`hovered-tooltip-${hoveredRegionIndex}`}
-                      className="absolute pointer-events-none select-none z-30 animate-in fade-in zoom-in-95 duration-100"
+                      key={`selected-region-${selectedRegionIndex}`}
+                      className="absolute pointer-events-auto select-none z-30 animate-in fade-in zoom-in-95 duration-100"
                       style={{
                         left: `${leftPct}%`,
                         top: `${topPct}%`,
@@ -968,7 +1010,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                     >
                       <div className="flex items-center gap-1.5 rounded-md bg-zinc-950/95 border border-zinc-700/80 px-2 py-1 text-[11px] font-medium text-zinc-100 shadow-xl backdrop-blur-md whitespace-nowrap">
                         <span className={`w-2 h-2 rounded-full shrink-0 ${confStyle.dot}`} />
-                        <span className="text-zinc-400 font-mono text-[10px]">#{hoveredRegionIndex + 1}</span>
+                        <span className="text-zinc-400 font-mono text-[10px]">{region.id}</span>
                         {hasConf ? (
                           <span className="font-mono font-bold text-white">
                             {(conf * 100).toFixed(conf * 100 % 1 === 0 ? 0 : 1)}%
@@ -977,6 +1019,9 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                           <span className="text-zinc-300">Detected</span>
                         )}
                         <span className="text-zinc-500 text-[10px] capitalize">({confStyle.tier})</span>
+                        <button type="button" className="ml-1 text-zinc-300 hover:text-white" title="Copy region ID" onClick={(event) => { event.stopPropagation(); void handleCopy(region.id, "id"); }}>
+                          <Icon icon={copiedKind === "id" ? "carbon:checkmark" : "carbon:copy"} className="h-3 w-3" />
+                        </button>
                       </div>
                     </div>
                   );
@@ -996,7 +1041,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                   key={block.id || idx}
                   role="button"
                   tabIndex={0}
-                  aria-label={`Speech bubble ${idx + 1}`}
+                  aria-label={`Text region ${block.id}`}
                   className={`absolute pointer-events-auto rounded cursor-pointer transition-all duration-150 ${
                     isSelected
                       ? "border-2 border-amber-400 bg-amber-400/25 shadow-[0_0_12px_rgba(251,191,36,0.6)] ring-2 ring-amber-400/50 z-30"
@@ -1011,6 +1056,8 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                   onClick={(e) => {
                     e.stopPropagation();
                     setSelectedBlockId(isSelected ? null : block.id);
+                    setSelectedRegionIndex(null);
+                    setSelectedBubbleId(null);
                     setCopiedKind(null);
                   }}
                   onKeyDown={(e) => {
@@ -1018,29 +1065,58 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                       e.preventDefault();
                       e.stopPropagation();
                       setSelectedBlockId(isSelected ? null : block.id);
+                      setSelectedRegionIndex(null);
+                      setSelectedBubbleId(null);
                       setCopiedKind(null);
                     }
                   }}
-                  title={`Bubble #${idx + 1}: Click to inspect original & translated text`}
+                  title={`Text region ${block.id}: Click to inspect original & translated text`}
                 >
-                  {/* Number Badge */}
-                  <span
-                    className={`absolute -top-2.5 -left-1 text-[10px] font-mono font-bold px-1 rounded shadow-xs select-none ${
+                  {/* Keep IDs out of the way until a region is selected. */}
+                  {isSelected && <span
+                    className={`absolute -top-2.5 -left-1 max-w-28 truncate text-[9px] font-mono font-bold px-1 rounded shadow-xs select-none ${
                       isSelected
                         ? "bg-amber-400 text-black"
                         : "bg-indigo-600 text-white"
                     }`}
                   >
-                    {idx + 1}
-                  </span>
+                    {block.id}
+                  </span>}
                 </div>
               );
             })}
 
+            {(selectedRegionIndex !== null || selectedBubbleId !== null) && (() => {
+              const source = selectedRegionIndex !== null
+                ? originalTextLines[selectedRegionIndex]
+                : null;
+              const bubble = selectedBubbleId
+                ? detectedBubbleRegions.find((region) => region.id === selectedBubbleId)
+                : null;
+              const id = source?.id ?? bubble?.id;
+              if (!id) return null;
+              const confidence = source?.confidence ?? bubble?.confidence;
+              const label = source ? "Original region" : "Speech bubble";
+              return (
+                <div className="absolute left-2 top-2 z-40 flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-950/95 px-3 py-2 text-xs text-white shadow-xl pointer-events-auto">
+                  <span>{label}</span>
+                  <code className="font-mono text-zinc-300">{id}</code>
+                  {typeof confidence === "number" && <span>{Math.round(confidence * 100)}%</span>}
+                  <button type="button" className="flex items-center gap-1 text-zinc-300 hover:text-white" title="Copy ID" onClick={() => void handleCopy(id, "id")}>
+                    <Icon icon={copiedKind === "id" ? "carbon:checkmark" : "carbon:copy"} className="h-3.5 w-3.5" />
+                    <span>{copiedKind === "id" ? "Copied" : "Copy ID"}</span>
+                  </button>
+                  <button type="button" aria-label="Close region details" onClick={() => { setSelectedRegionIndex(null); setSelectedBubbleId(null); }}>
+                    <Icon icon="carbon:close" className="h-4 w-4" />
+                  </button>
+                </div>
+              );
+            })()}
+
             {/* Inspection Card for Selected Bubble */}
             {showBubbleBoxes && selectedBlock && selectedBlockIndex !== -1 && (
               <div
-                className="absolute pointer-events-auto z-40 w-72 sm:w-84 max-w-[90vw] rounded-xl border border-zinc-700 bg-zinc-900/95 p-3 text-zinc-100 shadow-2xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-150"
+                className="absolute pointer-events-auto z-40 w-72 sm:w-84 max-w-[90vw] rounded-xl border border-zinc-700 bg-zinc-900/95 p-3.5 text-zinc-100 shadow-2xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-150"
                 style={{
                   left: `${clampedCardXPct}%`,
                   transform: "translateX(-50%)",
@@ -1051,19 +1127,28 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                 onClick={(e) => e.stopPropagation()}
               >
                 {/* Header */}
-                <div className="flex items-center justify-between border-b border-zinc-800 pb-2 mb-2">
-                  <div className="flex items-center gap-1.5">
-                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-amber-500 text-black font-mono text-[11px] font-bold">
-                      {selectedBlockIndex + 1}
-                    </span>
-                    <span className="font-semibold text-xs text-zinc-200">
-                      Speech Bubble #{selectedBlockIndex + 1}
-                    </span>
+                <div className="mb-3 flex items-center justify-between gap-2 border-b border-zinc-800 pb-2.5">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="shrink-0 text-sm font-semibold text-zinc-100">Text region</span>
+                    <code className="min-w-0 truncate rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300" title={selectedBlock.id}>
+                      {selectedBlock.id}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => void handleCopy(selectedBlock.id, "id")}
+                      className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                      aria-label={copiedKind === "id" ? "Region ID copied" : "Copy region ID"}
+                      title="Copy region ID"
+                    >
+                      <Icon icon={copiedKind === "id" ? "carbon:checkmark" : "carbon:copy"} className={`h-3.5 w-3.5 ${copiedKind === "id" ? "text-emerald-400" : ""}`} />
+                      <span>{copiedKind === "id" ? "Copied" : "Copy ID"}</span>
+                    </button>
                   </div>
                   <button
                     type="button"
                     onClick={() => setSelectedBlockId(null)}
-                    className="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors"
+                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                    aria-label="Close text region details"
                     title="Close (Esc)"
                   >
                     <Icon icon="carbon:close" className="w-4 h-4" />
@@ -1071,17 +1156,18 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                 </div>
 
                 {/* Original Text */}
-                <div className="mb-2.5">
-                  <div className="flex items-center justify-between text-[11px] text-zinc-400 mb-1">
-                    <span className="font-medium uppercase tracking-wider text-amber-300/90 flex items-center gap-1">
-                      <Icon icon="carbon:character-patterns" className="w-3.5 h-3.5" />
+                <div className="mb-3">
+                  <div className="mb-1.5 flex items-center justify-between text-[11px] text-zinc-400">
+                    <span className="flex items-center gap-1.5 font-semibold uppercase tracking-wider text-amber-300">
+                      <Icon icon="carbon:character-patterns" className="h-3.5 w-3.5" />
                       Original
                     </span>
                     {selectedBlock.original_text && (
                       <button
                         type="button"
                         onClick={() => handleCopy(selectedBlock.original_text || "", "original")}
-                        className="flex items-center gap-1 text-[10px] text-zinc-400 hover:text-white transition-colors"
+                        className="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                        aria-label={copiedKind === "original" ? "Original text copied" : "Copy original text"}
                         title="Copy original text"
                       >
                         <Icon
@@ -1092,7 +1178,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                       </button>
                     )}
                   </div>
-                  <div className="rounded-lg bg-black/50 border border-zinc-800 p-2 text-xs font-mono text-zinc-200 break-words whitespace-pre-wrap max-h-28 overflow-y-auto select-text">
+                  <div className="max-h-28 select-text overflow-y-auto break-words whitespace-pre-wrap rounded-lg border border-zinc-800 bg-black/40 px-3 py-2.5 font-sans text-sm leading-relaxed text-zinc-100">
                     {selectedBlock.original_text ? (
                       selectedBlock.original_text
                     ) : (
@@ -1103,16 +1189,17 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
 
                 {/* Translated Text */}
                 <div>
-                  <div className="flex items-center justify-between text-[11px] text-zinc-400 mb-1">
-                    <span className="font-medium uppercase tracking-wider text-indigo-400 flex items-center gap-1">
-                      <Icon icon="carbon:translate" className="w-3.5 h-3.5" />
+                  <div className="mb-1.5 flex items-center justify-between text-[11px] text-zinc-400">
+                    <span className="flex items-center gap-1.5 font-semibold uppercase tracking-wider text-indigo-300">
+                      <Icon icon="carbon:translate" className="h-3.5 w-3.5" />
                       Translated
                     </span>
                     {selectedBlock.translation && (
                       <button
                         type="button"
                         onClick={() => handleCopy(selectedBlock.translation || "", "translation")}
-                        className="flex items-center gap-1 text-[10px] text-zinc-400 hover:text-white transition-colors"
+                        className="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium text-zinc-400 transition-colors hover:bg-indigo-900/50 hover:text-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                        aria-label={copiedKind === "translation" ? "Translated text copied" : "Copy translated text"}
                         title="Copy translated text"
                       >
                         <Icon
@@ -1123,7 +1210,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                       </button>
                     )}
                   </div>
-                  <div className="rounded-lg bg-indigo-950/30 border border-indigo-900/50 p-2 text-xs font-sans text-zinc-100 break-words whitespace-pre-wrap max-h-32 overflow-y-auto select-text">
+                  <div className="max-h-32 select-text overflow-y-auto break-words whitespace-pre-wrap rounded-lg border border-indigo-800/70 bg-indigo-950/25 px-3 py-2.5 font-sans text-sm leading-relaxed text-zinc-50">
                     {selectedBlock.translation ? (
                       selectedBlock.translation
                     ) : (

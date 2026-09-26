@@ -179,6 +179,20 @@ def is_preserved_region(region):
     return getattr(region, "translation_policy", None) == "preserve"
 
 
+def resolve_render_content(region, transform=None):
+    """Return the only text that layout/rendering may consume after translation."""
+    if is_preserved_region(region):
+        snapshot = getattr(region, "source_text_snapshot", None)
+        text = str(snapshot if snapshot is not None else (getattr(region, "text", "") or ""))
+        region._translation_incomplete = False
+        return text
+
+    override = getattr(region, "_render_content_override", None)
+    text = str(override if override is not None else (getattr(region, "translation", "") or ""))
+    region._translation_incomplete = not bool(text.strip())
+    return transform(text) if text and transform else text
+
+
 def dist(x1, y1, x2, y2):
     return np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
 

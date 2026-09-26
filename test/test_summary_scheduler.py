@@ -4,11 +4,12 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, Mock, patch
 
 from server.main import MangaSummaryRequest, SummaryJobController
 from server.manga_summary import load_summary, update_summary_job, save_summary
 from server.summary_scheduler import SummaryScheduler
+from server.summary_task import run_summary_task
 
 
 class TestSummaryScheduler(unittest.IsolatedAsyncioTestCase):
@@ -30,6 +31,32 @@ class TestSummaryScheduler(unittest.IsolatedAsyncioTestCase):
         (page / "text_regions.json").write_text(
             json.dumps([{"original_text": text}]), encoding="utf-8"
         )
+
+    async def test_summary_task_delegates_and_always_cleans_up(self):
+        generate_summary = AsyncMock()
+        reclaim_memory = AsyncMock()
+        controller = Mock()
+        current_task = asyncio.current_task()
+
+        await run_summary_task(
+            None,
+            MangaSummaryRequest(mangaTitle="Series"),
+            "store",
+            "group-id",
+            "Series",
+            generate_summary=generate_summary,
+            log=Mock(),
+            update_summary_job=AsyncMock(),
+            controller=controller,
+            reclaim_memory=reclaim_memory,
+        )
+
+        generate_summary.assert_awaited_once()
+        controller.unregister_task.assert_has_calls([
+            call("group-id", current_task),
+            call("Series", current_task),
+        ])
+        reclaim_memory.assert_awaited_once_with(None)
 
     async def test_reconcile_interrupted_generating_jobs(self):
         # Job 1: generating without summary -> should be reconciled to queued
@@ -90,8 +117,8 @@ class TestSummaryScheduler(unittest.IsolatedAsyncioTestCase):
             self.root,
             "Series2",
             "queued",
-            provider="deepseek",
-            model="deepseek-flash",
+            provider="gemini",
+            model="gemini-3.1-flash-lite",
             message="Waiting for an available worker",
         )
 
@@ -100,7 +127,7 @@ class TestSummaryScheduler(unittest.IsolatedAsyncioTestCase):
         async def fake_run_task(
             request, data, store, group_value, clean_title, worker=None, pause_event=None
         ):
-            executed.append(clean_title)
+            executed.append((clean_title, data.summaryModel))
             update_summary_job(
                 self.root, clean_title, "ready", stage="complete", progress=100
             )
@@ -124,7 +151,10 @@ class TestSummaryScheduler(unittest.IsolatedAsyncioTestCase):
 
         await scheduler.stop()
 
-        self.assertEqual(executed, ["Series1", "Series2"])
+        self.assertEqual(executed, [
+            ("Series1", "deepseek:deepseek-flash"),
+            ("Series2", "gemini:gemini-3.1-flash-lite"),
+        ])
         job1 = load_summary(self.root, "Series1")
         job2 = load_summary(self.root, "Series2")
         self.assertEqual(job1["jobStatus"], "ready")

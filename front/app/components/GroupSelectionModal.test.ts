@@ -5,6 +5,43 @@ import {
   type ExistingGroupEntry,
   type ExistingGroupItem,
 } from './GroupSelectionModal';
+import { buildExistingGroupEntries } from '@/utils/groupTitles';
+import type { FinishedImage, MangaGroupSummary } from '@/types';
+
+{
+  const summaries: MangaGroupSummary[] = [
+    { id: 'one-id', title: 'one', count: 2 },
+  ];
+  const images: FinishedImage[] = [
+    {
+      id: 'image-1',
+      groupId: 'image-id',
+      originalName: 'page.png',
+      mangaTitle: 'from image',
+      result: '/result/page.png',
+      finishedAt: new Date(0),
+      settings: {},
+    },
+    {
+      id: 'image-2',
+      groupId: 'ignored-image-id',
+      originalName: 'page-2.png',
+      mangaTitle: 'ONE',
+      result: '/result/page-2.png',
+      finishedAt: new Date(0),
+      settings: {},
+    },
+  ];
+
+  assert.deepEqual(
+    buildExistingGroupEntries([' One ', 'Ungrouped', 'Server only'], summaries, images),
+    [
+      { id: 'image-id', title: 'from image' },
+      { id: 'one-id', title: 'one', count: 2 },
+      { title: 'Server only' },
+    ],
+  );
+}
 
 // Test 1: normalizeExistingGroups handles string array and deduplicates (case-insensitive)
 {

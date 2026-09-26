@@ -6,10 +6,10 @@ import cv2
 import numpy as np
 
 from manga_translator.geometry.panels import infer_panel_constraints
-
 from .geometry import _mask_moments
 from .models import FreeTextDamageTarget, FreeTextZone, PageObstacleMap, PanelConstraint, PlacementMode
 from .obstacles import _region_source_mask
+from .source_profile import _effective_source_font_size
 
 
 def _extract_region_damage_masks(
@@ -40,7 +40,8 @@ def _extract_region_damage_masks(
     distances = []
     for region, source in zip(free_regions, source_masks):
         profile = getattr(region, "_source_profile", None)
-        font_s = max(8.0, float(profile.font_size if profile else getattr(region, "font_size", 12) or 12))
+        reported_font = profile.font_size if profile is not None else getattr(region, "source_font_size", None) or getattr(region, "font_size", 12)
+        font_s = max(8.0, float(_effective_source_font_size(region, reported_font)))
         radius = max(3, int(round(font_s * 1.5)))
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
         scopes.append(cv2.dilate(source.astype(np.uint8), kernel) > 0)
@@ -187,4 +188,3 @@ def build_free_text_ownership_zones(
         region._free_text_zone = ft_zone
 
     return zones
-

@@ -70,7 +70,7 @@ async def test_text_rendering_preserves_clean_inpainted_canvas(monkeypatch, rend
     ctx = SimpleNamespace(
         img_inpainted=clean.copy(),
         img_rgb=clean.copy(),
-        text_regions=[SimpleNamespace(target_lang='ENG')] if renderer in (Renderer.manga2Eng, Renderer.manga2EngPillow) else [],
+        text_regions=[SimpleNamespace(target_lang='ENG', translation='test')] if renderer in (Renderer.manga2Eng, Renderer.manga2EngPillow) else [],
         render_mask=None,
     )
     config = SimpleNamespace(render=SimpleNamespace(

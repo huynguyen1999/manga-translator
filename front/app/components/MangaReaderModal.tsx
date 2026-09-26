@@ -2,19 +2,17 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMe
 import { createPortal } from 'react-dom';
 import { Icon } from '@iconify/react';
 import type { FinishedImage, SeriesDetail, SeriesMember } from '@/types';
-import { apiUrl, isPhoneDevice } from '@/utils/api';
+import { apiUrl } from '@/utils/api';
 import { getMangaReadProgress } from '@/utils/resultGallery';
 import { fetchReadingProgress, saveReadingProgress } from '@/utils/readingProgress';
-
-export const isPhoneOrTouch = (): boolean => {
-  if (typeof window === 'undefined') return false;
-  const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent;
-  return isPhoneDevice(userAgent) || window.matchMedia('(pointer: coarse)').matches;
-};
-
-export function getReaderTitle(title: string, touchDevice: boolean): string | undefined {
-  return touchDevice ? undefined : title;
-}
+import { getImageUrl, getReaderTitle, isPhoneOrTouch } from '@/features/reader/PageItem';
+import type { ReaderMode, ReaderWidth, SinglePageFit } from '@/features/reader/PageItem';
+import { ReaderWidthMenu } from '@/features/reader/ReaderWidthMenu';
+import { ReaderPageStage } from '@/features/reader/ReaderPageStage';
+import { getReaderPreloadIndices, getReaderPriorityIndices, getSeriesMemberNavigation } from '@/features/reader/readerUtils';
+export { getReaderPreloadIndices, getReaderPriorityIndices, getSeriesMemberNavigation } from '@/features/reader/readerUtils';
+export { getReaderTitle, isPhoneOrTouch } from '@/features/reader/PageItem';
+export type { ReaderMode, ReaderWidth, SinglePageFit } from '@/features/reader/PageItem';
 
 const useClientLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
@@ -26,55 +24,6 @@ type SafariFullscreenDocument = Document & {
 type SafariFullscreenElement = HTMLElement & {
   webkitRequestFullscreen?: () => Promise<void> | void;
 };
-
-export type ReaderMode = 'infinite' | 'single';
-export type ReaderWidth = '60%' | '75%' | '90%' | '100%';
-export type SinglePageFit = 'height' | 'width';
-
-export function getReaderPreloadIndices(
-  currentPage: number,
-  totalPages: number,
-  _isPhone: boolean,
-): number[] {
-  const currentIndex = currentPage - 1;
-  const indices: number[] = [];
-  const ahead = 5;
-
-  if (currentIndex >= 0 && currentIndex < totalPages) indices.push(currentIndex);
-  for (let offset = 1; offset <= ahead; offset++) {
-    const idx = currentIndex + offset;
-    if (idx < totalPages) indices.push(idx);
-  }
-
-  for (let offset = 1; offset <= ahead; offset++) {
-    const idx = currentIndex - offset;
-    if (idx >= 0) indices.push(idx);
-  }
-
-  return indices;
-}
-
-export function getReaderPriorityIndices(currentPage: number, totalPages: number): number[] {
-  const currentIndex = Math.max(0, Math.min(totalPages - 1, currentPage - 1));
-  const start = Math.max(0, currentIndex - 5);
-  const end = Math.min(totalPages, currentIndex + 6);
-  return Array.from({ length: end - start }, (_, offset) => start + offset);
-}
-
-export function getSeriesMemberNavigation(
-  members: SeriesMember[],
-  currentId?: string,
-  currentTitle?: string,
-): { index: number; previous: SeriesMember | null; next: SeriesMember | null } {
-  const index = members.findIndex((member) =>
-    currentId ? member.id === currentId : member.title === currentTitle,
-  );
-  return {
-    index,
-    previous: index > 0 ? members[index - 1] : null,
-    next: index >= 0 && index < members.length - 1 ? members[index + 1] : null,
-  };
-}
 
 interface MangaReaderModalProps {
   mangaId?: string;
@@ -88,428 +37,6 @@ interface MangaReaderModalProps {
   onClose: (lastPageIndex?: number, lastImageId?: string) => void;
   onEditImage?: (image: FinishedImage) => void;
 }
-
-function addRetryParam(url: string, retryCount: number): string {
-  if (retryCount === 0 || url.startsWith('blob:') || url.startsWith('data:')) return url;
-  return `${url}${url.includes('?') ? '&' : '?'}retry=${retryCount}`;
-}
-
-function getSourceUrl(
-  source: Blob | string | null | undefined,
-  fallback?: string,
-): { url: string | null; isBlobUrl: boolean } {
-  if (typeof source === 'string' && source) {
-    return { url: apiUrl(source), isBlobUrl: false };
-  }
-  if (source instanceof Blob) {
-    const url = URL.createObjectURL(source);
-    return { url, isBlobUrl: true };
-  }
-  return { url: fallback || null, isBlobUrl: false };
-}
-
-// Helper to extract or create an object URL for an image result
-function getImageUrl(image: FinishedImage): { url: string | null; isBlobUrl: boolean } {
-  if (image.readerUrl) return { url: apiUrl(image.readerUrl), isBlobUrl: false };
-  if (image.fullUrl) return { url: apiUrl(image.fullUrl), isBlobUrl: false };
-  const fallback = image.folder ? apiUrl(`/result/${image.folder}/final.png`) : undefined;
-  if (image.result instanceof Blob && image.result.size < 1000 && fallback) {
-    return { url: fallback, isBlobUrl: false };
-  }
-  return getSourceUrl(image.result, fallback);
-}
-
-function getOriginalUrl(image: FinishedImage): { url: string | null; isBlobUrl: boolean } {
-  return getSourceUrl(image.inputUrl, image.folder ? apiUrl(`/result/${image.folder}/input.png`) : undefined);
-}
-
-// ──────────────────────────────────────────────────────────────
-// PageItem — Memoized page image component
-// Prevents CLS by pre-reserving space with an aspect-ratio placeholder.
-// ──────────────────────────────────────────────────────────────
-interface PageItemProps {
-  image: FinishedImage;
-  index: number;
-  readerWidth: ReaderWidth;
-  onEditImage?: (image: FinishedImage) => void;
-  isSinglePage?: boolean;
-  singlePageFit?: SinglePageFit;
-  isPriority?: boolean;
-  pageRef?: (el: HTMLDivElement | null) => void;
-  showControls?: boolean;
-}
-
-const PageItem: React.FC<PageItemProps> = React.memo(
-  ({
-    image,
-    index,
-    readerWidth,
-    onEditImage,
-    isSinglePage = false,
-    singlePageFit = 'height',
-    isPriority = false,
-    pageRef,
-    showControls = false,
-  }) => {
-    const touchDevice = isPhoneOrTouch();
-    const rawResultUrl = useMemo(() => {
-      if (image.readerUrl) return apiUrl(image.readerUrl);
-      if (image.fullUrl) return apiUrl(image.fullUrl);
-      if (!image.result) {
-        return image.folder ? apiUrl(`/result/${image.folder}/final.png`) : null;
-      }
-      if (typeof image.result === 'string') {
-        return apiUrl(image.result);
-      }
-      if (image.result instanceof Blob) {
-        if (image.result.size < 1000 && image.folder) {
-          return apiUrl(`/result/${image.folder}/final.png`);
-        }
-        return URL.createObjectURL(image.result);
-      }
-      return image.folder ? apiUrl(`/result/${image.folder}/final.png`) : null;
-    }, [image.result, image.folder, image.readerUrl, image.fullUrl]);
-
-    const rawInputUrl = useMemo(() => {
-      if (!image.inputUrl) {
-        return image.folder ? apiUrl(`/result/${image.folder}/input.png`) : null;
-      }
-      if (typeof image.inputUrl === 'string') {
-        return apiUrl(image.inputUrl);
-      }
-      if (image.inputUrl instanceof Blob) {
-        return URL.createObjectURL(image.inputUrl);
-      }
-      return image.folder ? apiUrl(`/result/${image.folder}/input.png`) : null;
-    }, [image.inputUrl, image.folder]);
-
-    const [imgUrl, setImgUrl] = useState<string | null>(rawResultUrl);
-    const [isLoaded, setIsLoaded] = useState(false);
-    const [imgError, setImgError] = useState(false);
-    const [aspectRatio, setAspectRatio] = useState<number>(0.707);
-    const [retryCount, setRetryCount] = useState(0);
-
-    const [showOriginal, setShowOriginal] = useState(image.sourceType === 'original');
-    const [originalUrl, setOriginalUrl] = useState<string | null>(rawInputUrl);
-    const [originalLoaded, setOriginalLoaded] = useState(false);
-    const [originalError, setOriginalError] = useState(false);
-    const [originalRetryCount, setOriginalRetryCount] = useState(0);
-
-    useEffect(() => {
-      setImgUrl(rawResultUrl ? addRetryParam(rawResultUrl, retryCount) : null);
-      setImgError(false);
-    }, [rawResultUrl, retryCount]);
-
-    useEffect(() => {
-      setOriginalUrl(rawInputUrl ? addRetryParam(rawInputUrl, originalRetryCount) : null);
-      setOriginalError(false);
-    }, [rawInputUrl, originalRetryCount]);
-
-    const handleImageLoad = async (e: React.SyntheticEvent<HTMLImageElement>) => {
-      const img = e.currentTarget;
-      // `load` can fire before the browser has decoded the bitmap. Keep the
-      // placeholder up until the pixels are ready, otherwise fast scrolling
-      // briefly exposes the black page background.
-      if (typeof img.decode === 'function') {
-        try {
-          await img.decode();
-        } catch {
-          // The load event still confirms a usable resource in this case.
-        }
-      }
-      if (img.naturalWidth > 0 && img.naturalHeight > 0) {
-        setAspectRatio(img.naturalWidth / img.naturalHeight);
-      }
-      if (showOriginal) {
-        setOriginalLoaded(true);
-      } else {
-        setIsLoaded(true);
-      }
-    };
-
-    const containerStyle: React.CSSProperties = isSinglePage
-      ? {}
-      : {
-          width: '100%',
-          maxWidth: readerWidth,
-        };
-
-    const displayUrl = showOriginal ? originalUrl : imgUrl;
-    const displayedError = showOriginal ? originalError : imgError;
-    const displayedLoaded = showOriginal ? originalLoaded : isLoaded;
-    const retryDisplayedImage = () => {
-      if (showOriginal) {
-        setOriginalError(false);
-        setOriginalRetryCount((count) => count + 1);
-      } else {
-        setImgError(false);
-        setIsLoaded(false);
-        setRetryCount((count) => count + 1);
-      }
-    };
-
-    if (isSinglePage) {
-      return (
-        <div
-          ref={pageRef}
-          className={`relative flex flex-col items-center justify-center w-full ${isPhoneOrTouch() ? 'min-h-[100svh]' : 'h-full'} select-none`}
-        >
-          <div
-            className={`relative flex items-center justify-center ${
-              singlePageFit === 'height'
-                ? (showControls ? 'max-h-[calc(100vh-130px)]' : 'max-h-screen') + ' w-auto'
-                : 'w-full'
-            } transition-[max-height] duration-200`}
-            style={{
-              maxWidth: singlePageFit === 'width' ? readerWidth : undefined,
-            }}
-          >
-            <div
-              className={`absolute top-2 right-2 z-20 flex items-center space-x-1.5 transition-opacity duration-150 ${
-                showControls ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-              }`}
-            >
-              {onEditImage && image.sourceType !== 'original' && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onEditImage(image);
-                  }}
-                  className="min-h-11 rounded-lg bg-black/65 px-3 py-2 text-xs font-semibold text-white backdrop-blur-sm hover:bg-black/80 focus-visible:outline-2 focus-visible:outline-indigo-400 flex items-center space-x-1"
-              title={getReaderTitle('Edit text on this page', touchDevice)}
-                  aria-label={`Edit page ${index + 1}`}
-                >
-                  <Icon icon="carbon:text-annotation-toggle" className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Edit</span>
-                </button>
-              )}
-              {image.sourceType !== 'original' && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowOriginal((value) => !value);
-                  }}
-                  className="min-h-11 rounded-lg bg-black/65 px-3 py-2 text-xs font-semibold text-white backdrop-blur-sm hover:bg-black/80 focus-visible:outline-2 focus-visible:outline-indigo-400"
-                  aria-pressed={showOriginal}
-                  aria-label={showOriginal ? 'Show translated page' : 'Peek at original page'}
-                >
-                  {showOriginal ? 'Translated' : 'Original'}
-                </button>
-              )}
-            </div>
-
-            {displayUrl && !displayedError ? (
-              <img
-                src={displayUrl}
-                alt={`Page ${index + 1}`}
-                decoding="async"
-                loading={isPriority ? 'eager' : 'lazy'}
-                className={`rounded-md shadow-2xl transition-opacity duration-150 ${
-                  singlePageFit === 'height'
-                    ? 'max-h-[calc(100vh-130px)] max-w-full w-auto h-auto object-contain'
-                    : 'w-full h-auto block'
-                } ${displayedLoaded ? 'opacity-100' : 'opacity-0'}`}
-                onLoad={handleImageLoad}
-                onError={() => {
-                  if (showOriginal) {
-                    if (originalUrl && /^https?:\/\//i.test(originalUrl) && typeof window !== 'undefined') {
-                      try {
-                        const parsed = new URL(originalUrl);
-                        setOriginalUrl(parsed.pathname + parsed.search);
-                        return;
-                      } catch {}
-                    }
-                    setOriginalError(true);
-                  } else {
-                    if (imgUrl && /^https?:\/\//i.test(imgUrl) && typeof window !== 'undefined') {
-                      try {
-                        const parsed = new URL(imgUrl);
-                        setImgUrl(parsed.pathname + parsed.search);
-                        return;
-                      } catch {}
-                    }
-                    if (image.folder && displayUrl && !displayUrl.includes(`/result/${image.folder}/final.png`)) {
-                      setImgUrl(apiUrl(`/result/${image.folder}/final.png?t=${Date.now()}`));
-                      return;
-                    }
-                    setImgError(true);
-                  }
-                }}
-              />
-              ) : null}
-
-              {/* Placeholder / Loading State while decoding image */}
-            {(!displayedLoaded || !displayUrl) && !displayedError && (
-              <div
-                className="flex items-center justify-center bg-zinc-900 border border-zinc-800 rounded-xl shadow-inner animate-pulse"
-                style={{
-                  width: singlePageFit === 'height' ? 'min(70vh, 550px)' : '100%',
-                  aspectRatio: `${aspectRatio}`,
-                }}
-              >
-                <div className="flex flex-col items-center justify-center space-y-3 p-6 text-center">
-                  <div className="w-14 h-14 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center shadow">
-                    <Icon icon="carbon:image" className="w-7 h-7 text-indigo-400 animate-pulse" />
-                  </div>
-                  <div className="flex flex-col items-center space-y-1">
-                    <span className="text-lg font-bold text-zinc-100 tracking-wide">
-                      Page {index + 1}
-                    </span>
-                    <span className="text-xs font-mono text-zinc-400">Loading page...</span>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {displayedError && (
-              <div className="flex flex-col items-center justify-center p-8 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-400">
-                <Icon icon="carbon:warning" className="w-10 h-10 text-amber-500 mb-2" />
-                <p className="text-sm font-medium text-zinc-300">
-                  {showOriginal ? 'Original page unavailable' : `Failed to load page ${index + 1}`}
-                </p>
-                <button
-                  type="button"
-                  onClick={retryDisplayedImage}
-                  className="mt-3 rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-zinc-700 focus-visible:outline-2 focus-visible:outline-indigo-400"
-                >
-                  Retry
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    }
-
-    // Infinite Scroll Mode Item
-    return (
-      <div
-        ref={pageRef}
-        data-page-index={index}
-        style={containerStyle}
-        className="group relative w-full overflow-hidden bg-zinc-950 transition-[max-width] duration-150"
-      >
-        {/* Floating Quick Action Overlay (zero vertical height, no page separation) */}
-        <div
-          className={`absolute top-2 right-2 z-20 flex items-center space-x-1.5 transition-opacity duration-150 ${
-            showControls ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-          }`}
-        >
-          {onEditImage && image.sourceType !== 'original' && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onEditImage(image);
-              }}
-              className="min-h-8 flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs font-medium text-white bg-black/70 hover:bg-indigo-600 backdrop-blur-sm transition-colors shadow-md"
-                  title={getReaderTitle('Edit text on this page', touchDevice)}
-              aria-label={`Edit page ${index + 1}`}
-            >
-              <Icon icon="carbon:text-annotation-toggle" className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Edit</span>
-            </button>
-          )}
-          {image.sourceType !== 'original' && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowOriginal((value) => !value);
-              }}
-              className="min-h-8 flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs font-medium text-white bg-black/70 hover:bg-indigo-600 backdrop-blur-sm transition-colors shadow-md"
-              aria-pressed={showOriginal}
-              aria-label={showOriginal ? `Show translated page ${index + 1}` : `Peek at original page ${index + 1}`}
-            >
-              <Icon icon={showOriginal ? 'carbon:view-off' : 'carbon:view'} className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">{showOriginal ? 'Translated' : 'Original'}</span>
-            </button>
-          )}
-        </div>
-
-        {/* Page Image Container with pre-allocated aspect ratio to eliminate layout shift */}
-        <div
-          className="relative w-full bg-zinc-950 flex items-center justify-center overflow-hidden"
-          style={{
-            minHeight: isLoaded ? undefined : '450px',
-            aspectRatio: isLoaded ? undefined : `${aspectRatio}`,
-          }}
-        >
-          {displayUrl && !displayedError ? (
-            <img
-              src={displayUrl}
-              alt={`Page ${index + 1}`}
-              decoding="async"
-              loading={isPriority ? 'eager' : 'lazy'}
-              className={`w-full h-auto block transition-opacity duration-150 ${
-                displayedLoaded ? 'opacity-100' : 'opacity-0'
-              }`}
-              onLoad={handleImageLoad}
-              onError={() => {
-                if (showOriginal) {
-                  if (originalUrl && /^https?:\/\//i.test(originalUrl) && typeof window !== 'undefined') {
-                    try {
-                      const parsed = new URL(originalUrl);
-                      setOriginalUrl(parsed.pathname + parsed.search);
-                      return;
-                    } catch {}
-                  }
-                  setOriginalError(true);
-                } else {
-                  if (imgUrl && /^https?:\/\//i.test(imgUrl) && typeof window !== 'undefined') {
-                    try {
-                      const parsed = new URL(imgUrl);
-                      setImgUrl(parsed.pathname + parsed.search);
-                      return;
-                    } catch {}
-                  }
-                  if (image.folder && displayUrl && !displayUrl.includes(`/result/${image.folder}/final.png`)) {
-                    setImgUrl(apiUrl(`/result/${image.folder}/final.png?t=${Date.now()}`));
-                    return;
-                  }
-                  setImgError(true);
-                }
-              }}
-            />
-          ) : null}
-
-          {/* High-contrast numbered skeleton placeholder to prevent empty black regions */}
-          {(!displayedLoaded || !displayUrl) && !displayedError && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-900 border border-zinc-800 rounded-xl m-2 text-zinc-200">
-              <div className="w-14 h-14 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center shadow mb-3">
-                <Icon icon="carbon:image" className="w-7 h-7 text-indigo-400 animate-pulse" />
-              </div>
-              <span className="text-xl font-bold text-zinc-100 tracking-wide mb-1">
-                Page {index + 1}
-              </span>
-              <span className="text-xs font-mono text-zinc-400">Loading page...</span>
-            </div>
-          )}
-
-          {displayedError && (
-            <div className="py-16 flex flex-col items-center justify-center text-zinc-400">
-              <Icon icon="carbon:warning" className="w-8 h-8 text-amber-500 mb-2" />
-              <span className="text-xs font-medium">
-                {showOriginal ? 'Original page unavailable' : `Failed to load Page ${index + 1}`}
-              </span>
-              <button
-                type="button"
-                onClick={retryDisplayedImage}
-                className="mt-3 rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-zinc-700 focus-visible:outline-2 focus-visible:outline-indigo-400"
-              >
-                Retry
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-);
-
-PageItem.displayName = 'PageItem';
 
 // ──────────────────────────────────────────────────────────────
 // MangaReaderModal — Main Reader Component
@@ -1074,13 +601,6 @@ export const MangaReaderModal: React.FC<MangaReaderModalProps> = ({
     };
   }, []);
 
-  const widthPresets: { label: string; value: ReaderWidth; desc: string }[] = [
-    { label: 'Compact', value: '60%', desc: '60% of screen width' },
-    { label: 'Standard', value: '75%', desc: '75% of screen width' },
-    { label: 'Default', value: '90%', desc: '90% of screen width (Default)' },
-    { label: 'Full Width', value: '100%', desc: '100% of screen width' },
-  ];
-
   const renderPageJumpForm = (mobile = false) => (
     <form
       onSubmit={handleSubmitPageJump}
@@ -1251,92 +771,18 @@ export const MangaReaderModal: React.FC<MangaReaderModalProps> = ({
               </button>
             </div>
 
-            {/* Page Width Dropdown Button */}
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setShowWidthMenu((prev) => !prev)}
-                className="min-h-8 sm:min-h-10 flex items-center space-x-1 px-2 sm:px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs border border-zinc-700/60 transition-colors"
-                title={getReaderTitle('Change page width', touchDevice)}
-                aria-label={`Change page width, currently ${readerWidth}`}
-              >
-                <Icon icon="carbon:fit-to-width" className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-indigo-400" />
-                <span className="font-mono text-xs hidden md:inline">{readerWidth}</span>
-                <Icon icon="carbon:chevron-down" className="w-3 h-3 text-zinc-400 hidden sm:inline" />
-              </button>
-
-              {showWidthMenu && (
-                <div
-                  className="absolute right-0 mt-1.5 w-44 rounded-xl bg-zinc-900 border border-zinc-700 shadow-2xl p-1 z-50 animate-in fade-in zoom-in-95"
-                  onMouseLeave={() => setShowWidthMenu(false)}
-                >
-                  <div className="px-2.5 py-1.5 text-xs font-semibold text-zinc-300 uppercase tracking-wider border-b border-zinc-800">
-                    Page Width
-                  </div>
-                  {widthPresets.map((preset) => (
-                    <button
-                      key={preset.value}
-                      type="button"
-                      onClick={() => handleSetWidth(preset.value)}
-                      className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
-                        readerWidth === preset.value
-                          ? 'bg-indigo-600/30 text-indigo-300 font-semibold'
-                          : 'text-zinc-300 hover:bg-zinc-800 hover:text-white'
-                      }`}
-                    >
-                      <span>{preset.label}</span>
-                      <span className="text-xs font-mono text-zinc-400">{preset.value}</span>
-                    </button>
-                  ))}
-
-                  {readerMode === 'single' && (
-                    <>
-                      <div className="my-1 border-t border-zinc-800" />
-                      <div className="px-2.5 py-1 text-xs font-semibold text-zinc-300 uppercase tracking-wider">
-                        Single Page Fit
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleSetSinglePageFit('height')}
-                        className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
-                          singlePageFit === 'height'
-                            ? 'bg-indigo-600/30 text-indigo-300 font-semibold'
-                            : 'text-zinc-300 hover:bg-zinc-800 hover:text-white'
-                        }`}
-                      >
-                        <div className="flex items-center space-x-1.5">
-                          <Icon icon="carbon:fit-to-screen" className="w-3.5 h-3.5" />
-                          <span>Fit Screen Height</span>
-                        </div>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleSetSinglePageFit('width')}
-                        className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
-                          singlePageFit === 'width'
-                            ? 'bg-indigo-600/30 text-indigo-300 font-semibold'
-                            : 'text-zinc-300 hover:bg-zinc-800 hover:text-white'
-                        }`}
-                      >
-                        <div className="flex items-center space-x-1.5">
-                          <Icon icon="carbon:fit-to-width" className="w-3.5 h-3.5" />
-                          <span>Fit Page Width</span>
-                        </div>
-                      </button>
-                    </>
-                  )}
-                  <div className="my-1 border-t border-zinc-800" />
-                  <button
-                    type="button"
-                    onClick={handleStartOver}
-                    className="w-full flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg text-xs text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors"
-                  >
-                    <Icon icon="carbon:rewind-10" className="w-3.5 h-3.5" />
-                    <span>Start over</span>
-                  </button>
-                </div>
-              )}
-            </div>
+            <ReaderWidthMenu
+              touchDevice={touchDevice}
+              readerMode={readerMode}
+              readerWidth={readerWidth}
+              showWidthMenu={showWidthMenu}
+              singlePageFit={singlePageFit}
+              onToggle={() => setShowWidthMenu((prev) => !prev)}
+              onClose={() => setShowWidthMenu(false)}
+              onSetWidth={handleSetWidth}
+              onSetSinglePageFit={handleSetSinglePageFit}
+              onStartOver={handleStartOver}
+            />
           </div>
 
           {/* Right Actions: Fullscreen & Close */}
@@ -1365,119 +811,26 @@ export const MangaReaderModal: React.FC<MangaReaderModalProps> = ({
         {touchDevice && renderPageJumpForm(true)}
       </header>
 
-      {/* Main Reader Body */}
-      <main className={`${touchDevice ? 'relative flex-none overflow-visible' : 'relative flex-1 h-full overflow-hidden'} w-full bg-zinc-950 flex flex-col`} aria-label="Manga pages">
-        {readerMode === 'infinite' ? (
-          /* ── Infinite Scroll Mode ── */
-          <div
-            ref={scrollContainerRef}
-            onScroll={handleScroll}
-            onClick={(e) => {
-              const target = e.target as HTMLElement;
-              if (target.closest('button, a, input, select, textarea')) return;
-              toggleControls();
-            }}
-            className={`${touchDevice ? 'w-full overflow-visible' : 'flex-1 h-full overflow-y-auto overflow-x-hidden manga-reader-scroll'} cursor-pointer`}
-            style={{ overscrollBehavior: touchDevice ? 'auto' : 'contain' }}
-          >
-            <div className="flex flex-col items-center w-full">
-              {images.map((image, idx) => (
-                <div
-                  key={image.id}
-                  ref={(el) => { pageRefs.current[idx] = el; }}
-                  data-page-index={idx}
-                  className="flex w-full justify-center bg-zinc-950"
-                >
-                  <PageItem
-                    image={image}
-                    index={idx}
-                    readerWidth={readerWidth}
-                    onEditImage={onEditImage}
-                    isPriority={priorityPageIndices.has(idx)}
-                    showControls={showControls}
-                  />
-                </div>
-              ))}
-
-              {/* End of Manga Banner */}
-              <div className="py-12 flex flex-col items-center space-y-2 text-zinc-400">
-                <Icon icon="carbon:checkmark-filled" className="w-8 h-8 text-indigo-500" />
-                <p className="text-sm font-semibold text-zinc-300">End of {mangaTitle}</p>
-                <p className="text-xs text-zinc-400">{images.length} pages read</p>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleJumpToPage(1);
-                  }}
-                  className="mt-2 flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-300 transition-colors"
-                >
-                  <Icon icon="carbon:arrow-up" className="w-3.5 h-3.5" />
-                  <span>Back to Top</span>
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : (
-          /* ── Single Page Mode ── */
-          <div
-            ref={singlePageScrollRef}
-            onScroll={handleScroll}
-            onClick={(e) => {
-              const target = e.target as HTMLElement;
-              if (target.closest('button, a, input, select, textarea')) return;
-              toggleControls();
-            }}
-            className={`${touchDevice ? 'relative flex-none w-full overflow-visible' : 'relative flex-1 h-full overflow-y-auto overflow-x-hidden manga-reader-scroll'} flex flex-col items-center justify-center p-0 sm:p-2 cursor-pointer`}
-          >
-            {/* Click Navigation Overlay Zones */}
-            <div
-              onClick={(e) => {
-                e.stopPropagation();
-                handlePrevPage();
-              }}
-              className={`absolute top-0 bottom-0 left-0 w-1/4 z-10 cursor-w-resize group/left flex items-center justify-start pl-4 transition-opacity ${
-                currentPage === 1 ? 'pointer-events-none' : ''
-              }`}
-              title={getReaderTitle('Previous Page (ArrowLeft / A)', touchDevice)}
-            >
-              <div className="p-3 rounded-full bg-black/50 text-white/40 group-hover/left:text-white group-hover/left:bg-black/70 backdrop-blur-sm opacity-0 group-hover/left:opacity-100 transition-all">
-                <Icon icon="carbon:chevron-left" className="w-6 h-6" />
-              </div>
-            </div>
-
-            <div
-              onClick={(e) => {
-                e.stopPropagation();
-                handleNextPage();
-              }}
-              className={`absolute top-0 bottom-0 right-0 w-1/4 z-10 cursor-e-resize group/right flex items-center justify-end pr-4 transition-opacity ${
-                currentPage === images.length ? 'pointer-events-none' : ''
-              }`}
-              title={getReaderTitle('Next Page (ArrowRight / Space / D)', touchDevice)}
-            >
-              <div className="p-3 rounded-full bg-black/50 text-white/40 group-hover/right:text-white group-hover/right:bg-black/70 backdrop-blur-sm opacity-0 group-hover/right:opacity-100 transition-all">
-                <Icon icon="carbon:chevron-right" className="w-6 h-6" />
-              </div>
-            </div>
-
-            {/* Active Single Page */}
-            {images[currentPage - 1] && (
-              <PageItem
-                key={images[currentPage - 1].id}
-                image={images[currentPage - 1]}
-                index={currentPage - 1}
-                readerWidth={readerWidth}
-                onEditImage={onEditImage}
-                isSinglePage={true}
-                singlePageFit={singlePageFit}
-                isPriority={true}
-                showControls={showControls}
-              />
-            )}
-          </div>
-        )}
-      </main>
+      <ReaderPageStage
+        images={images}
+        mangaTitle={mangaTitle}
+        readerMode={readerMode}
+        touchDevice={touchDevice}
+        currentPage={currentPage}
+        readerWidth={readerWidth}
+        singlePageFit={singlePageFit}
+        showControls={showControls}
+        priorityPageIndices={priorityPageIndices}
+        pageRefs={pageRefs}
+        scrollContainerRef={scrollContainerRef}
+        singlePageScrollRef={singlePageScrollRef}
+        onEditImage={onEditImage}
+        onScroll={handleScroll}
+        onToggleControls={toggleControls}
+        onJumpToPage={handleJumpToPage}
+        onPreviousPage={handlePrevPage}
+        onNextPage={handleNextPage}
+      />
 
       {readerMode === 'infinite' && currentPage > 1 && (
         <button

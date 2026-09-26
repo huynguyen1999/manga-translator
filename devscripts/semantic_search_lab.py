@@ -1,4 +1,4 @@
-"""Index local manga archives and compare exact BGE/SigLIP retrieval."""
+"""Index local manga archives and compare exact text/image semantic retrieval."""
 from __future__ import annotations
 
 import argparse
@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from server.search_embeddings import (
-    DIMENSIONS, IMAGE_MODEL, IMAGE_REVISION, PROFILE, TEXT_MODEL, TEXT_REVISION,
+    DIMENSIONS, IMAGE_MODEL, IMAGE_REVISION, PROFILE, TEXT_MODEL_OPTIONS,
     SearchEncoders, fingerprint, rank_results,
 )
 
@@ -56,8 +56,8 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _item_fingerprint(modality: str, content_hash: str) -> str:
-    revision = TEXT_REVISION if modality == "summary" else IMAGE_REVISION
+def _item_fingerprint(modality: str, content_hash: str, encoder: SearchEncoders) -> str:
+    revision = TEXT_MODEL_OPTIONS[encoder.text_model][1] if modality == "summary" else IMAGE_REVISION
     preprocessing = CHUNKING if modality == "summary" else PREPROCESSING
     return fingerprint(f"{PROFILE}:{revision}:{preprocessing}:{content_hash}")
 
@@ -186,9 +186,10 @@ def _json_write(path: Path, value) -> None:
     temporary.replace(path)
 
 
-def _old_vectors(cache: Path, manifest: dict, modality: str, dimension: int) -> dict[str, object]:
-    expected = {"profile": PROFILE, "models": {"summary": TEXT_MODEL, "image": IMAGE_MODEL},
-                "textRevision": TEXT_REVISION, "imageRevision": IMAGE_REVISION,
+def _old_vectors(cache: Path, manifest: dict, modality: str, dimension: int, encoder: SearchEncoders) -> dict[str, object]:
+    text_name, text_revision, _ = TEXT_MODEL_OPTIONS[encoder.text_model]
+    expected = {"profile": PROFILE, "models": {"summary": text_name, "image": IMAGE_MODEL},
+                "textRevision": text_revision, "imageRevision": IMAGE_REVISION,
                 "preprocessing": PREPROCESSING, "chunking": CHUNKING}
     if any(manifest.get(key) != value for key, value in expected.items()):
         return {}
@@ -238,7 +239,7 @@ def _embed_entries(encoder: SearchEncoders, modality: str, entries: list[dict], 
     return matrix, indexes, len(pending), reused
 
 
-def build_index(inputs: list[Path], output: Path, encoder: SearchEncoders) -> dict:
+def build_index(inputs: list[Path], output: Path, encoder: SearchEncoders, mode: str = "all") -> dict:
     import numpy as np
 
     output = output.expanduser().resolve()
@@ -248,29 +249,49 @@ def build_index(inputs: list[Path], output: Path, encoder: SearchEncoders) -> di
     mangas = load_datasets(inputs, extracted)
     summary_entries, image_entries = [], []
     for manga in mangas:
-        if manga.summary:
+        if mode in ("summary", "all") and manga.summary:
             for chunk_index, chunk in enumerate(encoder.chunks(manga.summary)):
-                summary_entries.append({"mangaId": manga.id, "title": manga.title, "chunkIndex": chunk_index,
+                summary_entries.append({"mangaId": manga.id, "sourceId": manga.source_id, "title": manga.title, "chunkIndex": chunk_index,
                     "start": chunk["start"], "end": chunk["end"], "text": chunk["text"],
-                    "fingerprint": _item_fingerprint("summary", fingerprint(chunk["text"]))})
-        for page in manga.pages:
-            image_entries.append({"mangaId": manga.id, "title": manga.title, "page": page.number,
+                    "fingerprint": _item_fingerprint("summary", fingerprint(chunk["text"]), encoder)})
+        for page in manga.pages if mode in ("image", "all") else ():
+            image_entries.append({"mangaId": manga.id, "sourceId": manga.source_id, "title": manga.title, "page": page.number,
                 "path": str(page.path), "region": None,
-                "fingerprint": _item_fingerprint("image", _sha256_file(page.path))})
+                "fingerprint": _item_fingerprint("image", _sha256_file(page.path), encoder)})
 
     manifest_path = cache / "manifest.json"
     old_manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
-    summary_old = _old_vectors(cache, old_manifest, "summary", DIMENSIONS["summary"])
-    image_old = _old_vectors(cache, old_manifest, "image", DIMENSIONS["image"])
-    summary_vectors, summary_indexes, summary_embedded, summary_reused = _embed_entries(
-        encoder, "summary", summary_entries, summary_old, DIMENSIONS["summary"])
-    image_vectors, image_indexes, image_embedded, image_reused = _embed_entries(
-        encoder, "image", image_entries, image_old, DIMENSIONS["image"])
+    def preserve(modality: str):
+        if modality == "summary" and old_manifest.get("textRevision") != TEXT_MODEL_OPTIONS[encoder.text_model][1]:
+            return [], np.empty((0, encoder.text_dimension), dtype=np.float32)
+        records_path, vectors_path = cache / f"{modality}_records.json", cache / f"{modality}_vectors.npy"
+        if records_path.exists() and vectors_path.exists():
+            return json.loads(records_path.read_text(encoding="utf-8")), np.load(vectors_path, allow_pickle=False)
+        return [], np.empty((0, encoder.text_dimension if modality == "summary" else DIMENSIONS[modality]), dtype=np.float32)
 
-    for entry in summary_entries:
-        entry["vectorIndex"] = summary_indexes[entry["fingerprint"]]
-    for entry in image_entries:
-        entry["vectorIndex"] = image_indexes[entry["fingerprint"]]
+    if mode in ("summary", "all"):
+        summary_old = _old_vectors(cache, old_manifest, "summary", encoder.text_dimension, encoder)
+        summary_vectors, summary_indexes, summary_embedded, summary_reused = _embed_entries(
+            encoder, "summary", summary_entries, summary_old, encoder.text_dimension)
+    else:
+        summary_entries, summary_vectors = preserve("summary")
+        summary_embedded = summary_reused = 0
+        summary_indexes = {}
+    if mode in ("image", "all"):
+        image_old = _old_vectors(cache, old_manifest, "image", DIMENSIONS["image"], encoder)
+        image_vectors, image_indexes, image_embedded, image_reused = _embed_entries(
+            encoder, "image", image_entries, image_old, DIMENSIONS["image"])
+    else:
+        image_entries, image_vectors = preserve("image")
+        image_embedded = image_reused = 0
+        image_indexes = {}
+
+    if summary_indexes:
+        for entry in summary_entries:
+            entry["vectorIndex"] = summary_indexes[entry["fingerprint"]]
+    if image_indexes:
+        for entry in image_entries:
+            entry["vectorIndex"] = image_indexes[entry["fingerprint"]]
     manifest_path.unlink(missing_ok=True)
     np.save(cache / "summary_vectors.npy", summary_vectors)
     np.save(cache / "image_vectors.npy", image_vectors)
@@ -278,8 +299,8 @@ def build_index(inputs: list[Path], output: Path, encoder: SearchEncoders) -> di
     _json_write(cache / "image_records.json", image_entries)
     manifest = {
         "profile": PROFILE,
-        "models": {"summary": TEXT_MODEL, "image": IMAGE_MODEL},
-        "textRevision": TEXT_REVISION,
+        "models": {"summary": TEXT_MODEL_OPTIONS[encoder.text_model][0], "image": IMAGE_MODEL},
+        "textRevision": TEXT_MODEL_OPTIONS[encoder.text_model][1],
         "imageRevision": IMAGE_REVISION,
         "preprocessing": PREPROCESSING,
         "chunking": CHUNKING,
@@ -294,7 +315,7 @@ def build_index(inputs: list[Path], output: Path, encoder: SearchEncoders) -> di
             "imagesEmbedded": image_embedded, "imagesReused": image_reused, "output": str(output)}
 
 
-def _load_index(index: Path):
+def _load_index(index: Path, encoder: SearchEncoders):
     import numpy as np
 
     cache = index.expanduser().resolve() / "cache"
@@ -302,15 +323,16 @@ def _load_index(index: Path):
     if not manifest_path.exists():
         raise FileNotFoundError(f"No index found under {cache}; run the index command first")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if (manifest.get("profile") != PROFILE or manifest.get("models") != {"summary": TEXT_MODEL, "image": IMAGE_MODEL}
-            or manifest.get("textRevision") != TEXT_REVISION or manifest.get("imageRevision") != IMAGE_REVISION
+    text_name, text_revision, _ = TEXT_MODEL_OPTIONS[encoder.text_model]
+    if (manifest.get("profile") != PROFILE or manifest.get("models") != {"summary": text_name, "image": IMAGE_MODEL}
+            or manifest.get("textRevision") != text_revision or manifest.get("imageRevision") != IMAGE_REVISION
             or manifest.get("preprocessing") != PREPROCESSING or manifest.get("chunking") != CHUNKING):
         raise ValueError("Index model profile differs from this code; rebuild the index")
     summary_records = json.loads((cache / "summary_records.json").read_text(encoding="utf-8"))
     image_records = json.loads((cache / "image_records.json").read_text(encoding="utf-8"))
     summary_vectors = np.load(cache / "summary_vectors.npy", allow_pickle=False)
     image_vectors = np.load(cache / "image_vectors.npy", allow_pickle=False)
-    for records, vectors, dimension in ((summary_records, summary_vectors, DIMENSIONS["summary"]),
+    for records, vectors, dimension in ((summary_records, summary_vectors, encoder.text_dimension),
                                         (image_records, image_vectors, DIMENSIONS["image"])):
         if vectors.ndim != 2 or vectors.shape[1] != dimension or any(
                 not isinstance(row.get("vectorIndex"), int) or not 0 <= row["vectorIndex"] < len(vectors)
@@ -345,7 +367,8 @@ def _rank_map(groups: dict, modality: str) -> dict:
 def run_query(query: str, index: dict, encoder: SearchEncoders, modes: list[str], top_k: int) -> dict:
     import numpy as np
 
-    needed = {"summary" if mode == "text" else mode for mode in modes}
+    needed = {modality for mode in modes for modality in
+              ({"summary", "image"} if mode == "combined" else {"summary" if mode == "text" else mode})}
     query_vectors = {modality: np.asarray(encoder.encode(modality, [query], query=True)[0], dtype=np.float32)
                      for modality in needed}
     summary_groups = _groups(index["summary_records"], index["summary_vectors"], query_vectors["summary"], "summary") if "summary" in needed else {}
@@ -361,28 +384,49 @@ def run_query(query: str, index: dict, encoder: SearchEncoders, modes: list[str]
             summary = summary_groups.get(manga_id, [])
             images = image_groups.get(manga_id, [])
             exemplar = (summary or images)[0]
-            rows.append({"id": manga_id, "title": exemplar["title"], "rank": rank, "score": score,
+            rows.append({"id": manga_id, "title": exemplar["title"], "rank": rank,
+                "score": score if mode != "combined" else None, "rankScore": score,
                 "textRank": text_ranks.get(manga_id), "imageRank": image_ranks.get(manga_id),
                 "summaryScore": summary[0]["score"] if summary else None,
+                "imageScore": images[0]["score"] if images else None,
                 "excerpt": summary[0]["text"] if summary else None,
                 "pages": [{"number": row["page"], "path": row["path"], "score": row["score"]} for row in images]})
         output[mode] = rows
     return output
 
 
-def _print_results(query: str, results: dict) -> None:
+def retrieve_passages(query: str, index: dict, encoder: SearchEncoders, top_k: int) -> list[dict]:
+    import numpy as np
+
+    query_vector = np.asarray(encoder.encode("summary", [query], query=True)[0], dtype=np.float32)
+    scores = index["summary_vectors"] @ query_vector
+    hits = sorted(index["summary_records"],
+                  key=lambda row: (-float(scores[row["vectorIndex"]]), row["mangaId"], row["chunkIndex"]))
+    return [{"rank": rank, "mangaId": row["mangaId"], "title": row["title"],
+             "chunkIndex": row["chunkIndex"], "start": row["start"], "end": row["end"],
+             "score": float(scores[row["vectorIndex"]]), "text": row["text"]}
+            for rank, row in enumerate(hits[:top_k], 1)]
+
+
+def _print_results(query: str, results: dict, context_chars: int = 1000) -> None:
     print(f'QUERY\n{query}')
     labels = {"image": "IMAGE ONLY", "text": "TEXT ONLY", "combined": "COMBINED"}
     for mode, rows in results.items():
         print(f"\n{labels[mode]}\n" + "─" * 44)
         for row in rows:
-            print(f'{row["rank"]}. {row["title"]} [{row["id"]}]  {row["score"]:.4f}')
+            if mode == "combined":
+                text_score = f'{row["summaryScore"]:.4f}' if row["summaryScore"] is not None else "—"
+                image_score = f'{row["imageScore"]:.4f}' if row["imageScore"] is not None else "—"
+                scores = f"text cosine {text_score} · image cosine {image_score}"
+            else:
+                scores = f'cosine {row["score"]:.4f}'
+            print(f'{row["rank"]}. {row["title"]} [{row["id"]}]  {scores}')
             if row["pages"]:
-                pages = ", ".join(f'{page["number"]} ({page["score"]:.4f})' for page in row["pages"])
+                pages = ", ".join(f'{page["number"]} (cosine {page["score"]:.4f})' for page in row["pages"])
                 print(f"   pages: {pages}")
             if row["excerpt"]:
                 excerpt = " ".join(row["excerpt"].split())
-                print(f'   "{excerpt[:260]}{"…" if len(excerpt) > 260 else ""}"')
+                print(f'   Summary context: "{excerpt[:context_chars]}{"…" if len(excerpt) > context_chars else ""}"')
             if mode == "combined":
                 print(f'   text #{row["textRank"] or "—"} · image #{row["imageRank"] or "—"}')
 
@@ -407,11 +451,15 @@ def write_html_report(query: str, results: dict, destination: Path) -> None:
             evidence = []
             for page in row["pages"]:
                 src = _thumbnail(page["path"]) if Path(page["path"]).is_file() else ""
-                evidence.append(f'<figure><img src="{src}" alt="Page {page["number"]}"><figcaption>Page {page["number"]} · {page["score"]:.4f}</figcaption></figure>')
+                evidence.append(f'<figure><img src="{src}" alt="Page {page["number"]}"><figcaption>Page {page["number"]} · cosine {page["score"]:.4f}</figcaption></figure>')
             excerpt = f'<blockquote>{html.escape(row["excerpt"])}</blockquote>' if row["excerpt"] else ""
             modality_ranks = (f'<p class="ranks">Text #{row["textRank"] or "—"} · Image #{row["imageRank"] or "—"}</p>'
                               if mode == "combined" else "")
-            cards.append(f'<article><div class="heading"><span>#{row["rank"]}</span><h3>{html.escape(row["title"])}</h3><b>{row["score"]:.4f}</b></div>{modality_ranks}{excerpt}<div class="pages">{"".join(evidence)}</div></article>')
+            text_score = f'{row["summaryScore"]:.4f}' if row["summaryScore"] is not None else "—"
+            image_score = f'{row["imageScore"]:.4f}' if row["imageScore"] is not None else "—"
+            scores = (f'Text cosine {text_score} · Image cosine {image_score}'
+                      if mode == "combined" else f'Cosine {row["score"]:.4f}')
+            cards.append(f'<article><div class="heading"><span>#{row["rank"]}</span><h3>{html.escape(row["title"])}</h3><b>{scores}</b></div>{modality_ranks}{excerpt}<div class="pages">{"".join(evidence)}</div></article>')
         sections.append(f'<section><h2>{labels[mode]}</h2>{"".join(cards) or "<p>No results.</p>"}</section>')
     document = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Semantic search · {html.escape(query)}</title><style>
@@ -479,38 +527,64 @@ def main() -> None:
     index_parser = commands.add_parser("index", help="Build or incrementally update the local index")
     index_parser.add_argument("--input", nargs="+", type=Path, required=True, help="Manga directories or ZIP archives")
     index_parser.add_argument("--output", type=Path, default=Path("devscripts/data/semantic_search"))
+    index_parser.add_argument("--mode", choices=("summary", "image", "all"), default="all",
+                              help="Index summaries, images, or both (default: all)")
     index_parser.add_argument("--device", help="Torch device; defaults to CUDA, then MPS, then CPU")
-    for name in ("search", "compare", "benchmark"):
+    index_parser.add_argument("--text-model", choices=tuple(TEXT_MODEL_OPTIONS), default="bge",
+                              help="Text embedding model (default: bge)")
+    for name in ("search", "compare", "benchmark", "retrieve"):
         command = commands.add_parser(name)
         command.add_argument("--index", type=Path, default=Path("devscripts/data/semantic_search"))
         command.add_argument("--device", help="Torch device; defaults to CUDA, then MPS, then CPU")
+        command.add_argument("--text-model", choices=tuple(TEXT_MODEL_OPTIONS), default="bge",
+                             help="Text embedding model used to build this index")
     search_parser = commands.choices["search"]
     search_parser.add_argument("--query", required=True)
     search_parser.add_argument("--mode", choices=("image", "text", "combined"), default="combined")
-    search_parser.add_argument("--top-k", type=int, default=10)
+    search_parser.add_argument("--top-k", type=int, default=5)
     search_parser.add_argument("--report", type=Path)
+    search_parser.add_argument("--context-chars", type=int, default=1000,
+                               help="Maximum summary context characters to print (default: 1000)")
     compare_parser = commands.choices["compare"]
     compare_parser.add_argument("--query", required=True)
-    compare_parser.add_argument("--top-k", type=int, default=10)
+    compare_parser.add_argument("--top-k", type=int, default=5)
     compare_parser.add_argument("--report", type=Path)
+    compare_parser.add_argument("--context-chars", type=int, default=1000,
+                                help="Maximum summary context characters to print (default: 1000)")
     benchmark_parser = commands.choices["benchmark"]
     benchmark_parser.add_argument("--labels", type=Path, required=True,
                                   help="JSON containing queries with relevantManga and optional relevantPages lists")
     benchmark_parser.add_argument("--top-k", type=int, default=20)
     benchmark_parser.add_argument("--output", type=Path)
+    retrieve_parser = commands.choices["retrieve"]
+    retrieve_parser.add_argument("--query", required=True)
+    retrieve_parser.add_argument("--top-k", type=int, default=5)
+    retrieve_parser.add_argument("--output", type=Path, help="Write retrieval JSON to this file")
 
     args = parser.parse_args()
     try:
-        encoder = SearchEncoders(device=args.device)
+        encoder = SearchEncoders(device=args.device, text_model=args.text_model)
         if args.command == "index":
-            result = build_index(args.input, args.output, encoder)
+            result = build_index(args.input, args.output, encoder, args.mode)
             print(f'Indexed {result["manga"]} manga at {result["output"]}')
             print(f'Summary chunks: embedded {result["summaryEmbedded"]}, reused {result["summaryReused"]}')
             print(f'Images: embedded {result["imagesEmbedded"]}, reused {result["imagesReused"]}')
             return
-        index = _load_index(args.index)
+        index = _load_index(args.index, encoder)
         if args.top_k < 1:
             parser.error("--top-k must be at least 1")
+        if args.command == "retrieve":
+            result = {"query": args.query, "model": TEXT_MODEL_OPTIONS[encoder.text_model][0],
+                      "results": retrieve_passages(args.query, index, encoder, args.top_k)}
+            encoded = json.dumps(result, indent=2, ensure_ascii=False)
+            if args.output:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(encoded, encoding="utf-8")
+            else:
+                print(encoded)
+            return
+        if args.command in ("search", "compare") and args.context_chars < 1:
+            parser.error("--context-chars must be at least 1")
         if args.command == "benchmark":
             report = benchmark(index, encoder, args.labels, args.top_k)
             encoded = json.dumps(report, indent=2, ensure_ascii=False)
@@ -525,7 +599,7 @@ def main() -> None:
             return
         modes = ["image", "text", "combined"] if args.command == "compare" else [args.mode]
         results = run_query(args.query, index, encoder, modes, args.top_k)
-        _print_results(args.query, results)
+        _print_results(args.query, results, args.context_chars)
         if args.report:
             write_html_report(args.query, results, args.report)
             print(f"\nHTML report: {args.report}")

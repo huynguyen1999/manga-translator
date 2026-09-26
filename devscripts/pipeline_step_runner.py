@@ -279,13 +279,23 @@ def _validate_render_integrity(ctx: Context, strict: bool = False) -> List[str]:
             issues.append(f"{rid}: silent fallback to OCR/source text detected after translation")
 
         if mode is PlacementMode.FREE_TEXT:
+            unchanged_filtered = (
+                getattr(region, "review_reason", None) == "Translation identical to original"
+                and raw_src.casefold() == raw_trans.casefold()
+            )
+            if unchanged_filtered:
+                continue
             if not getattr(region, "_free_text_solver_applied", False):
-                issues.append(f"{rid}: free-text translation has no layout")
+                reviewed_suppression = (
+                    getattr(region, "_render_suppressed", False)
+                    and getattr(region, "review_required", False)
+                    and bool(getattr(region, "review_reason", None))
+                )
+                if not reviewed_suppression:
+                    issues.append(f"{rid}: free-text translation has no layout")
             else:
                 if getattr(region, "_bubble_box", None) is None or getattr(region, "_bubble_points", None) is None:
                     issues.append(f"{rid}: free-text layout target is missing")
-                if getattr(region, "_free_text_zone", None) is None:
-                    issues.append(f"{rid}: free-text inpaint target is missing")
                 if not has_inpaint_mask:
                     issues.append(f"{rid}: exact inpaint mask is missing")
                 elif shape is not None:

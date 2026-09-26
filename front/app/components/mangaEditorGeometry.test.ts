@@ -5,6 +5,8 @@ import {
   estimateFitFontSize,
   wrapTextLines,
 } from "./mangaEditorGeometry";
+import { getHorizontalLines, rgbToHex } from "@/features/editor/canvas";
+import { parseEditableTextBlocks } from "@/features/editor/serialization";
 
 
 // 1. Zoom fitting
@@ -60,5 +62,36 @@ for (const phrase of [
   const lines = wrapTextLines(phrase, measure, 90);
   assert.ok(lines.length > 0 && lines.every((line) => line.length > 0), `Phrase should wrap: ${phrase}`);
 }
+
+assert.equal(rgbToHex([255, 0, 128]), "#ff0080");
+const editorTextBlock = {
+  translation: "hello world",
+  width: 45,
+  font_size: 10,
+  letter_spacing: 0,
+} as Parameters<typeof getHorizontalLines>[0];
+assert.deepEqual(getHorizontalLines(editorTextBlock), ["hello", "world"]);
+
+const [loadedEditorBlock] = parseEditableTextBlocks([
+  {
+    x: "12",
+    y: 0,
+    width: 0,
+    height: 20,
+    translation: "text",
+    layout_segments: [
+      { x: 1, y: 2, width: 3, height: 4, text: "part" },
+      { x: 5, y: 6, width: 7, height: 8, text: "part two", rendered_png: "png" },
+    ],
+  },
+]);
+assert.equal(loadedEditorBlock.id, "bubble_0");
+assert.equal(loadedEditorBlock.x, 12);
+assert.equal(loadedEditorBlock.width, 120);
+assert.equal(loadedEditorBlock.height, 30);
+assert.equal(loadedEditorBlock.review_required, true);
+assert.equal(loadedEditorBlock.layout_segments?.[0].width, 3);
+assert.equal(loadedEditorBlock.layout_segments?.[0].rendered_png, null);
+assert.deepEqual(parseEditableTextBlocks(null), []);
 
 console.log("manga editor geometry checks passed successfully");

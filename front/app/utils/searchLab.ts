@@ -1,7 +1,7 @@
 import { apiUrl } from './api';
 
 export type SearchMode = 'summary' | 'image' | 'combined';
-export type SearchStatusFilter = 'all' | 'summarized' | 'not-summarized';
+export type SearchStatusFilter = 'all' | 'indexed' | 'not-indexed' | 'summarized' | 'not-summarized';
 export interface SearchManga {
   id: string; title: string; pageCount: number; originalCount: number; indexedPages: number;
   outdatedPages: number; summaryAvailable: boolean; summaryStale: boolean;
@@ -34,9 +34,9 @@ export const formatSimilarity = (score: number | null) => score === null ? 'Not 
 export const isActiveSearchJob = (job: SearchJob) => job.status === 'queued' || job.status === 'running';
 export const finishedSearchItems = (job: SearchJob) => job.completed + job.unchanged + job.skipped + job.failed;
 
-export async function searchRequest<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+export async function searchRequest<T>(path: string, body?: unknown, signal?: AbortSignal, method?: 'GET' | 'POST' | 'DELETE'): Promise<T> {
   const response = await fetch(apiUrl(`/api/search${path}`), {
-    method: body === undefined ? 'GET' : 'POST', signal,
+    method: method ?? (body === undefined ? 'GET' : 'POST'), signal,
     ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   });
   const value = await response.json();

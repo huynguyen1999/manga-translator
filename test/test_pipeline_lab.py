@@ -189,7 +189,7 @@ def test_pipeline_upscale_retry_persists_precomputed_batch_result(tmp_path):
 
 def test_pipeline_layout_retry_uses_background_cpu_lane(tmp_path):
     run = PipelineRun(tmp_path, "run-layout", Image.new("RGB", (8, 8)), Config())
-    run.ctx = Context(text_regions=[object()])
+    run.ctx = Context(text_regions=[SimpleNamespace(translation="")])
     run.checkpoint = AsyncMock()
     translator = SimpleNamespace(font_path=None)
 

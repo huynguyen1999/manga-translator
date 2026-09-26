@@ -95,7 +95,7 @@ def search_router(get_service):
     @router.get("/manga")
     async def manga(
         search: str = Query("", max_length=200),
-        status: Literal["all", "summarized", "not-summarized"] = Query("all"),
+        status: Literal["all", "summarized", "not-summarized", "indexed", "not-indexed"] = Query("all"),
         summarized: bool | None = Query(None),
         offset: int = Query(0, ge=0),
         limit: int = Query(25, ge=1, le=50),
@@ -110,6 +110,11 @@ def search_router(get_service):
     @router.post("/jobs", status_code=202)
     async def embed(body: EmbedRequest):
         return await call(service().submit(body.groupIds))
+
+    @router.delete("/manga/{group_id}/index")
+    async def remove_index(group_id: str):
+        removed = await call(service().remove_group(group_id))
+        return {"groupId": group_id, **removed}
 
     @router.get("/jobs")
     async def jobs():

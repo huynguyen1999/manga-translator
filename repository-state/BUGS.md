@@ -2,6 +2,325 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-26 — Inpainting rejected text that should remain untouched
+
+- Symptom: A page failed capture with “No erasing mask for detected text” even though the uncovered regions were already suppressed for review or had an unchanged translation.
+- Root cause: Inpainting required mask coverage for every OCR polygon, including text that the renderer restores from the source, while unchanged translations were still sent through drawing.
+- Fix: Skip mask enforcement for reviewed suppressed/unchanged regions and restore unchanged filtered text without redrawing. Strict render diagnostics now accept reviewed suppression and do not require the temporary free-text search zone after layout cleanup.
+- Prevention: Keep source restoration, mask requirements, and layout workspace lifetime aligned; test pages containing suppressed text and unchanged labels.
+
+## 2026-09-26 — Translated regions can finish without validated visible output
+
+- Symptom: Layout could suppress a translation without review, accept a bubble-bubble overlap, or miss clipping/collisions from raster-only output, thick outlines, or post-layout transforms.
+- Root cause: Validation inspected line boxes before final transforms and did not consistently inspect the renderer's actual alpha footprint or propagate every failure to region review state.
+- Fix: Final validation reconstructs and transforms the segment/fallback raster with the effective outline, checks page/panel/bubble bounds and all region-pair collisions, and suppresses invalid placements with a review reason. Invalid frozen output and failed/empty compositing are also flagged. Focused render/layout coverage passed (155 tests, 14 warnings, 2 subtests).
+- Prevention: Keep final-output checks on raster alpha and transformed points; do not infer visible output from a valid layout record alone.
+
+## 2026-09-26 — Short vertical render destinations divide by zero
+
+- Symptom: For nonempty vertical text, positive font size, and destination height smaller than that size, `put_text_vertical()` could divide by zero.
+- Root cause: `num_char_y = h // font_size` could be zero and was used as a divisor.
+- Fix: The renderer now guards short destinations and returns a failed placement instead. The focused vertical-render mitigation test passed.
+- Prevention: Keep coverage for destinations below one glyph height and degenerate/clipped destination polygons.
+
+## 2026-09-26 — Failed rendering retains temporary content overrides
+
+- Symptom: A render exception leaves `_render_content_override` attached to input regions.
+- Root cause: `render_page()` removes temporary overrides only on successful return, without `finally` cleanup.
+- Fix: Pending. Clean temporary overrides on both success and failure.
+- Prevention: Inject a rendering failure and assert region transient state is cleared before retrying with edited content.
+
+## 2026-09-26 — Moebius web inpainting output cropped into top-left quadrant on black background
+
+- Symptom: Running inpainting in the Moebius web UI generated an output image shrunken into the top-left quadrant with the rest of the canvas filled in black.
+- Root cause: The Moebius diffusion pipeline (`RemovalSDXLPipeline_BatchMode`) automatically preprocesses square padded inputs down to 512x512 and outputs a 512x512 image. The web API applied the original high-resolution unpadding bounding box (`crop_box`) directly to the 512x512 output without upscaling it back to the padded dimensions first, causing out-of-bound crop coordinates that PIL filled with black.
+- Fix: Scaled `result_sq_img` back up to the original square size (`sq_img.size`) via Lanczos interpolation before applying `crop_box`.
+- Prevention: Always symmetrically inverse all coordinate scaling and letterboxing transforms applied before neural network inference.
+
+## 2026-09-26 — Two bubble translations rendered into the same area
+
+- Symptom: On page `8f1548b6-2436-4bbe-a99e-7269874fbaac`, region `cc93e3a1aa28432680a9408107dddbf0` overlaps region `2a48bd9d494e4693874cf94a3250e402` in the final image.
+- Root cause: OCR/grouping and translation artifacts preserve the correct ID-to-text pairs. Bubble detections 7 and 10 cover nearly the same source area for the first region, while detections 8–10 overlap around the second. Per-region maximum-overlap association assigns different bubble IDs, so layout solves them in separate groups. Final validation records the exact render collision but only suppresses collisions involving `FREE_TEXT`; both regions are `BUBBLE` and remain drawable.
+- Fix: Rank bubble candidates by source coverage multiplied by detector confidence, while retaining the existing minimum-coverage cutoff. This makes near-equal coverage prefer the stronger detection.
+- Result: The association regression passed. An isolated layout/render preview with the corrected `bubble_7` and `bubble_8` assignments produced 25/25 layouts and no collision errors, warnings, or suppressed regions; both target translations rendered in separate bubbles.
+- Prevention: Keep near-equal coverage association covered and require layout validation to report no unresolved render collisions before a preview is accepted.
+
+## 2026-09-26 — Suppressed bubble text was restored underneath another translation
+
+- Symptom: A drawable bubble translation overlapped original text restored from a different suppressed OCR region in the same balloon.
+- Root cause: Final collision validation compared drawable translations with each other, but ignored source pixels that `render_page()` restores for suppressed regions.
+- Fix: Final raster validation now treats suppressed or unchanged source text as an obstacle and suppresses any overlapping translation with a review reason.
+- Prevention: Validate translated raster footprints against both drawable output and restored source geometry.
+
+## 2026-09-26 — Free-text inpaint masks were clipped by nearby bubble geometry
+
+- Symptom: Free-text OCR regions beside a speech bubble had no final erase-mask coverage, so later layout could not place their translations.
+- Root cause: Mask growth restricted any connected text component that touched any bubble interior, even when its source region was free text and unowned by that bubble.
+- Fix: Apply bubble-interior clipping only when the component belongs to bubble-associated OCR; free-text source pixels remain erasable while protected bubble edges stay hard constraints.
+- Prevention: Cover mixed free-text and bubble geometry in mask-growth tests and replay pages with adjacent UI text.
+
+## 2026-09-26 — Legacy bubble fallback enlarged calibrated source typography
+
+- Symptom: A long translation was rendered much larger than its calibrated OCR font size after the shape-aware solver failed.
+- Root cause: The legacy bubble fallback raised a known calibrated target using its adaptive translation-length estimate.
+- Fix: Reuse calibrated source size as the fallback target; adaptive enlargement remains available when no calibrated size exists.
+- Prevention: Test both adaptive legacy sizing and calibrated-size preservation on large bubbles.
+
+## 2026-09-26 — Below-floor free text was flagged but still painted
+
+- Symptom: A translated phone label was drawn at 9 px against a 25 px source estimate; diagnostics marked it for review but left it visible.
+- Root cause: Final readability validation set `review_required` without suppressing raster output, and the layout contract substituted the final font size for a missing calibrated size, making its ratio appear to be 1.0.
+- Fix: Preserve the OCR source size as the layout calibration fallback and suppress/restore the source when output falls below 85% of that target.
+- Prevention: Build the final layout record from a region whose chosen font is below its source estimate and assert both the calibration and suppression.
+
+## 2026-09-26 — Single-page pipeline rerun expanded to the full manga group
+
+- Symptom: Rerunning from Page Detail queued every page in that manga instead of only the open page.
+- Root cause: The Page Detail action passed both a one-page image selection and its `groupId`; the submit hook treated `groupId` as a request to rerun the entire group and discarded the selected page IDs.
+- Fix: Always submit the selected `pageIds` from the rerun dialog.
+- Prevention: Keep selected-page actions scoped to the explicit page IDs even when group context is available for display.
+
+## 2026-09-26 — Page Detail viewer delayed image display with dark loading overlay
+
+- Symptom: Opening Page Detail modal displayed a dark backdrop with "Loading image..." for several seconds before showing the translated page.
+- Root cause: `PageDetailModal` only checked `image.batchPreviewUrl` for `resultPlaceholder`. When pages were opened from direct routes or Studio without an explicit `batchPreviewUrl`, `resultPlaceholder` resolved to `null`, causing `PreviewImage` to display a blocking dark overlay (`bg-zinc-950/90`) instead of utilizing cached preview/thumbnail variants. Additionally, `useGalleryPageModalRoutes` omitted image variant URLs from API payloads, and `PreviewImage` reset `resultLoaded` to false on prop updates without checking cached DOM image completeness.
+- Fix: Expanded `resolveImageUrls` to resolve `resultPlaceholderUrl` falling back across batch, thumbnail, preview, cover, and folder-based variants; mapped variant URLs in `useGalleryPageModalRoutes` and `buildStudioPreviewImage`; and checked DOM `complete` status in `PreviewImage` on render updates.
+- Prevention: Always provide progressive placeholder fallbacks for modal image stages and check cached image element completeness upon mount and prop updates.
+
+## 2026-09-26 — Bright-pixel bubble fallback displaced translated regions
+
+- Symptom: On page `1790362270755-c1a677ac-2048-ENG-sugoi`, an unmatched Japanese sentence moved across a panel. On `1790397971088-149a82a2-2048-ENG-sugoi`, four of six translations were suppressed and layout took about 29 seconds; some failures had no review flag.
+- Root cause: Bright-component inference ran despite saved bubble detections that did not match those OCR regions. Free-text damage scopes also used raw OCR font estimates, and empty ownership zones still entered expensive candidate search.
+- Fix: Persisted detections are reattached to loaded regions; bright-component inference runs only when no saved detections exist. Scope dilation uses calibrated source geometry, empty ownership skips search, and every suppressed free-text failure requests review. Regression coverage passes. A temporary page replay took about 9 seconds but still suppressed overlapping region `f45bb050d79c413085b353c365c70b2e`; the live preview was running stale code, so that page is not verified fixed yet.
+- Prevention: Cover reruns with saved-but-unmatched detections, extreme OCR estimates, overlapping source regions, and assert that each suppression has a review reason. Verify page previews against the current workspace build.
+
+## 2026-09-26 — Stopping batches resumed after PostgreSQL restart
+
+- Symptom: A batch still marked “Stopping…” resumed its remaining pages after the server restarted.
+- Root cause: Startup reconciliation requeued processing items and changed the stopping batch to waiting.
+- Fix: Both stores now delete batches with a persisted stopping state during startup recovery.
+- Prevention: Honor persisted stop intent before recovering interrupted item work.
+
+## 2026-09-25 — UI mixin filename matched pytest discovery
+
+- Symptom: Root pytest collection imported `main_window_visual_test.py` as a test and failed because the test environment has no PySide6.
+- Root cause: The extracted UI mixin filename matched pytest's `*_test.py` pattern.
+- Fix: Renamed it to `main_window_visual.py` and updated the application import.
+- Prevention: Avoid test-discovery filename patterns for production modules.
+
+## 2026-09-25 — Layout solver extraction omitted math import
+
+- Symptom: Layout candidate tests raised `NameError: math is not defined` after moving the solver into `solve_core.py`.
+- Root cause: `_line_height` moved with the solver, but its `math.ceil` dependency did not.
+- Fix: Import `math` in the extracted module.
+- Prevention: Audit nonlocal names referenced by moved functions and run their focused tests immediately.
+
+## 2026-09-25 — DPM-Solver sampling needs an explicit cumulative-sum axis
+
+- Symptom: A DPM-Solver sampling smoke test raises `TypeError: cumsum() missing 1 required positional argument: dim`.
+- Root cause: The existing vendored solver calls `torch.cumsum` without an axis, which the installed PyTorch API requires.
+- Fix: Pending; pass `dim=0` at the unchanged timestep-order calculation. Kept separate from this extraction to avoid mixing solver behavior changes into refactoring.
+- Prevention: Keep a tiny DPM-Solver sampling smoke test alongside import and helper checks.
+
+## 2026-09-25 — Document repository bypassed the owner-resolution compatibility hook
+
+- Symptom: Existing document persistence tests that replace `PostgresStore._document_owner` failed after moving the SQL into `DocumentRepository`.
+- Root cause: The extraction called the new repository implementation directly, bypassing the facade hook used by tests and runtime callers.
+- Fix: Keep document persistence calling the facade hook; the facade delegates to the repository's SQL resolver.
+- Prevention: Preserve injectable compatibility seams when moving repository internals and test them through the existing public facade.
+
+## 2026-09-25 — Extracted batch translation omitted the GPT translator registry import
+
+- Symptom: Batch translation raised `NameError: GPT_TRANSLATORS` before offline translator dispatch, then fell back to the per-page path.
+- Root cause: The extracted batch translation module kept the registry lookup but imported only the dispatch functions.
+- Fix: Import the existing registry and cover the offline batch dispatch path with a focused test.
+- Prevention: After moving methods, audit each referenced module global in the destination module and exercise the public batch path.
+
+## 2026-09-25 — Linked layout preview contract used boxes outside its source canvas
+
+- Symptom: The layout-preview contract returned `fits: false` for two linked boxes.
+- Root cause: The shared API fixture used a 64×64 source image while the boxes extended to x=230 and y=90, so the layout could not place text within the image.
+- Fix: Give this test a 320×180 source canvas; the request and layout behavior stay unchanged.
+- Prevention: Layout fixtures must keep requested regions inside their source-image dimensions.
+
+## 2026-09-25 — Extracted translation entry point retained a method receiver reference
+
+- Symptom: Model-preload code in the extracted function still referenced `self`, which would fail when the helper ran.
+- Root cause: The mechanical extraction changed `self.attribute` references but missed standalone `self` uses passed to `getattr`.
+- Fix: Replace all method receiver references with the injected `owner`.
+- Prevention: Compare the full executable AST after normalizing receiver names and run the public entry-point tests.
+
+## 2026-09-25 — Clean-canvas renderer test skipped its renderer
+
+- Symptom: The renderer isolation contract expected a mutating test renderer to run, but received the untouched canvas.
+- Root cause: Its synthetic region had a language but no translation, so production rendering correctly filtered it out before dispatch.
+- Fix: Give the synthetic region drawable translation text.
+- Prevention: Renderer dispatch tests should use a region with actual renderable content.
+
+## 2026-09-25 — Suppressed regions were not restored before rendering
+
+- Symptom: Suppressed free-text, bubble, and untranslated review regions rendered over inpainted pixels instead of preserving the source image.
+- Root cause: The render extraction narrowed the restore list to preserved/review regions, excluding ordinary regions marked `_render_suppressed`.
+- Fix: Keep every suppressed region in the source-restoration list and retain the untranslated review fallback.
+- Prevention: Keep render lifecycle tests for suppressed, untranslated, and drawable regions against the public `render_page` entry point.
+
+## 2026-09-25 — Translated free-text regions were suppressed during layout
+
+- Symptom: Regions `df4134bc052446919c6dce42e55d5141` and `2a68426d33784f49bd35efe477ebd9f4` have translations but no rendered text.
+- Root cause: Free-text candidate ranking could discard the smallest viable wrap, collision search could choose a placement that blocked a neighboring region, and inferred bubble detection could mistake a white glyph outline for a bubble and leave only a narrow safe area. Final validation then suppressed invalid or unreadable placements. Later, source height was used as a scoring preference and maximum only, so successful text blocks could still be shorter than their source regions. The taller text stack was then vertically centered and rigid placement targeted the damage centroid, leaving empty space above the first row.
+- Fix: Retain the smallest typography candidate, reject inferred bubble components smaller than the source text footprint, preserve placement alternatives, solve independent collision groups and backtrack in dense groups, and make source height a hard minimum for translated region bounds (capped at 1.5×), keep natural line spacing, start the stack at the top of source-height bounds, and center it horizontally on the source region. When an available target is wider than its source region, wrap against the source width and permit overflow only for an unbreakable word.
+- Result: The isolated layout/render laid out all 17/17 regions with 0 suppressed, no empty rows, errors, or warnings. The first region expanded from 3 source rows to 4 natural rows (6 px visible gaps); source bounds were 186×397 px and translated bounds 229×397 px, with the widest word setting the remaining width. The second expanded from 2 rows to 3, preserving its 152 px source height (73×152 px source, 98×152 px translated bounds).
+- Follow-up (2026-09-26): On page `1790356430205-f83c51d9-2048-ENG-sugoi`, the saved layout started the first row at y=154 while the source began at y=52. The isolated layout rerun starts the first row at y=59 with 6 px natural gaps; all 17 regions render with none suppressed or blank.
+- Follow-up (2026-09-26): On page `1790360962376-525491c9-2048-ENG-sugoi`, region `744ed9b863f34be8b63f1aae6b0321e7` had a saved translation but no render. Its 180×268 source quad supplied `font_size=180`; the free-text candidate generator returned zero typography candidates under both the saved page-wide fallback constraint and no panel constraint. Geometry-based source-size calibration below addresses this oversized estimate.
+- Prevention: Keep text-region bounds distinct from glyph bounds, enforce the source-height minimum, top-anchor the natural line stack, and center it horizontally on the source region. Verify saved-page dimensions and rendering after layout changes.
+
+## 2026-09-25 — Pipeline rerun progress used the database pool from the translator loop
+
+- Symptom: A rerun executed by the in-process translator failed when progress attempted to persist batch state, with an asyncpg future attached to a different event loop.
+- Root cause: The translator runs pipeline callbacks on its dedicated event loop, but the rerun progress callback mutated the PostgreSQL-backed batch store directly from that loop.
+- Fix: Marshal rerun progress updates back to the scheduler loop that owns the store; add a loop-bound regression test.
+- Prevention: Any callback that crosses from the translator loop into scheduler or database state must return to the owning loop before awaiting those stores.
+
+## 2026-09-25 — One-off AI previews were persisted as rerun batches and result folders
+
+- Symptom: A failed debug preview left copied `ai-case-*` files and failed batch records behind.
+- Root cause: The preview endpoint reused the durable batch scheduler and result-folder workflow for a one-off human review run.
+- Fix: Execute the existing rerun plan synchronously against a `TemporaryDirectory`; return the rendered image and JSON artifacts, then let the context manager remove all scratch files.
+- Prevention: Keep endpoint tests asserting no case folder or batch write, and a runner test asserting temporary files disappear after success.
+
+## 2026-09-25 — Rendering extraction dropped CPU priority compatibility exports
+
+- Symptom: The background-render test could not import `CPU_PRIORITY_BACKGROUND` from `manga_translator.manga_translator` after moving rendering orchestration.
+- Root cause: The new stage module imported the CPU lane constants directly, removing their prior incidental module-level exports.
+- Fix: Keep those constants imported in `manga_translator.manga_translator` and pass its `run_cpu_stage` and `render_page` bindings to the extracted stage.
+- Prevention: Preserve module-level names that existing callers or tests import when extracting methods into stage modules.
+
+## 2026-09-25 — Direct gallery page links stayed on the loading skeleton
+
+- Symptom: Opening a saved page URL in a fresh tab showed “Loading library…” indefinitely instead of the page viewer.
+- Root cause: Gallery loading initialized to `true`, while page overlay routes intentionally skip the gallery summary request that normally clears it; the skeleton returned before rendering the page modal.
+- Fix: Clear the gallery loading flag on routes that skip the summary request; normal gallery loading remains unchanged.
+- Prevention: Do not let overlay routes inherit a pending list-load state when that route does not request the list.
+
+## 2026-09-25 — Direct page viewer was hidden by the empty-gallery branch
+
+- Symptom: The detail request succeeded and opened viewer state, but an empty gallery rendered “No manga yet” without the viewer.
+- Root cause: The empty-library early return ran before shared route overlay markup.
+- Fix: Keep the empty-library return for ordinary gallery routes; render route-driven page, edit, and reader overlays through the shared return.
+- Prevention: Early empty-state returns must not skip route-owned overlays.
+
+## 2026-09-25 — Direct page links briefly showed an empty gallery
+
+- Symptom: A saved page URL flashed “No manga yet” while its detail request was still resolving.
+- Root cause: The ordinary gallery empty state rendered before the route's target page had opened in the modal.
+- Fix: Show an opening state until the requested page is ready; add links from the viewer to its manga and Studio home.
+- Prevention: Keep route-driven loading states visible until their route data is ready.
+
+## 2026-09-25 — Mechanical extraction truncated a helper definition
+
+- Symptom: Python compilation and layout-test collection failed on `_source_region_snapshot`.
+- Root cause: The extraction script sliced the source two characters past the newline, dropping the first letter of `def`.
+- Fix: Restore the missing `d`; compile and the affected tests then passed.
+- Prevention: Compile mechanically extracted modules before running pytest.
+
+## 2026-09-25 — Test imports replaced the real translator package
+
+- Symptom: Full-suite collection imported `manga_translator` and `manga_translator.translators` as incomplete stubs; later tests saw missing exports or a mocked `MangaTranslator`.
+- Root cause: Translator tests wrote package and provider mocks into `sys.modules` at module import time and left them there.
+- Fix: Import the real package where possible, scope the Gemini package stubs to that test module's setup/teardown, and remove temporary imported submodules afterward.
+- Prevention: Keep test-only `sys.modules` replacements scoped and restore the original module entries after use.
+
+## 2026-09-25 — Summary OCR advanced stages between page chunks
+
+- Symptom: Later summary pages were still detecting text while earlier pages had entered OCR or text-line merging.
+- Root cause: The summary scheduler invoked the full detect/OCR/merge pipeline separately for each worker-sized page chunk.
+- Fix: Run all uncached pages through one extraction call; keep worker-sized inference batches inside the pipeline so each stage completes across the manga before the next begins.
+- Prevention: Preserve manga-wide stage barriers when changing summary OCR batching.
+
+## 2026-09-25 — Route contract inspected lazy FastAPI router entries
+
+- Symptom: Route-contract tests reported missing endpoints after `include_router()` even though the routers were registered.
+- Root cause: FastAPI 0.141.1 stores included routers lazily in `app.routes`, where those entries do not expose `path` or `methods`.
+- Fix: Derive route/method coverage and ordering from the generated OpenAPI paths.
+- Prevention: Use the public OpenAPI schema for registered API-surface contracts instead of treating `app.routes` as a flattened list.
+
+## 2026-09-25 — Summary repository imported a group error from the facade
+
+- Symptom: Importing `server.postgres_store` failed while loading the extracted summary repository.
+- Root cause: `GroupNotFound` was defined in `postgres_store.py`, so importing it back into a repository created an invalid dependency.
+- Fix: Define group errors in `series_repository.py` and re-export them, including the `SeriesStoreError` base class, through `postgres_store.py`.
+- Prevention: Keep shared domain exceptions beside their owning repository and make facades re-export every legacy exception name, including base classes.
+
+## 2026-09-25 — Manga repository retained an old module helper reference
+
+- Symptom: Group listing raised `NameError` while formatting the cover page timestamp.
+- Root cause: The moved page formatter still referenced the old module-level `_iso` helper instead of the repository's injected formatter.
+- Fix: Route timestamp formatting through `self._iso()`.
+- Prevention: Check extracted functions for module globals as well as instance attributes, then run the old focused tests against the new module.
+
+## 2026-09-25 — Summary OCR helper name changed during extraction
+
+- Symptom: Importing `server.main` failed because the extracted summary OCR module did not export `summary_input_file`.
+- Root cause: A broad helper-call rename also altered the new function's own name.
+- Fix: Restore the helper name and preserve only the intended call-site substitutions.
+- Prevention: Smoke-test imported helper names and run route-contract collection immediately after mechanical moves.
+
+## 2026-09-25 — Text-grouping extraction omitted a utility import
+
+- Symptom: Numeric-preservation checks raised `NameError` in the extracted text-grouping stage.
+- Root cause: The stage body was moved mechanically, but its module-level `contains_linguistic_ocr_text` dependency was not imported into the new module.
+- Fix: Import the existing helper from `manga_translator.utils`.
+- Prevention: After mechanical extraction, run the original focused tests and verify each moved module's external names resolve in its own scope.
+
+## 2026-09-25 — Extracted result routes captured the store getter
+
+- Symptom: Pipeline-manifest tests ignored persisted stage rows, and the final-image route returned a stale local file when tests replaced `server.main._postgres`.
+- Root cause: The route factory captured the original getter function during app import, while the old handlers looked up the module global on each request.
+- Fix: Inject deferred callbacks for the store and replaceable helpers.
+- Prevention: Preserve runtime module-global lookup behavior with lazy callbacks when extracting handlers; test both disk and store-backed result paths.
+
+## 2026-09-25 — Editor router initialized before its helpers
+
+- Symptom: Importing `server.main` raised `NameError` while constructing the extracted editor router.
+- Root cause: The router was registered before `_get_cached_meta`, `_invalidate_meta_cache`, and related helpers were defined, and factory arguments eagerly resolved those names.
+- Fix: Pass deferred callbacks for the helpers so they resolve when a request runs.
+- Prevention: When registering routers before helper definitions, defer later-defined dependencies instead of evaluating them during module import.
+
+## 2026-09-25 — CBZ export extraction missed the injected file resolver
+
+- Symptom: File-backed CBZ export raised `NameError` after the route moved out of `server.main`.
+- Root cause: One `final_file()` call was left behind while the route's file resolver was converted to an injected callback.
+- Fix: Route both final-image checks through the injected `result_file` callback.
+- Prevention: Search all references to every moved helper and exercise both file-backed and database-backed route paths after extraction.
+
+## 2026-09-25 — Summary progress showed a page index, not stage completion
+
+- Symptom: During summary OCR, the UI could show the current step but not how many pages had completed it; empty-text pages did not visibly advance a text count.
+- Root cause: Summary progress stored a source-page index and pages-with-text count, but no per-stage page-completion count; cached text counts were also reset while other pages were extracted.
+- Fix: Persist the number of cached and newly processed pages that passed the active image step, and show it beside the current step in Jobs and the open summary view.
+- Prevention: Keep page position, stage completion, and text-bearing page counts as separate progress values.
+
+## 2026-09-25 — Gallery cards did not expose shareable detail links
+
+- Symptom: Copying a page-detail destination was awkward, and Command-click on a gallery navigation link also navigated the current tab.
+- Root cause: Some gallery destinations used click handlers instead of anchors; Studio/Gallery links also had redundant click handlers that forced same-tab navigation on modified clicks.
+- Fix: Use canonical route links, preserve in-app return state, copy the page route from Page Detail, and open the reader route in a new tab when Command/Ctrl-clicking Read. Let the Studio/Gallery links handle ordinary navigation themselves.
+- Prevention: Use native links for navigable destinations and avoid additional navigation handlers on them.
+
+## 2026-09-24 — Source Japanese text leaked through untranslated restore regions
+
+- Symptom: Japanese text was pasted back over inpainted areas when a region had missing translation or was suppressed.
+- Root cause: `render_page()` restored `img_rgb` source pixels for any region where translation content was empty or suppressed, re-painting Japanese characters onto the canvas.
+- Fix: Constrain `restore_regions` so only regions with explicit preservation (`is_preserved_region`) or reviewed regions with explicit `_bubble_restore` can restore original pixels.
+- Prevention: Never fall back to repainting raw source pixels for regular linguistic regions without an explicit preservation policy.
+
+## 2026-09-25 — Text-box borders were inferred as narrow manga panels
+
+- Symptom: Three translated free-text regions were detected but omitted from the final page.
+- Root cause: Dark borders around vertical narration boxes became paired CV panel boundaries, leaving a usable panel width smaller than the source OCR footprint and no valid layout.
+- Fix: Ignore an inferred boundary pair when its margin-adjusted span cannot fit the source footprint, retaining any valid constraint on the other axis.
+- Prevention: Validate inferred panel capacity against source geometry before applying it as a hard layout boundary.
+
 ## 2026-09-24 — Short vertical Japanese lines were split from neighboring columns
 
 - Symptom: A short vertical OCR line beside a longer Japanese column became a separate translation region.
@@ -907,3 +1226,209 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 - Root cause: Several checkpointed and grouped failure paths marked a batch terminal but skipped the history cleanup and device-cache reclaim used by successful batch completion.
 - Fix: Run the same cleanup when processing, translation, or rerun paths finish in an error state.
 - Prevention: Every terminal batch transition must release page context and reclaim unused device cache while its worker is still owned.
+
+## 2026-09-24 — Rendering could rediscover source text and source typography
+
+- Symptom: Japanese could reappear beside a grouped translation, valid dialogue could shrink to a few pixels, preserved numbers could drift, and free text could move away from its source footprint.
+- Root cause: Layout and rendering resolved content independently; review-required untranslated group members were restored even when a rendered group owned them; the source-first policy trusted the minimum OCR line size without checking source geometry; and separating cleanup from glyph coverage also removed the placement anchor.
+- Fix: Snapshot immutable source facts, use one strict render-content resolver, exclude owned group members from restoration, calibrate implausibly tiny positive OCR sizes against line thickness, keep preserved numeric sizing exact, freeze content/ownership checksums, score free-text placement with block overlap while cleanup remains independent, and invalidate old layout artifacts by algorithm revision.
+- Prevention: Keep deterministic regressions for missing translations, `(48)`, grouped-member restoration, invalid tiny OCR size, provenance retries, source-anchored free text, unknown-name hyphenation, duplicate ownership, cleanup underlays, and stale layout rejection.
+- Reproduced during the 2026-09-25 Sugoi server run on two dense pages from `~/Downloads/bruh`: all pipeline stages completed, but final renders visibly overlap English text and retain source text; see `/private/tmp/mt-refactor-final-e2e/data/results/`.
+# 2026-09-25 — Local semantic search combined mode crashes
+
+- Symptom: `semantic_search_lab.py search` with its default `combined` mode raised `KeyError: 'combined'` in encoder lookup.
+- Root cause: `run_query()` treated ranking modes as encoder modalities; combined retrieval must encode both summary and image query vectors.
+- Fix: expand combined mode to the summary and image modalities before encoding. For a summary-only index, query with `--mode text` to avoid unnecessary image-model loading.
+- Prevention: keep ranking mode names separate from encoder modality names when adding or changing search modes.
+# 2026-09-25 — Resumed synopsis jobs lost their provider
+
+- Symptom: A queued Gemini synopsis resumed with a 400 saying Gemini's model name was unsupported by DeepSeek.
+- Root cause: The scheduler rebuilt requests from the persisted model name but omitted the separately stored provider, so model resolution defaulted to DeepSeek.
+- Fix: Rebuild the request with `provider:model`; keep the legacy model-only fallback for old jobs.
+- Prevention: Test scheduler resumes with multiple providers, not only DeepSeek.
+
+# 2026-09-25 — Layout retry test used an immutable placeholder region
+
+- Symptom: The layout retry lane test failed while serializing its context, before it could assert the CPU lane.
+- Root cause: Its built-in `object()` placeholder could not accept the `_translation_incomplete` annotation used by frozen-layout serialization.
+- Fix: Use a mutable `SimpleNamespace` region in the test fixture.
+- Prevention: Use a mutable region-shaped fixture when exercising serializers that annotate translation state.
+
+## 2026-09-25 — Extracted document repository omitted UUID import
+
+- Symptom: Checkpointed batches failed when saving documents for a folder without an owner.
+- Root cause: `DocumentRepository.save_documents()` creates a pipeline-run ID with `uuid.uuid4()`, but the extracted module did not import `uuid`.
+- Fix: Import `uuid` in `server/document_repository.py`.
+- Prevention: Exercise the unowned-folder persistence branch after extracting repository code.
+
+## 2026-09-25 — Gallery alphabetical sort reset across pages
+
+- Symptom: Choosing A→Z was treated as newest-first after route parsing; pagination then dropped the sort and showed a different slice.
+- Root cause: `parseAppPath()` accepted the other gallery sort values but omitted `alpha-asc`.
+- Fix: Recognize `alpha-asc` and cover parsing with a route regression assertion.
+- Prevention: Keep every `GallerySort` value round-tripping through route parsing and pagination.
+
+## 2026-09-25 — Page Detail overlays obscured the artwork
+
+- Symptom: Dense pages were covered by always-visible region IDs, IDs could not be copied for detector and speech-bubble regions, and reopening the speech-bubble view refetched its geometry.
+- Root cause: Overlay labels rendered unconditionally, only translated text regions had an inspector, and the bubble-loading effect fetched on every view toggle.
+- Fix: Reveal IDs and details on selection, add copy-ID controls to each region inspector, and keep successfully loaded speech-bubble geometry in component state across toggles. Show image retry only after the load fails.
+- Prevention: Keep inspection metadata progressive and avoid refetching immutable per-page geometry when a display mode changes.
+
+## 2026-09-25 — Solver line-breaking extraction dropped a compatibility export
+
+- Symptom: `devscripts.pipeline_step_runner` failed to import `compute_zone_shape_profile` from `layout.solver` after line-breaking code moved.
+- Root cause: The runner imports that geometry helper through the solver module, and the extraction removed its incidental re-export.
+- Fix: Keep importing `compute_zone_shape_profile` in `solver.py` alongside the moved helper compatibility imports.
+- Prevention: Search all solver imports before moving symbols and run the pipeline-runner collection/tests after layout extractions.
+
+## 2026-09-25 — Free-text extraction omitted a solver compatibility export
+
+- Symptom: `devscripts.pipeline_step_runner` failed during test collection because it could not import `_free_text_words` from `layout.solver`.
+- Root cause: The helper moved to `free_text_typography.py`, but the solver compatibility imports initially omitted it.
+- Fix: Re-export `_free_text_words` and the other moved typography helpers from `solver.py`.
+- Prevention: Compare moved names against repository imports and verify module collection immediately after extraction.
+
+## 2026-09-25 — Bubble-zone extraction bypassed the solver estimator patch point
+
+- Symptom: The page font-baseline test returned 20 instead of the expected 27 after monkeypatching `solver._estimate_adaptive_font_size`.
+- Root cause: `_page_dialogue_font_baseline()` moved to `bubble_zones.py`, so it resolved the estimator from that module instead of the existing solver symbol.
+- Fix: Keep the small baseline helper in `solver.py`; grouping and zone partitioning remain extracted.
+- Prevention: Check tests for monkeypatches of module globals before moving functions that resolve those globals.
+
+## 2026-09-25 — Bubble-zone extraction removed adjacent joint-layout exports
+
+- Symptom: Layout test collection failed because `solver._candidate_data` was no longer available.
+- Root cause: The mechanical extraction range included the joint-layout imports immediately following `partition_bubble_zones()`.
+- Fix: Restore the joint-layout compatibility imports in `solver.py`.
+- Prevention: Verify extraction boundaries against neighboring imports as well as neighboring function definitions.
+## 2026-09-25 — Pipeline serialization extraction omitted restoration helpers
+
+- Symptom: Imports from `pipeline.run` failed during test collection after moving the serialization functions.
+- Root cause: The extraction range stopped at `ACTIVE_RUNS`, while text restoration helpers appeared later in the module after result-document saving.
+- Fix: Move both restoration helpers into `pipeline/serialization.py` and re-export all serialization helpers from `pipeline.run`.
+- Prevention: Identify the full symbol set by definition and caller search, rather than using the first neighboring module-level constant as an extraction boundary; run import and round-trip tests.
+## 2026-09-25 — Page Detail action extraction left a preview URL import behind
+
+- Symptom: Typecheck failed because the Page Detail preview JSX still referenced `apiUrl` after its import was removed with the moved download action.
+- Root cause: The moved handler and the modal presentation both used the same module import.
+- Fix: Keep `apiUrl` imported by the modal for preview URL construction.
+- Prevention: Search every moved dependency across the complete source file before deleting its import.
+## 2026-09-25 — Page Detail resize extraction kept the old modal ref
+
+- Symptom: The Page Detail test failed to transform the modal because `modalContainerRef` was declared twice.
+- Root cause: The resize hook returned the ref, but the modal’s original local declaration remained.
+- Fix: Remove the local declaration and use the ref returned by `usePageDetailSidebarResize`.
+- Prevention: When moving hook-owned refs, remove their original declarations and search every use before verifying.
+
+## 2026-09-25 — Reader page extraction omitted preload helper import
+
+- Symptom: Frontend typecheck failed because single-page preloading still called `getImageUrl` from `MangaReaderModal` after the helper moved.
+- Root cause: `getImageUrl` was used by both the extracted page component and the parent modal's detached preload effect.
+- Fix: Export `getImageUrl` from the reader feature and import it into the modal.
+- Prevention: Search callers outside an extracted component before moving its private helpers.
+
+## 2026-09-25 — App-factory import cleanup removed artifact helpers
+
+- Symptom: Four server result tests raised `NameError` for the bbox and thumbnail artifact helpers.
+- Root cause: Removing route-factory imports by a broad text range also removed the adjacent `server.result_artifacts` compatibility imports.
+- Fix: Restore the artifact imports and narrow the cleanup to explicit route-factory blocks.
+- Prevention: Use AST-aware import edits or verify all retained wrapper dependencies after import cleanup.
+
+## 2026-09-25 — Rerun execution extraction omitted the mode enum
+
+- Symptom: Pipeline rerun jobs failed at execution with `NameError: PipelineRerunMode`.
+- Root cause: The moved execution module imported the plan dataclass but not the enum referenced by stage branches.
+- Fix: Import the enum from the plan module.
+- Prevention: Search all extracted function bodies for referenced module globals and run the full rerun lifecycle tests after each move.
+
+## 2026-09-25 — Batch persistence extraction dropped a shared JSON helper
+
+- Symptom: PostgreSQL batch review updates raised `NameError: _json_dump`.
+- Root cause: The helper moved with manifest writes but remains used by review-update methods in `PostgresBatchStore`.
+- Fix: Keep `_json_dump` imported in the compatibility store module as well.
+- Prevention: After extracting a method, search the original module for every dependency still used by sibling methods.
+
+## 2026-09-25 — Job image viewer hid the batch thumbnail while loading the detail image
+
+- Symptom: Opening a finished job image could leave the viewer showing only “Loading image…” for several seconds.
+- Root cause: The viewer waited for its larger reader/detail image and did not use the batch thumbnail already shown in the job row.
+- Fix: Keep the batch thumbnail visible behind the loading status until the detail image loads.
+- Prevention: Reuse already-loaded image variants as placeholders when a larger viewer asset loads asynchronously.
+
+## 2026-09-25 — Quadrilateral distance lost its helper after extraction
+
+- Symptom: OCR textline merging failed with `NameError: name 'dist' is not defined`.
+- Root cause: `Quadrilateral.distance_impl()` moved out of `generic.py`, where `dist` was implicitly imported, without carrying that dependency into the extracted module.
+- Fix: Import the existing `dist` helper into `generic_quadrilateral.py`.
+- Prevention: Check extracted method bodies for module-level globals supplied by wildcard imports in the original module.
+
+## 2026-09-25 — Pipeline case preview returned HTTP 500 before layout
+
+- Symptom: `POST /api/pipeline-cases/preview` failed while preparing a saved page.
+- Root cause: Persisted settings contained enum-qualified strings (`Alignment.auto`, `Direction.auto`) rejected by `Config.parse_raw`; the resulting validation error was then obscured because the router looked up `_batch_http_error` on the `__main__` runtime module.
+- Fix: Normalize the legacy setting values and bind the existing `batch_http_error` handler directly. Added a read-only JSON endpoint and switched case inspection to one request for diagnosis without rerunning the pipeline.
+- Prevention: Exercise saved-page settings through the same config conversion used by previews and keep preview error mapping independent of runtime-module globals.
+
+## 2026-09-25 — Pipeline case preview used a stale artifact allowlist name
+
+- Symptom: The temporary preview returned HTTP 500 before running any stages.
+- Root cause: The preview route still referenced the allowlist's former private name after the constant moved to `pipeline_case_data.py`.
+- Fix: Use the shared `PIPELINE_CASE_DOCUMENTS` export from the new route module.
+- Prevention: Search all references when moving shared constants and inspect the server trace after the first live request.
+
+## 2026-09-26 — Original manga import submitted a synthetic pipeline batch
+
+- Symptom: A gallery upload could be reported as failed after its pages were already imported if the follow-up batch request failed; the request also woke the image batch scheduler unnecessarily.
+- Root cause: The client followed the dedicated original-import request with a synthetic completed batch submission; that unrelated request was treated as part of upload success.
+- Fix: End upload after the original-import response, remove its temporary upload state, and refresh the gallery independently.
+- Prevention: Keep gallery-only imports out of translation batch submission and pipeline scheduling.
+
+## 2026-09-26 — Manga group listing repeated its totals aggregation
+
+- Symptom: `GET /results/groups` computed the same active-group totals separately from the requested page.
+- Root cause: The PostgreSQL path ran two near-identical group aggregations on every request.
+- Fix: Compute totals from the shared grouped CTE and left-join them to the requested page, including when the page is empty.
+- Prevention: Keep pagination totals in the page query's shared aggregation and check offsets beyond the final page.
+
+## 2026-09-26 — Panel-constrained free text skipped readable font sizes
+
+- Symptom: A translated paragraph was suppressed even though a smaller, readable layout fit inside its panel.
+- Root cause: The panel candidate shortlist kept several wraps at nearby large sizes, then jumped to the absolute minimum and dropped intermediate sizes.
+- Fix: Keep page and panel candidates ordered by source-font proximity; stop at the first valid size, while retaining lower-size alternatives for joint collision solving.
+- Prevention: Cover short panels with many fallback sizes and verify the chosen block remains inside the detected frame.
+
+## 2026-09-26 — Bubble layout silently shrank overlong words
+
+- Symptom: A single word could shrink a bubble far below the target, while a 7-letter word such as “already!” missed the hyphenation rescue. The legacy multi-lobe path also computed its minimum from the adaptive font before resetting its target to the OCR font.
+- Root cause: The fitter used the stricter combined 90%/2px floor and only considered words of at least 8 letters; the multi-lobe target reset left a stale preferred floor.
+- Fix: Use the preferred floor, allow legal 7-letter splits, then allow a review-marked fallback down to half the target before suppressing. Recompute the legacy lobe floor after its target is reduced to the OCR source size.
+- Result: On page `1790363787103-ff26829c-2048-ENG-sugoi`, region `e56acd4dd80743df9e11c112a096fd6b` fits two whole-word lines at 28px. Region `c37704da399941408682eaa6f7a72467` stays at 24px and is review-flagged because its single long token cannot fit the preferred range after one split attempt; it is no longer reduced to 6px.
+- Prevention: Cover the 7-letter split, preferred floor, bounded fallback, and multi-lobe target reset in layout regression tests.
+
+## 2026-09-26 — Vertical OCR size suppressed a translated free-text region
+
+- Symptom: Region `744ed9b863f34be8b63f1aae6b0321e7` was saved as `no_valid_layout` despite a translation and an open page area.
+- Root cause: The OCR font field described a 180×268 multi-glyph text box, not a 180px English glyph; using it directly skipped realistic source sizing.
+- Fix: Calibrate extreme OCR sizes from source text area per character. A full saved-page replay estimates 55px from its source geometry and places the translation at 39px in four whole-word lines, without suppression or review.
+- Prevention: Exercise the actual text, box, and geometry-derived font through free-text layout, not typography candidate generation alone.
+
+## 2026-09-26 — Typesetting reruns lost source font metadata
+
+- Symptom: A rerun treated the last rendered editor font as the source size and could change or suppress translations on the next render.
+- Root cause: Minimal editor artifacts omitted `source_font_size` and stable region IDs; the frozen layout also recomputed outline width from normalized colors.
+- Fix: Persist source size and IDs, backfill legacy artifacts from matching translation records, and save the effective outline width with the frozen layout.
+- Prevention: Test legacy artifact hydration and pixel-identical frozen rerenders.
+## 2026-09-26 — Page detail image could stay on “Loading sharper image…” forever
+
+- Symptom: The sharper result never appeared and the loading overlay remained indefinitely.
+- Root cause: `PreviewImage` only ended loading after an image `load` or `error` event; a stalled request can emit neither.
+- Fix: After 15 seconds, switch the existing overlay to its error state so Retry is available.
+- Prevention: Give asynchronous image loading feedback a terminal state when the browser request can remain pending.
+
+## 2026-09-26 — Direct inpainting validation assumed render suppression metadata
+
+- Symptom: A `TextBlock` without `_render_suppressed` raised `AttributeError` during inpainting validation.
+- Root cause: The validation path read optional layout metadata as a required attribute.
+- Fix: Read suppression state with `getattr(..., False)` so direct and partially populated blocks remain valid.
+- Prevention: Keep inpainting preflight covered with standalone `TextBlock` fixtures.

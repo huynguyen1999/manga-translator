@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manga Pipeline Case"
+  short_description: "Inspect and safely rerun a saved manga pipeline page"
+  default_prompt: "Inspect this saved page and rerun the reported problem in an isolated case."

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { mergeGalleryImages } from "@/utils/resultGallery";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { getStoredMangaReadProgress, mergeGalleryImages } from "@/utils/resultGallery";
 import {
+  buildGalleryMangaGroups,
   getSuggestedSeriesTitle,
   buildMangaGroupTitles,
   getGalleryFallbackUrl,
@@ -19,6 +22,9 @@ import {
 import { apiUrl } from "@/utils/api";
 import { mangaIdForTitle } from "@/utils/routeState";
 import type { FinishedImage } from "@/types";
+import type { Dispatch, SetStateAction } from "react";
+import { createGalleryBulkDeletionActions } from "@/features/gallery/bulkDeletionActions";
+import { useGalleryGroupViews } from "@/features/gallery/useGalleryGroupViews";
 
 assert.equal(
   getSuggestedSeriesTitle(new Map([
@@ -72,6 +78,7 @@ assert.equal(
   "A page transition must not be reset while the requested page is loading",
 );
 assert.equal(getGalleryPageCorrection(99, 3, false), 3);
+assert.deepEqual(getStoredMangaReadProgress("Manga", 3), { page: null, complete: false });
 
 // 1. Verify mergeGalleryImages behavior
 const existing: FinishedImage[] = [
@@ -658,56 +665,50 @@ assert.deepEqual(filterMangaGroupsByStatus(testGroups, "translated").map(g => g.
 assert.deepEqual(filterMangaGroupsByStatus(testGroups, "summarized").map(g => g.title), ["Summarized Manga"], "summarized filter should return only groups with summaries");
 assert.deepEqual(filterMangaGroupsByStatus(testGroups, "review").map(g => g.title), ["Review Manga"], "review filter should return only groups needing review");
 
-// Test gallery count calculation when server totalMangaCount is provided vs unmanaged
-function resolveGalleryMangaCount({
-  totalMangaCount,
-  filteredGroupsLength,
-  mangaGroupsLength,
-  activeMangaFilter,
-  searchQuery,
-  statusFilter,
-}: {
-  totalMangaCount: number;
-  filteredGroupsLength: number;
-  mangaGroupsLength: number;
-  activeMangaFilter: string;
-  searchQuery: string;
-  statusFilter: string;
-}): number {
-  return totalMangaCount > 0
-    ? totalMangaCount
-    : (activeMangaFilter !== 'all' || searchQuery.trim() || statusFilter !== 'all'
-        ? filteredGroupsLength
-        : mangaGroupsLength);
-}
-
-// Server returns totalMangaCount = 150 for translated status, current page slice has 25
-assert.equal(
-  resolveGalleryMangaCount({
-    totalMangaCount: 150,
-    filteredGroupsLength: 25,
-    mangaGroupsLength: 25,
-    activeMangaFilter: 'all',
-    searchQuery: '',
-    statusFilter: 'translated',
-  }),
-  150,
-  "Should use server totalMangaCount when status filter is active in managed mode"
-);
-
-// Unmanaged fallback mode (totalMangaCount = 0)
-assert.equal(
-  resolveGalleryMangaCount({
+// Search, status, pagination, and review counts remain coordinated in the view model.
+const viewGroups = testGroups.map((group, index) => ({
+  id: `group-${index}`,
+  title: group.title,
+  count: group.images?.length ?? 1,
+  coverImage: group.coverImage || group.cover || null,
+  images: group.images || [],
+  hasSummary: group.hasSummary || false,
+  needsReviewCount: group.needsReviewCount || 0,
+  isLoaded: true,
+  isLoading: false,
+}));
+let groupViews!: ReturnType<typeof useGalleryGroupViews>;
+let remoteSearch = false;
+let groupStatusFilter: "translated" | "all" = "translated";
+const remoteSearchHandler = (_search: string) => {};
+function GalleryGroupViewsHarness() {
+  groupViews = useGalleryGroupViews({
+    mangaGroups: viewGroups,
+    mangaSearchQuery: "Manga",
+    moveMangaSearch: "Original",
+    activeMangaFilter: "all",
+    statusFilter: groupStatusFilter,
+    onGallerySearchChange: remoteSearch ? remoteSearchHandler : undefined,
     totalMangaCount: 0,
-    filteredGroupsLength: 3,
-    mangaGroupsLength: 10,
-    activeMangaFilter: 'all',
-    searchQuery: '',
-    statusFilter: 'translated',
-  }),
-  3,
-  "Should fall back to filteredGroups.length in unmanaged mode"
-);
+    requestedGalleryPageSize: 2,
+    reviewOnly: true,
+    totalImagesCount: 10,
+    activeSummaries: [{ title: "Review Manga", count: 1, needsReviewCount: 3 }],
+  });
+  return null;
+}
+const renderGalleryGroupViews = () => renderToStaticMarkup(React.createElement(GalleryGroupViewsHarness));
+renderGalleryGroupViews();
+assert.deepEqual(groupViews.filteredGroups.map((group) => group.title), ["Translated Manga", "Summarized Manga", "Review Manga"]);
+assert.deepEqual(groupViews.moveMangaGroups.map((group) => group.title), ["Original Manga", "Server Summary Original Manga"]);
+assert.equal(groupViews.galleryMangaCount, 3);
+assert.equal(groupViews.galleryPageCount, 2);
+assert.equal(groupViews.reviewCount, 10);
+
+remoteSearch = true;
+groupStatusFilter = "all";
+renderGalleryGroupViews();
+assert.equal(groupViews.filteredGroups.length, viewGroups.length, "Server-owned search should not filter the loaded page a second time");
 
 // Test buildMangaGroupTitles to ensure searching one by one replaces results instead of appending
 const cachedMangaImages: Record<string, FinishedImage[]> = {
@@ -776,6 +777,56 @@ const fallbackTitles = buildMangaGroupTitles({
   activeMangaFilter: "all",
 });
 assert.deepEqual(fallbackTitles, ["Manga Alpha", "Manga Beta", "Ungrouped"], "Unmanaged fallback mode should aggregate finishedImages and mangaImages");
+
+const completedAt = new Date("2026-01-04T00:00:00Z");
+const galleryCachedMangaImages = {
+  "Manga Alpha": [
+    { ...cachedMangaImages["Manga Alpha"][0], finishedAt: new Date("2026-01-02T00:00:00Z") },
+  ],
+};
+const galleryGroups = buildGalleryMangaGroups({
+  activeSummaries: [
+    { id: "id-alpha", title: "Manga Alpha", count: 1, latestFinishedAt: "2026-01-01T00:00:00Z", needsReviewCount: 5 },
+    { id: "id-beta", title: "Manga Beta", count: 4, needsReviewCount: 0 },
+  ],
+  hasExplicitSummaries: true,
+  mangaImages: galleryCachedMangaImages,
+  finishedImages: [
+    { ...cachedMangaImages["Manga Alpha"][0], reviewStatus: "pending", finishedAt: completedAt },
+  ],
+  activeMangaFilter: "all",
+  loadingManga: { "Manga Beta": true },
+  sortBy: "alpha-asc",
+  locallySummarizedTitle: "Manga Beta",
+  serverSummarizedTitle: "Manga Alpha",
+  reviewOnly: false,
+});
+assert.deepEqual(galleryGroups.map((group) => group.title), ["Manga Alpha", "Manga Beta"]);
+assert.equal(galleryGroups[0].id, "id-alpha");
+assert.equal(galleryGroups[0].images.length, 1, "Loaded and session images with the same ID should stay deduplicated");
+assert.equal(galleryGroups[0].coverImage?.id, "img-a1");
+assert.equal(galleryGroups[0].latestFinishedAt, new Date("2026-01-02T00:00:00Z").getTime());
+assert.equal(galleryGroups[0].hasSummary, true, "Server summary availability should mark the group summarized");
+assert.equal(galleryGroups[1].hasSummary, true, "An in-progress local summary should mark the group summarized");
+assert.equal(galleryGroups[1].isLoading, true);
+assert.equal(galleryGroups[1].count, 4, "Unloaded groups should retain the server page count");
+
+const reviewGalleryGroups = buildGalleryMangaGroups({
+  activeSummaries: [
+    { id: "id-alpha", title: "Manga Alpha", count: 1, needsReviewCount: 5 },
+    { id: "id-beta", title: "Manga Beta", count: 4, needsReviewCount: 0 },
+  ],
+  hasExplicitSummaries: true,
+  mangaImages: galleryCachedMangaImages,
+  finishedImages: [
+    { ...cachedMangaImages["Manga Alpha"][0], reviewStatus: "pending", finishedAt: completedAt },
+  ],
+  activeMangaFilter: "all",
+  loadingManga: {},
+  sortBy: "alpha-asc",
+  reviewOnly: true,
+});
+assert.deepEqual(reviewGalleryGroups.map((group) => [group.title, group.count]), [["Manga Alpha", 1]]);
 // Test manga group selection matching by Postgres UUID, title hash, and title name
 const mockSummaries = [
   { id: "uuid-1234", title: "Sakura Garden", count: 32, needsReviewCount: 0, latestFinishedAt: "2026-01-01T00:00:00Z", hasSummary: false },
@@ -923,7 +974,7 @@ assert.ok(
 );
 assert.equal(calculateDragAutoScrollSpeed(100, 0), 0, "Zero viewport height should return 0");
 
-// Multi-image selection deletion logic test
+// Bulk deletion action contracts
 const initialGalleryImages: FinishedImage[] = [
   { id: "img-1", originalName: "p1.png", result: "/res/f1", mangaTitle: "Manga One", folder: "f1", finishedAt: new Date(), settings: {} },
   { id: "img-2", originalName: "p2.png", result: "/res/f2", mangaTitle: "Manga One", folder: "f2", finishedAt: new Date(), settings: {} },
@@ -931,28 +982,89 @@ const initialGalleryImages: FinishedImage[] = [
   { id: "img-4", originalName: "p4.png", result: "/res/f4", mangaTitle: "Manga Two", folder: "f4", finishedAt: new Date(), settings: {} },
 ];
 
-const selectedImageIdsToDelete = new Set(["img-1", "img-3"]);
-const remainingAfterImageDelete = initialGalleryImages.filter((img) => !selectedImageIdsToDelete.has(img.id));
-assert.equal(remainingAfterImageDelete.length, 2, "Should retain non-deleted images");
-assert.deepEqual(remainingAfterImageDelete.map((i) => i.id), ["img-2", "img-4"], "Selected images should be removed");
+type DeletionState = {
+  mangaImages: Record<string, FinishedImage[]>;
+  selectedMangaIds: Map<string, string>;
+  confirmPages: boolean;
+  confirmMangas: boolean;
+  deletingPages: boolean[];
+  deletingMangas: boolean[];
+  clearedImageSelection: number;
+  closedMangaDetail: number;
+};
+const deletionState: DeletionState = {
+  mangaImages: {
+    "Manga One": initialGalleryImages.slice(0, 3),
+    "Manga Two": initialGalleryImages.slice(3),
+  },
+  selectedMangaIds: new Map([["g1", "Manga One"], ["g2", "Manga Two"]]),
+  confirmPages: true,
+  confirmMangas: true,
+  deletingPages: [],
+  deletingMangas: [],
+  clearedImageSelection: 0,
+  closedMangaDetail: 0,
+};
+const applyState = <T,>(action: SetStateAction<T>, current: T): T =>
+  typeof action === "function" ? (action as (previous: T) => T)(current) : action;
+const setMangaImages: Dispatch<SetStateAction<Record<string, FinishedImage[]>>> = (action) => {
+  deletionState.mangaImages = applyState(action, deletionState.mangaImages);
+};
+const setSelectedMangaIds: Dispatch<SetStateAction<Map<string, string>>> = (action) => {
+  deletionState.selectedMangaIds = applyState(action, deletionState.selectedMangaIds);
+};
+const setConfirmDeleteSelectedPages: Dispatch<SetStateAction<boolean>> = (action) => {
+  deletionState.confirmPages = applyState(action, deletionState.confirmPages);
+};
+const setConfirmDeleteSelectedMangas: Dispatch<SetStateAction<boolean>> = (action) => {
+  deletionState.confirmMangas = applyState(action, deletionState.confirmMangas);
+};
+const setIsDeletingSelectedPages: Dispatch<SetStateAction<boolean>> = (action) => {
+  deletionState.deletingPages.push(applyState(action, deletionState.deletingPages.at(-1) || false));
+};
+const setIsDeletingSelectedMangas: Dispatch<SetStateAction<boolean>> = (action) => {
+  deletionState.deletingMangas.push(applyState(action, deletionState.deletingMangas.at(-1) || false));
+};
+const deletedPages: FinishedImage[][] = [];
+const deletedMangas: Array<Array<{ title: string; images: FinishedImage[] }>> = [];
+const deletionActions = createGalleryBulkDeletionActions({
+  selectedImageIds: new Set(["img-1", "img-3"]),
+  selectedMangaIds: deletionState.selectedMangaIds,
+  allLoadedImages: initialGalleryImages.slice(0, 3),
+  currentSingleGroup: { images: [initialGalleryImages[0], initialGalleryImages[2]] },
+  finishedImages: [initialGalleryImages[2]],
+  mangaGroups: [
+    { id: "g1", title: "Manga One", count: 3, coverImage: null, images: initialGalleryImages.slice(0, 3), needsReviewCount: 0, isLoaded: true, isLoading: false },
+    { id: "g2", title: "Manga Two", count: 1, coverImage: null, images: initialGalleryImages.slice(3), needsReviewCount: 0, isLoaded: true, isLoading: false },
+  ],
+  mangaImages: deletionState.mangaImages,
+  activeMangaFilter: "Manga One",
+  onDeleteImages: async (images) => { deletedPages.push(images); },
+  onDeleteMangas: async (mangas) => { deletedMangas.push(mangas); },
+  clearSelectedImages: () => { deletionState.clearedImageSelection += 1; },
+  closeMangaDetail: () => { deletionState.closedMangaDetail += 1; },
+  setMangaImages,
+  setSelectedMangaIds,
+  setConfirmDeleteSelectedPages,
+  setConfirmDeleteSelectedMangas,
+  setIsDeletingSelectedPages,
+  setIsDeletingSelectedMangas,
+});
 
-// Multi-manga selection deletion logic test
-const initialMangaGroups = [
-  { id: "g1", title: "Manga Alpha", count: 3, images: [] },
-  { id: "g2", title: "Manga Beta", count: 5, images: [] },
-  { id: "g3", title: "Manga Gamma", count: 2, images: [] },
-];
+await deletionActions.handleDeleteSelectedPages();
+assert.deepEqual(deletedPages[0].map(({ id }) => id), ["img-1", "img-3"], "Selected pages should be sent once in source order");
+assert.deepEqual(deletionState.mangaImages["Manga One"].map(({ id }) => id), ["img-2"], "Selected pages should be removed from loaded groups");
+assert.deepEqual(deletionState.mangaImages["Manga Two"].map(({ id }) => id), ["img-4"]);
+assert.equal(deletionState.clearedImageSelection, 1);
+assert.equal(deletionState.confirmPages, false);
+assert.deepEqual(deletionState.deletingPages, [true, false]);
 
-const selectedMangaMapToDelete = new Map([
-  ["g1", "Manga Alpha"],
-  ["g3", "Manga Gamma"],
-]);
-
-const remainingAfterMangaDelete = initialMangaGroups.filter((g) => !selectedMangaMapToDelete.has(g.id));
-assert.equal(remainingAfterMangaDelete.length, 1, "Should retain non-deleted manga group");
-assert.equal(remainingAfterMangaDelete[0].title, "Manga Beta", "Manga Beta should remain");
+await deletionActions.handleDeleteSelectedMangas();
+assert.deepEqual(deletedMangas[0].map(({ title }) => title), ["Manga One", "Manga Two"]);
+assert.deepEqual(Object.keys(deletionState.mangaImages), [], "Selected manga should be removed from loaded groups");
+assert.deepEqual([...deletionState.selectedMangaIds], [], "Group selection should be cleared");
+assert.equal(deletionState.confirmMangas, false);
+assert.equal(deletionState.closedMangaDetail, 1, "Deleting the open manga should close its detail view");
+assert.deepEqual(deletionState.deletingMangas, [true, false]);
 
 console.log("ResultGallery loading, state, bulk deletion, latest-first sorting, reader exit position, thumbnail caching, status filter, empty library filter state, search grouping, and drag auto-scroll tests passed successfully!");
-
-
-

@@ -99,3 +99,15 @@ export async function stopSummaryJob(job: Pick<SummaryJob, "groupId" | "title">)
 
 export const summaryJobProgress = (job: Pick<SummaryJob, "status" | "jobProgress">): number =>
   Math.max(0, Math.min(100, job.jobProgress ?? (job.status === "ready" ? 100 : 0)));
+
+export const summaryJobStageLabel = (stage: SummaryJob["jobStage"]): string => {
+  if (!stage) return "Preparing";
+  return {
+    detecting: "Detecting text",
+    ocr: "Reading OCR",
+    textline_merge: "Merging text lines",
+    concatenating: "Combining text",
+    summarizing: "Generating synopsis",
+    complete: "Complete",
+  }[stage];
+};

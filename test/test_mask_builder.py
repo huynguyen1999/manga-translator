@@ -105,6 +105,23 @@ class MaskBuilderTests(unittest.TestCase):
             actual = _constrained_text_growth(seed, regions, protected, radius)
             np.testing.assert_array_equal(actual, expected)
 
+    def test_free_text_mask_is_not_clipped_to_an_overlapping_bubble(self):
+        seed = np.zeros((80, 100), dtype=np.uint8)
+        seed[30:40, 30:50] = 255
+        free_text = TextBlock(
+            lines=[[[30, 30], [50, 30], [50, 40], [30, 40]]], texts=["label"]
+        )
+        bubble_region = TextBlock(lines=np.empty((0, 4, 2), dtype=np.int32), texts=[""])
+        bubble_interior = np.zeros_like(seed)
+        bubble_interior[25:45, 25:40] = 1
+        bubble_region._bubble_interior = bubble_interior
+
+        grown = _constrained_text_growth(
+            seed, [free_text, bubble_region], np.zeros_like(seed), radius=2
+        )
+
+        assert np.all(grown[30:40, 30:50] == 255)
+
     def test_detector_segmentation_is_erased_when_ocr_misses_it(self):
         h, w = 120, 180
         image = np.full((h, w, 3), 255, dtype=np.uint8)

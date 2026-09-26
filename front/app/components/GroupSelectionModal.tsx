@@ -2,12 +2,9 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Icon } from '@iconify/react';
 import { MANGA_TITLE_MAX_LENGTH } from '@/config';
 import type { MangaGroupSelection } from '@/types';
+import type { ExistingGroupTitle } from '@/utils/groupTitles';
 
-export interface ExistingGroupItem {
-  id?: string;
-  title: string;
-  count?: number;
-}
+export type ExistingGroupItem = ExistingGroupTitle;
 
 export type ExistingGroupEntry = string | ExistingGroupItem;
 

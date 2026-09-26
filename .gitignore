@@ -14,6 +14,7 @@ Manga-translated
 /devscripts/data
 /devscripts/input
 /devscripts/old
+/Moebius
 outputs/
 .env
 *.local

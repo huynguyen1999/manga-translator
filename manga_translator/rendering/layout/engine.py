@@ -9,7 +9,6 @@ from .regions import prepare_regions
 from .validation import validate_layout
 
 
-
 def _region_layout(region: Any, font_path: Optional[str]) -> RegionLayout:
     lines = []
     for item in getattr(region, "layout_segments", []) or []:
@@ -25,7 +24,7 @@ def _region_layout(region: Any, font_path: Optional[str]) -> RegionLayout:
         placement_mode=mode,
         font=font_path,
         source_font_size=int(getattr(region, "source_font_size", 0) or getattr(region, "font_size", 0) or 0),
-        calibrated_font_size=int(getattr(region, "calibrated_font_size", 0) or getattr(region, "font_size", 0) or 0),
+        calibrated_font_size=int(getattr(region, "calibrated_font_size", 0) or getattr(region, "source_font_size", 0) or getattr(region, "font_size", 0) or 0),
         font_size=int(getattr(region, "font_size", 0) or 0),
         lines=lines,
         source_geometry=getattr(region, "lines", None),
@@ -58,7 +57,7 @@ def layout_page(ctx: Any, config: Any, font_path: Optional[str] = None, options:
             ctx,
             config,
             font_path=active_font,
-            infer_bubbles=True,
+            infer_bubbles=not getattr(ctx, "bubble_detections", None),
             timing=timing,
             layout_debug=layout_debug,
             page_geometry=getattr(ctx, "page_geometry", None),

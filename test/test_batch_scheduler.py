@@ -1,10 +1,11 @@
 import asyncio
 import io
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, patch
+from types import ModuleType, SimpleNamespace
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 from PIL import Image
 
@@ -14,6 +15,16 @@ from server.batch_store import BatchStore
 
 
 class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
+    def test_inference_page_limit_uses_memory_pressure_policy(self):
+        scheduler = BatchScheduler(None, SimpleNamespace(list=[]), tempfile.gettempdir())
+        psutil = ModuleType("psutil")
+        psutil.Process = lambda *_: SimpleNamespace(
+            memory_info=lambda: SimpleNamespace(rss=60)
+        )
+        psutil.virtual_memory = lambda: SimpleNamespace(total=100)
+        with patch.dict(sys.modules, {"psutil": psutil}):
+            self.assertEqual(scheduler._inference_page_limit("ocr"), 1)
+
     def test_repeated_stage_progress_is_a_noop_but_stage_change_restarts_elapsed_time(self):
         manifest = {"items": [{"id": "p1", "status": "processing", "stage": "detection", "stageStartedAt": 123}]}
 
@@ -42,13 +53,11 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
         group = scheduler._find_ocr_group(batch, items)
 
         self.assertEqual([item["id"] for item in group], ["p1", "p2"])
-        self.assertEqual(
-            scheduler._find_ocr_group(
-                batch,
-                [{**item, "settings": {"ocr": "mocr"}} for item in items[:2]],
-            ),
-            [],
+        mocr_group = scheduler._find_ocr_group(
+            batch,
+            [{**item, "settings": {"ocr": "mocr"}} for item in items[:2]],
         )
+        self.assertEqual([item["id"] for item in mocr_group], ["p1", "p2"])
 
     def test_page_inference_group_batches_only_matching_model_settings(self):
         scheduler = BatchScheduler(
@@ -76,7 +85,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    def test_single_gpu_slot_keeps_page_inference_unbatched(self):
+    def test_single_gpu_slot_allows_page_inference_batching(self):
         scheduler = BatchScheduler(None, None, tempfile.gettempdir())
         batch = {"id": "manga-a", "settings": {}}
         items = [
@@ -84,17 +93,19 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             {"id": "p2", "status": "queued", "pipelineStage": "detection"},
         ]
 
-        self.assertIsNone(scheduler._find_page_inference_group(batch, items))
+        stage, group = scheduler._find_page_inference_group(batch, items)
+        self.assertEqual(stage, "detection")
+        self.assertEqual([item["id"] for item in group], ["p1", "p2"])
 
-        self.assertIsNone(
-            scheduler._find_page_inference_group(
-                batch,
-                [
-                    {"id": "p1", "status": "queued", "pipelineStage": "upscaling"},
-                    {"id": "p2", "status": "queued", "pipelineStage": "upscaling"},
-                ],
-            )
+        stage, group = scheduler._find_page_inference_group(
+            batch,
+            [
+                {"id": "p1", "status": "queued", "pipelineStage": "upscaling"},
+                {"id": "p2", "status": "queued", "pipelineStage": "upscaling"},
+            ],
         )
+        self.assertEqual(stage, "upscaling")
+        self.assertEqual([item["id"] for item in group], ["p1", "p2"])
 
     async def test_ocr_group_claim_is_atomic_and_keeps_stage_checkpoint(self):
         with tempfile.TemporaryDirectory() as root:
@@ -332,6 +343,76 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
         finally:
             for cpu_slot in cpu_slots:
                 scheduler._release_stage_resource("mask_generation", cpu_slot)
+
+    async def test_checkpointed_model_group_keeps_stage_retry_and_manifest_transition(self):
+        config = object()
+        image = Image.new("RGB", (2, 2))
+        context = SimpleNamespace(input=image, img_rgb=object(), img_colorized=None, upscaled=None)
+
+        class Run:
+            manifest = {"createdAt": "now"}
+
+            def _ensure_context(self):
+                self.ctx = context
+                return context
+
+            begin_stage = AsyncMock()
+            retry_stage = AsyncMock()
+            release_runtime = Mock()
+
+        run = Run()
+        item = {"id": "page-1", "resultFolder": "folder-1", "pipelineStage": "detection"}
+        manifest = {"status": "processing", "items": [item]}
+
+        class Store:
+            async def get_batch(self, _batch_id):
+                return {"id": "batch-1", "items": [item]}
+
+            async def mutate(self, _batch_id, mutator):
+                mutator(manifest)
+                return manifest
+
+        executor_pool = SimpleNamespace(free_executor=AsyncMock())
+        scheduler = BatchScheduler(Store(), executor_pool, tempfile.gettempdir())
+        translator = SimpleNamespace(
+            _pipeline_run=None,
+            _current_image_context={},
+            _run_detection_batch=AsyncMock(return_value=["detections"]),
+        )
+
+        def set_image_context(_config, _image):
+            translator._current_image_context = {}
+
+        translator._set_image_context = set_image_context
+
+        async def run_translation(operation):
+            return await operation()
+
+        instance = SimpleNamespace(translator=translator, _run_translation=run_translation)
+        slot = object()
+        scheduler._acquire_stage_resource = AsyncMock(return_value=slot)
+        scheduler._release_stage_resource = Mock()
+        scheduler._checkpoint_run = AsyncMock(return_value=run)
+        scheduler._set_group_stage = AsyncMock()
+        scheduler._next_batch_stage = lambda _run: "ocr"
+        scheduler._reclaim_batch_memory = AsyncMock()
+
+        with patch.object(BatchScheduler, "_config_for", return_value=config):
+            await scheduler._process_checkpointed_model_group(
+                "batch-1", [item], instance, "detection",
+            )
+
+        translator._run_detection_batch.assert_awaited_once_with([config], [context])
+        run.retry_stage.assert_awaited_once_with(
+            "detection", config, translator, stage_already_running=True,
+            precomputed_detection="detections",
+        )
+        self.assertEqual(manifest["items"][0]["status"], "queued")
+        self.assertEqual(manifest["items"][0]["stage"], "ocr")
+        self.assertEqual(manifest["items"][0]["pipelineStage"], "ocr")
+        run.release_runtime.assert_called_once_with()
+        scheduler._release_stage_resource.assert_called_once_with("detection", slot)
+        executor_pool.free_executor.assert_awaited_once_with(instance)
 
     def test_stage_resource_limits_accept_single_gpu_slot(self):
         limits = stage_resource_limits(2, 2, gpu_concurrency=1)

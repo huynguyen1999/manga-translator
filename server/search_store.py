@@ -118,6 +118,13 @@ class SearchStore:
               metadata=EXCLUDED.metadata,indexed_at=now()
             """, item["source_key"], item["group_id"], item["page_id"], item["modality"], version, PROFILE, json.dumps(ids), json.dumps(metadata))
 
+    async def delete_sources(self, group_id):
+        async with self.pool.acquire() as connection, connection.transaction():
+            rows = await connection.fetch("SELECT modality FROM search_sources WHERE group_id=$1", group_id)
+            await connection.execute("DELETE FROM search_sources WHERE group_id=$1", group_id)
+        return {"summary": sum(row["modality"] == "summary" for row in rows),
+                "images": sum(row["modality"] == "image" for row in rows)}
+
     async def image_source(self, page_id):
         row = await self.pool.fetchrow("SELECT id,folder,manga_group_id,page_order FROM pages WHERE id=$1 AND active", page_id)
         if not row:
@@ -154,9 +161,21 @@ class SearchStore:
                       SELECT 1 FROM manga_summaries ms
                       WHERE ms.group_id=g.id AND NULLIF(ms.payload->>'summary', '') IS NOT NULL
                   ))
+                  OR ($5 = 'indexed' AND EXISTS (
+                      SELECT 1 FROM search_sources s WHERE s.group_id=g.id AND s.profile=$6
+                        AND (s.modality='summary' OR EXISTS (
+                            SELECT 1 FROM pages p WHERE p.id=s.page_id AND p.active AND p.manga_group_id=g.id
+                        ))
+                  ))
+                  OR ($5 = 'not-indexed' AND NOT EXISTS (
+                      SELECT 1 FROM search_sources s WHERE s.group_id=g.id AND s.profile=$6
+                        AND (s.modality='summary' OR EXISTS (
+                            SELECT 1 FROM pages p WHERE p.id=s.page_id AND p.active AND p.manga_group_id=g.id
+                        ))
+                  ))
               )
             ORDER BY lower(g.title),g.id LIMIT $3 OFFSET $4
-            """, search, group_ids, limit, offset, status)
+            """, search, group_ids, limit, offset, status, PROFILE)
         result = []
         for row in rows:
             group_id = row["id"]

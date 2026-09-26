@@ -234,6 +234,7 @@ def update_summary_job(
     model: str | None = None,
     refresh_text: bool | None = None,
     regenerate: bool | None = None,
+    stage_passed_count: int | None = None,
 ) -> None:
     value = load_summary(result_root, title) or {}
     value.update({
@@ -252,6 +253,8 @@ def update_summary_job(
         value["jobMessage"] = message
     if current_page is not None:
         value["jobCurrentPage"] = max(0, current_page)
+    if stage_passed_count is not None:
+        value["jobStagePassedCount"] = max(0, stage_passed_count)
     if page_count is not None:
         value["jobPageCount"] = max(0, page_count)
     if pages_with_text is not None:
@@ -340,6 +343,7 @@ def list_runnable_summary_jobs(result_root: Path) -> list[dict[str, Any]]:
             "jobMessage": value.get("jobMessage"),
             "jobError": value.get("jobError"),
             "jobCurrentPage": value.get("jobCurrentPage"),
+            "jobStagePassedCount": value.get("jobStagePassedCount"),
             "jobPageCount": value.get("jobPageCount"),
             "jobPagesWithText": value.get("jobPagesWithText"),
             "jobExtractionRequired": value.get("jobExtractionRequired"),
@@ -382,6 +386,7 @@ def list_summary_jobs(result_root: Path, completed_limit: int = 20) -> list[dict
             "jobMessage": value.get("jobMessage"),
             "jobError": value.get("jobError"),
             "jobCurrentPage": value.get("jobCurrentPage"),
+            "jobStagePassedCount": value.get("jobStagePassedCount"),
             "jobPageCount": value.get("jobPageCount"),
             "jobPagesWithText": value.get("jobPagesWithText"),
             "jobExtractionRequired": value.get("jobExtractionRequired"),
@@ -454,6 +459,7 @@ def synopsis_status(
         "jobProgress": saved.get("jobProgress") if saved else None,
         "jobMessage": saved.get("jobMessage") if saved else None,
         "jobCurrentPage": saved.get("jobCurrentPage") if saved else None,
+        "jobStagePassedCount": saved.get("jobStagePassedCount") if saved else None,
         "jobPageCount": saved.get("jobPageCount") if saved else None,
         "jobPagesWithText": saved.get("jobPagesWithText") if saved else None,
         "jobExtractionRequired": (

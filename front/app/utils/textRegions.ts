@@ -76,7 +76,7 @@ export const parseTextRegions = (data: unknown): EditableTextBlock[] => {
     if (!bounds) return [];
     return [{
       ...bounds,
-      id: String(item.id ?? `bubble_${idx}`),
+      id: String(item.id ?? `text_region_${idx + 1}`),
       bubble_safe_shape: item.bubble_safe_shape && typeof item.bubble_safe_shape === "object"
         ? item.bubble_safe_shape as EditableTextBlock["bubble_safe_shape"] : null,
       group_members: Array.isArray(item.group_members) ? item.group_members.filter((value): value is string => typeof value === "string") : undefined,
@@ -129,6 +129,7 @@ export const countOriginalTextRegions = (blocks: EditableTextBlock[]): number =>
   blocks.reduce((count, block) => count + (block.lines?.length ?? 0), 0);
 
 export interface DetectedRegionLine {
+  id: string;
   points: Array<[number, number]>;
   confidence?: number | null;
 }
@@ -148,12 +149,14 @@ export const parseDetectionRegions = (data: unknown): DetectedRegionLine[] => {
     : null;
   if (!Array.isArray(records)) return [];
 
-  return records.flatMap((raw) => {
+  return records.flatMap((raw, idx) => {
     if (!raw || typeof raw !== "object") return [];
     const item = raw as RawRegion;
     const confidence = numberValue(item.confidence ?? item.prob);
+    const savedIndex = numberValue(item.index);
     const lines = linesFrom(item.lines ?? item.pts ?? item.points);
     return lines.map((pts) => ({
+      id: String(item.id ?? item.region_id ?? `detection_${(savedIndex ?? idx) + 1}`),
       points: pts,
       confidence: confidence != null ? confidence : null,
     }));
@@ -185,8 +188,9 @@ export const parseBubbleDetections = (data: unknown): DetectedBubbleRegion[] => 
     if (polygons.length === 0) return [];
     const imageWidth = Array.isArray(item.image_size) ? numberValue(item.image_size[0]) : null;
     const imageHeight = Array.isArray(item.image_size) ? numberValue(item.image_size[1]) : null;
+    const savedIndex = numberValue(item.index);
     return [{
-      id: String(item.index ?? idx),
+      id: String(item.id ?? item.bubble_id ?? `speech_bubble_${(savedIndex ?? idx) + 1}`),
       polygons,
       ...(imageWidth !== null && imageHeight !== null && imageWidth > 0 && imageHeight > 0
         ? { imageSize: { width: imageWidth, height: imageHeight } }
