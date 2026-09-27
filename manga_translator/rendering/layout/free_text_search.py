@@ -9,12 +9,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .free_text_typography import (
+    _FREE_TEXT_MAX_LINE_SPACING,
     _free_text_candidate_ink_metrics,
+    _free_text_font_metrics,
     _free_text_line_height,
     _free_text_line_spacing,
     _free_text_typography_score,
     _free_text_words,
     _free_text_wrap_candidate,
+    _mask_metrics,
 )
 from .joint_layout import _candidate_bbox
 from .models import (
@@ -81,20 +84,6 @@ def _measure_damage_coverage_crop(
     }
 
 
-
-from .free_text_typography import (
-    _FREE_TEXT_MAX_LINE_SPACING,
-    _free_text_candidate_ink_metrics,
-    _free_text_font_metrics,
-    _free_text_line_height,
-    _free_text_line_spacing,
-    _free_text_typography_score,
-    _free_text_words,
-    _free_text_wrap_candidate,
-    _mask_metrics,
-)
-
-
 def _free_text_shift_candidate(candidate: LayoutCandidate, dx: int, dy: int) -> LayoutCandidate:
     return LayoutCandidate(
         font_size=candidate.font_size,
@@ -128,7 +117,7 @@ def _free_text_shift_candidate(candidate: LayoutCandidate, dx: int, dy: int) -> 
 def _free_text_offset_search(max_radius: int) -> List[Tuple[int, int]]:
     """Yield offset sequence for rapid basin discovery."""
     offsets: List[Tuple[int, int]] = []
-    for radius in (0, 2, 4, 8, 12, 16, 24, 32, 48, 64):
+    for radius in sorted({0, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, max_radius}):
         if radius > max_radius:
             continue
         points = [(0, 0)] if radius == 0 else [
@@ -183,12 +172,25 @@ def _free_text_hard_valid(
     ``ownership_mask`` partitions damage between regions; it is deliberately not
     a placement boundary because translated text can be wider than its source.
     """
+    def reject(reason):
+        counts = getattr(zone, "rejections", {})
+        counts[reason] = counts.get(reason, 0) + 1
+        zone.rejections = counts
+        return False
     x1, y1, x2, y2 = crop_box
     h_obs, w_obs = obstacles.panel_mask.shape[:2]
     if x1 < 0 or y1 < 0 or x2 > w_obs or y2 > h_obs:
-        return False
+        return reject("page_bounds")
     if not visual_crop.any():
-        return False
+        return reject("empty_raster")
+    domain = zone.placement_domain_mask
+    if domain is not None:
+        if domain.shape != obstacles.panel_mask.shape:
+            return reject("local_domain")
+        outside = (not domain[(y1 + y2) // 2, (x1 + x2) // 2] if getattr(zone, "domain_center_only", False)
+                   else np.any(visual_crop & ~(domain[y1:y2, x1:x2] > 0)))
+        if outside:
+            return reject("local_domain")
 
     panel = zone.panel_constraint
     if panel is not None:
@@ -198,33 +200,31 @@ def _free_text_hard_valid(
         if block_bbox is not None:
             bx1, by1, bx2, by2 = block_bbox
             if bx1 < safe_bounds[0] or by1 < safe_bounds[1] or bx2 > safe_bounds[2] or by2 > safe_bounds[3]:
-                return False
+                return reject("panel_bounds")
         ys, xs = np.nonzero(visual_crop)
         if len(xs):
             vx1, vy1 = x1 + int(xs.min()), y1 + int(ys.min())
             vx2, vy2 = x1 + int(xs.max()) + 1, y1 + int(ys.max()) + 1
             if vx1 < safe_bounds[0] or vy1 < safe_bounds[1] or vx2 > safe_bounds[2] or vy2 > safe_bounds[3]:
-                return False
+                return reject("panel_bounds")
         if panel.mask is not None and panel.mask.shape == obstacles.panel_mask.shape:
             panel_crop = panel.mask[y1:y2, x1:x2] > 0
             if np.any(visual_crop & ~panel_crop):
-                return False
+                return reject("panel_mask")
 
-    # Quick check: if the entire crop_box has no obstacles, it's valid immediately
     bubble_sub = obstacles.protected_bubble_mask[y1:y2, x1:x2]
     other_sub = other_text[y1:y2, x1:x2]
     panel_sub = obstacles.panel_mask[y1:y2, x1:x2]
 
-    # If obstacles exist in sub-window, test against visual crop
     if np.any(bubble_sub):
         if np.any(visual_crop & (bubble_sub > 0)):
-            return False
+            return reject("protected_bubble")
     if np.any(other_sub):
         if np.any(visual_crop & other_sub):
-            return False
+            return reject("other_text")
     if not np.all(panel_sub > 0):
         if np.any(visual_crop & ~(panel_sub > 0)):
-            return False
+            return reject("panel_mask")
 
     return True
 
@@ -266,13 +266,14 @@ def _free_text_ink_overflow(
     image_shape: Tuple[int, int],
     obstacles: PageObstacleMap,
     other_text: np.ndarray,
+    placement_domain_mask: Optional[np.ndarray] = None,
 ) -> float:
     """Measure glyph pixels outside the legal page/obstacle area."""
     stats = get_solver_profile()
     stats.overflow_checks += 1
     stats.overflow_rasterizations += 1
     crop_box, glyph, _, _ = _candidate_cropped_visual_masks(candidate, 0, image_shape)
-    return _free_text_ink_overflow_in_crop(crop_box, glyph, obstacles, other_text)
+    return _free_text_ink_overflow_in_crop(crop_box, glyph, obstacles, other_text, placement_domain_mask)
 
 
 def _free_text_ink_overflow_from_raster(
@@ -280,6 +281,7 @@ def _free_text_ink_overflow_from_raster(
     destination_crop_box: Tuple[int, int, int, int],
     obstacles: PageObstacleMap,
     other_text: np.ndarray,
+    placement_domain_mask: Optional[np.ndarray] = None,
 ) -> float:
     """Measure overflow by translating a cached raster, without rerasterizing."""
     profile = get_solver_profile()
@@ -289,7 +291,7 @@ def _free_text_ink_overflow_from_raster(
     crop_box, glyph, _, _ = _candidate_raster_at_offset(
         raster, dx, dy, obstacles.panel_mask.shape[:2]
     )
-    return _free_text_ink_overflow_in_crop(crop_box, glyph, obstacles, other_text)
+    return _free_text_ink_overflow_in_crop(crop_box, glyph, obstacles, other_text, placement_domain_mask)
 
 
 def _free_text_ink_overflow_in_crop(
@@ -297,6 +299,7 @@ def _free_text_ink_overflow_in_crop(
     glyph: np.ndarray,
     obstacles: PageObstacleMap,
     other_text: np.ndarray,
+    placement_domain_mask: Optional[np.ndarray] = None,
 ) -> float:
     total = int(np.count_nonzero(glyph))
     if not total:
@@ -307,6 +310,8 @@ def _free_text_ink_overflow_in_crop(
         & ~(obstacles.protected_bubble_mask[y1:y2, x1:x2] > 0)
         & ~other_text[y1:y2, x1:x2]
     )
+    if placement_domain_mask is not None:
+        allowed &= placement_domain_mask[y1:y2, x1:x2] > 0
     return float(np.count_nonzero(glyph & ~allowed)) / total
 
 
@@ -350,8 +355,7 @@ def _free_text_search_result(
     started = perf_counter()
     coverage = _measure_damage_coverage_crop(crop_box, visual_crop, ink_crop, block_crop, zone)
     stats.ft_coverage_ms += (perf_counter() - started) * 1000.0
-    if coverage["c_block"] < 0.10:
-        return None
+    # Coverage guides placement; source overlap is not required for nearby safe text.
     actual_centroid = (base_centroid[0] + dx, base_centroid[1] + dy)
     center_dx = actual_centroid[0] - damage_centroid[0]
     center_dy = actual_centroid[1] - damage_centroid[1]

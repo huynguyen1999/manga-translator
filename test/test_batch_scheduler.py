@@ -710,6 +710,38 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             task.cancel()
         await asyncio.gather(*scheduler._running.values(), return_exceptions=True)
 
+    async def test_scheduler_keeps_other_manga_queued_while_one_is_active(self):
+        store = SimpleNamespace(
+            list_batches=AsyncMock(
+                return_value=[
+                    {"id": "manga-a", "status": "processing", "items": [{"status": "processing"}], "settings": {}},
+                    {"id": "manga-b", "status": "waiting", "items": [{"id": "page-1", "status": "queued"}]},
+                ]
+            ),
+            mutate=AsyncMock(),
+        )
+
+        class Executors:
+            def free_executors(self):
+                return 1
+
+            async def find_executor(self):
+                return object()
+
+            async def free_executor(self, _instance):
+                pass
+
+        scheduler = BatchScheduler(store, Executors(), tempfile.gettempdir())
+        scheduler._running[("manga-a", "page-1")] = asyncio.create_task(asyncio.sleep(10))
+        scheduler._claim_item = AsyncMock()
+
+        self.assertFalse(await scheduler._launch_available())
+        scheduler._claim_item.assert_not_awaited()
+
+        for task in scheduler._running.values():
+            task.cancel()
+        await asyncio.gather(*scheduler._running.values(), return_exceptions=True)
+
     async def test_scheduler_prefers_list_runnable_batches_over_list_batches(self):
         store = SimpleNamespace(
             list_runnable_batches=AsyncMock(

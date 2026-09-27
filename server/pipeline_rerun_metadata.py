@@ -2,7 +2,6 @@
 
 import numpy as np
 
-
 def restore_source_metadata(regions, sources):
     by_id = {}
 
@@ -35,6 +34,8 @@ def restore_source_metadata(regions, sources):
             continue
         if not getattr(region, "region_id", ""):
             region.region_id = getattr(source, "region_id", "")
+        if getattr(source, "translation_policy", None) == "preserve":
+            region.translation_policy = "preserve"
         source_size = getattr(region, "source_font_size", None)
         if not source_size or source_size <= 0:
             source_size = getattr(source, "source_font_size", None)
@@ -42,6 +43,6 @@ def restore_source_metadata(regions, sources):
                 source_size = getattr(source, "font_size", None)
             if source_size and source_size > 0:
                 region.source_font_size = source_size
-        for key in ("source_region_ids", "source_regions", "source_geometry", "source_text_snapshot", "bubble_id"):
+        for key in ("source_region_ids", "source_regions", "source_geometry", "source_text_snapshot", "bubble_id", "retention", "retention_reason"):
             if not getattr(region, key, None) and getattr(source, key, None) is not None:
                 setattr(region, key, getattr(source, key))

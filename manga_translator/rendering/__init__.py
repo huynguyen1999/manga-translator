@@ -855,9 +855,14 @@ async def render_page(
                 region._render_failure_reason = region.review_reason
 
     regions = list(ctx.text_regions or [])
+    from .layout.failure_policy import should_restore_source
+    active_bubble_ids = {
+        getattr(r, "bubble_id", None) for r in regions
+        if getattr(r, "bubble_id", None) and not getattr(r, "_render_suppressed", False) and resolve_render_content(r).strip()
+    }
     restore_regions = [
         region for region in regions
-        if getattr(region, "_render_suppressed", False)
+        if (getattr(region, "_render_suppressed", False) and should_restore_source(region, active_bubble_ids))
         or (
             getattr(region, "review_required", False)
             and not resolve_render_content(region).strip()
@@ -896,8 +901,6 @@ async def render_page(
     assert restore_ids.isdisjoint(drawable_ids)
 
     render_canvas = ctx.img_inpainted.copy()
-    if getattr(ctx, "img_rgb", None) is not None and restore_regions:
-        render_canvas = restore_original(render_canvas, ctx.img_rgb, restore_regions)
     for region in drawable_regions:
         cleanup = decode_safe_shape(
             getattr(region, "free_text_cleanup_mask", None),
@@ -915,6 +918,8 @@ async def render_page(
                 cv2.INPAINT_TELEA,
             )
 
+    if getattr(ctx, "img_rgb", None) is not None and restore_regions:
+        render_canvas = restore_original(render_canvas, ctx.img_rgb, restore_regions)
     render_cfg = getattr(config, "render", None)
     renderer_type = getattr(render_cfg, "renderer", Renderer.default)
 

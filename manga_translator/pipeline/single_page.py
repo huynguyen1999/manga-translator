@@ -12,6 +12,7 @@ from manga_translator.mask_builder import build_inpaint_masks, create_mask_sourc
 from manga_translator.pipeline.cpu import CPU_PRIORITY_BACKGROUND
 from manga_translator.pipeline.run import serialize_regions
 from manga_translator.rendering import get_default_eng_font
+from manga_translator.rendering.paragraph_coalescing import coalesce_free_text_regions
 from manga_translator.rendering.layout import layout_page
 from manga_translator.rendering.layout.frozen import serialize_frozen_layout
 from manga_translator.detection.bubble import serialize_bubble_detections
@@ -169,6 +170,8 @@ async def translate_page(
             raise
         ctx.text_regions = [] # Fallback to empty text_regions if textline merge fails
 
+    await owner._detect_speech_bubbles(config, ctx)
+    ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
     if ctx.text_regions:
         merged_docs = serialize_regions(ctx.text_regions)
         ctx.result_documents['text_regions_merged.json'] = merged_docs
@@ -181,10 +184,6 @@ async def translate_page(
                 owner.result_root,
             )
 
-    # Detect before translation so grouped bubble text is translated as one flow.
-    await owner._detect_speech_bubbles(config, ctx)
-
-    # Apply pre-dictionary after textline merge
     pre_dict = load_dictionary_fn(owner.pre_dict)
     pre_replacements = []
     for region in ctx.text_regions:

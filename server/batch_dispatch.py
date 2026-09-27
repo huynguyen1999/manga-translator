@@ -16,7 +16,7 @@ async def launch_available(scheduler) -> bool:
     batches = await fetch()
     for batch in batches:
         batch_id = batch["id"]
-        if batch_id in scheduler._stopping_batches:
+        if any(active_id != batch_id for active_id, _ in scheduler._running) or batch_id in scheduler._stopping_batches:
             continue
         if batch.get("status") == "paused":
             continue

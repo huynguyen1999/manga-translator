@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from ..utils import Quadrilateral, TextBlock
-
+from .editor_geometry import scaled, scale_segments
 
 def _json_default(value: Any):
     if isinstance(value, Enum):
@@ -62,25 +62,28 @@ def serialize_regions(regions) -> list[dict[str, Any]]:
     return result
 
 
-def serialize_editor_regions(regions) -> list[dict[str, Any]]:
+def serialize_editor_regions(regions, scale_x: float = 1.0, scale_y: float = 1.0) -> list[dict[str, Any]]:
     """Minimal editor payload for resumed runs that skip the normal save path."""
-    from ..rendering.bubble_layout import encode_safe_shape, encode_rendered_box
+    from ..rendering.bubble_layout import encode_safe_shape
     result = []
     for index, region in enumerate(regions or []):
         xywh = _json_default(getattr(region, "xywh", [0, 0, 0, 0]))
+        lines = _json_default(getattr(region, "lines", []))
+        segments = scale_segments(getattr(region, "layout_segments", []),
+                                  getattr(region, "_bubble_segments", []), scale_x, scale_y)
         result.append({
             "id": getattr(region, "group_id", f"bubble_{index}"),
             "region_id": getattr(region, "region_id", ""),
-            "x": xywh[0],
-            "y": xywh[1],
-            "width": xywh[2],
-            "height": xywh[3],
-            "lines": _json_default(getattr(region, "lines", [])),
+            "x": scaled(xywh[0], scale_x),
+            "y": scaled(xywh[1], scale_y),
+            "width": max(1, scaled(xywh[2], scale_x)),
+            "height": max(1, scaled(xywh[3], scale_y)),
+            "lines": [[[scaled(x, scale_x), scaled(y, scale_y)] for x, y in line] for line in lines],
             "original_text": getattr(region, "text", ""),
             "translation": getattr(region, "translation", ""),
             "confidence": _json_default(getattr(region, "confidence", getattr(region, "prob", None))),
-            "font_size": getattr(region, "font_size", 24),
-            "source_font_size": getattr(region, "source_font_size", None) or getattr(region, "font_size", 24),
+            "font_size": scaled(getattr(region, "font_size", 24), scale_y),
+            "source_font_size": scaled(getattr(region, "source_font_size", None) or getattr(region, "font_size", 24), scale_y),
             "font_family": getattr(region, "font_family", ""),
             "fg_color": _json_default(getattr(region, "fg_colors", (0, 0, 0))),
             "bg_color": _json_default(getattr(region, "bg_colors", (0, 0, 0))),
@@ -91,17 +94,14 @@ def serialize_editor_regions(regions) -> list[dict[str, Any]]:
             "italic": bool(getattr(region, "italic", False)),
             "target_lang": getattr(region, "target_lang", ""),
             "direction": getattr(region, "direction", "h"),
-            "layout_segments": [
-                {**_json_default(segment), "rendered_png": encode_rendered_box(box["box"])}
-                for segment, box in zip(getattr(region, "layout_segments", []),
-                                        getattr(region, "_bubble_segments", []))
-            ],
-            "bubble_safe_shape": encode_safe_shape(getattr(region, "_bubble_interior", None)),
+            "layout_segments": segments,
+            "bubble_safe_shape": encode_safe_shape(getattr(region, "_bubble_interior", None), scale_x, scale_y),
             "review_required": bool(getattr(region, "review_required", False)),
             "review_reason": getattr(region, "review_reason", None),
             "provenance": getattr(region, "provenance", None),
             "translation_remap": getattr(region, "translation_remap", None),
             "translation_source": getattr(region, "translation_source", None),
+            "translation_policy": getattr(region, "translation_policy", None),
         })
     return result
 

@@ -10,38 +10,33 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .font_policy import page_font_penalty as _page_font_penalty
+from .clearance import rendered_masks_conflict
 from .models import LayoutCandidate, PlacedLine
 from .profiling import get_solver_profile
-from .raster import _candidate_cropped_visual_masks, _cropped_masks_overlap
+from .raster import _candidate_cropped_visual_masks
 from .free_text_typography import _mask_metrics
 
 _MAX_JOINT_LAYOUT_COMBINATIONS = 4096
-
-
 def _ink_centroid(
     lines: List[PlacedLine],
     font_size: int,
 ) -> Tuple[float, float, int]:
     """Calculate centroid of the placed lines candidate block."""
-    total_x = 0.0
-    total_y = 0.0
-    total_n = 0
+    from .raster import _render_line_alpha
+    total_x = total_y = total_n = 0
     for line in lines:
-        n = max(1, line.width * line.height)
-        total_x += (line.x + line.width / 2.0) * n
-        total_y += (line.y + line.height / 2.0) * n
-        total_n += n
-
-    if total_n == 0:
-        return 0.0, 0.0, 0
-    return total_x / total_n, total_y / total_n, total_n
-
+        alpha = _render_line_alpha(line, font_size)
+        ys, xs = np.nonzero(alpha > 0) if alpha is not None else (np.array([]), np.array([]))
+        if len(xs):
+            total_x += float(xs.sum()) + line.x * len(xs)
+            total_y += float(ys.sum()) + line.y * len(ys)
+            total_n += len(xs)
+    return (total_x / total_n, total_y / total_n, total_n) if total_n else (0., 0., 0)
 
 def _rect_gap(first: Tuple[int, int, int, int], second: Tuple[int, int, int, int]) -> float:
     dx = max(first[0] - second[2], second[0] - first[2], 0)
     dy = max(first[1] - second[3], second[1] - first[3], 0)
     return math.hypot(dx, dy)
-
 
 def _candidate_bbox(candidate: LayoutCandidate) -> Tuple[int, int, int, int]:
     if candidate.layout_bounds is not None: return candidate.layout_bounds
@@ -52,14 +47,16 @@ def _candidate_bbox(candidate: LayoutCandidate) -> Tuple[int, int, int, int]:
         max(line.y + line.height for line in candidate.lines),
     )
 
-
 def _candidate_data(candidate: LayoutCandidate, image_shape: Tuple[int, int]):
-    crop_box, glyph_mask, _, _ = _candidate_cropped_visual_masks(candidate, 0, image_shape)
+    footprint = getattr(candidate, "_render_footprint", None)
+    if footprint is not None:
+        crop_box, glyph_mask = footprint
+    else:
+        crop_box, _, glyph_mask, _ = _candidate_cropped_visual_masks(candidate, int(candidate.qa.get("layout_stroke_width", 0)), image_shape)
     if candidate.status.startswith("free_text") and np.any(glyph_mask):
         metrics = _mask_metrics(glyph_mask, (crop_box[0], crop_box[1]))
         return crop_box, glyph_mask, metrics["bbox"], metrics["centroid"]
     return crop_box, glyph_mask, _candidate_bbox(candidate), _ink_centroid(candidate.lines, candidate.font_size)
-
 
 
 def _choose_joint_layout(
@@ -98,7 +95,7 @@ def _choose_joint_layout(
                 box_i, res_i, _, _ = candidate_cache[id(combination[i])]
                 for j in range(i + 1, len(combination)):
                     box_j, res_j, _, _ = candidate_cache[id(combination[j])]
-                    if _cropped_masks_overlap(box_i, res_i, box_j, res_j):
+                    if rendered_masks_conflict(box_i, res_i, combination[i].font_size, box_j, res_j, combination[j].font_size):
                         collision = True
                         break
                 if collision:
@@ -109,6 +106,8 @@ def _choose_joint_layout(
 
             score = sum(
                 candidate.penalty + _page_font_penalty(candidate.font_size, getattr(plan.region, "_font_policy_diagnostics", {}).get("page_baseline") if plan.region else None)
+                + (5 * max(0.0, candidate.qa.get("center_error_px", 0) - candidate.font_size / 2) / max(1, candidate.font_size)
+                   if not candidate.status.startswith("free_text") else 0)
                 for plan, candidate in zip(plans, combination)
             )
             for first in range(len(combination)):

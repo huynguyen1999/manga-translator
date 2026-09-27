@@ -60,18 +60,14 @@ def build_page_obstacle_map(
         if assigned.shape != (h, w):
             assigned = cv2.resize(assigned.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
         bubble_mask = cv2.bitwise_or(bubble_mask, (assigned > 0).astype(np.uint8))
-    if bubble_halo > 0:
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (bubble_halo * 2 + 1, bubble_halo * 2 + 1)
-        )
-        protected = cv2.dilate(bubble_mask, kernel)
-    else:
-        protected = bubble_mask.copy()
+    if np.any(bubble_mask) and min(h, w) >= 256:
+        open_k = max(3, int(round(min(h, w) * 0.02)) | 1)
+        bubble_mask = cv2.morphologyEx(bubble_mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_k, open_k)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (bubble_halo * 2 + 1, bubble_halo * 2 + 1)) if bubble_halo > 0 else None
+    protected = cv2.dilate(bubble_mask, kernel) if kernel is not None else bubble_mask.copy()
     return PageObstacleMap(
-        bubble_mask=bubble_mask,
-        protected_bubble_mask=protected,
-        text_mask=text_mask,
-        panel_mask=np.ones((h, w), dtype=np.uint8),
+        bubble_mask=bubble_mask, protected_bubble_mask=protected,
+        text_mask=text_mask, panel_mask=np.ones((h, w), dtype=np.uint8),
     )
 
 

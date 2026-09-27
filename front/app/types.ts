@@ -202,8 +202,7 @@ export interface MangaGroupSelection {
 }
 
 export interface TranslationBatch {
-  id: string;
-  kind?: TranslationBatchKind;
+  id: string; kind?: TranslationBatchKind; rerunMode?: PipelineRerunMode;
   addedAt: Date;
   updatedAt?: Date;
   mangaTitle: string;

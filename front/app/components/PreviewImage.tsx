@@ -35,6 +35,7 @@ interface PreviewImageProps {
   fullInpainted?: string | null;
   resultPlaceholder?: string | null;
   coordinateSize?: { width: number; height: number } | null;
+  workingCoordinateSize?: { width: number; height: number } | null;
   useFullResolution?: boolean;
 }
 
@@ -79,6 +80,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     fullInpainted,
     resultPlaceholder,
     coordinateSize,
+    workingCoordinateSize,
     useFullResolution = false,
   }) => {
     const [originalUrl, setOriginalUrl] = useState<string | null>(null);
@@ -325,8 +327,14 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       });
     }, [effectiveBlocks]);
     const originalTextLines: DetectedRegionLine[] = detectedTextLines ?? fallbackOriginalTextLines;
-    const imageCoordinateSize = coordinateSize ?? naturalSize;
-    const bubbleCoordinateSize = detectedBubbleRegions.find((region) => region.imageSize)?.imageSize ?? imageCoordinateSize;
+    const sourceCoordinateSize = coordinateSize ?? naturalSize;
+    const imageCoordinateSize = sourceCoordinateSize && workingCoordinateSize
+      && effectiveBlocks.some(block => block.x + block.width > sourceCoordinateSize.width
+        || block.y + block.height > sourceCoordinateSize.height)
+      ? workingCoordinateSize : sourceCoordinateSize;
+    const detectionCoordinateSize = (detectedTextLines ? workingCoordinateSize : null) ?? imageCoordinateSize ?? { width: 1, height: 1 };
+    const bubbleCoordinateSize = detectedBubbleRegions.find((region) => region.imageSize)?.imageSize
+      ?? workingCoordinateSize ?? imageCoordinateSize;
     const originalRegionCount = detectedTextLines?.length ?? countOriginalTextRegions(effectiveBlocks);
     const hasOriginalRegionData = originalRegionCount > 0;
     const effectiveTextRegionsUrl = textRegionsUrl
@@ -931,7 +939,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                 <svg
                   aria-hidden="true"
                   className="absolute inset-0 h-full w-full pointer-events-none"
-                  viewBox={`0 0 ${imageCoordinateSize.width} ${imageCoordinateSize.height}`}
+                  viewBox={`0 0 ${detectionCoordinateSize.width} ${detectionCoordinateSize.height}`}
                   preserveAspectRatio="none"
                 >
                   {originalTextLines.map((region, lineIdx) => {
@@ -992,8 +1000,8 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                   const minY = Math.min(...ys);
                   const maxX = Math.max(...xs);
                   const midX = (minX + maxX) / 2;
-                  const leftPct = (midX / imageCoordinateSize.width) * 100;
-                  const topPct = (minY / imageCoordinateSize.height) * 100;
+                  const leftPct = (midX / detectionCoordinateSize.width) * 100;
+                  const topPct = (minY / detectionCoordinateSize.height) * 100;
                   const conf = region.confidence;
                   const confStyle = getConfidenceStyle(conf);
                   const hasConf = typeof conf === "number" && !isNaN(conf);

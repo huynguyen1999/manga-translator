@@ -35,6 +35,7 @@ from ..bubble_layout import (
 )
 from ...geometry.bubbles import PageGeometry, prepare_page_geometry
 from ...utils import is_preserved_region
+from .clearance import rendered_masks_conflict
 from .geometry import (
     BubbleGeometry,
     build_lobe_graph,
@@ -68,8 +69,7 @@ from .raster import (
     _candidate_cropped_visual_masks,
     _candidate_global_glyph_mask,
     _candidate_raster_at_offset,
-    _candidate_visual_masks,
-    _cropped_masks_overlap,
+    _candidate_visual_masks, _cropped_masks_overlap,
     _render_line_alpha,
     rasterize_candidate,
 )
@@ -229,7 +229,7 @@ def _select_free_text_joint_candidates(
     for first in range(len(free_plans)):
         for second in range(first + 1, len(free_plans)):
             overlap = any(
-                _cropped_masks_overlap(*data[id(a)], *data[id(b)])
+                rendered_masks_conflict(*data[id(a)], a.font_size, *data[id(b)], b.font_size)
                 for a in free_plans[first].candidates
                 for b in free_plans[second].candidates
             )
@@ -278,7 +278,7 @@ def _select_free_text_joint_candidates(
             for candidate in sorted(free_plans[index].candidates, key=lambda item: item.penalty):
                 crop_box, glyph_mask = data[id(candidate)]
                 if any(
-                    _cropped_masks_overlap(crop_box, glyph_mask, *data[id(other)])
+                    rendered_masks_conflict(crop_box, glyph_mask, candidate.font_size, *data[id(other)], other.font_size)
                     for _, other in chosen_pairs
                 ):
                     continue
@@ -289,6 +289,12 @@ def _select_free_text_joint_candidates(
 
         search(0, [], 0.0)
         selected.update({id(free_plans[index].region): candidate for index, candidate in best})
+    for region in regions:
+        if id(region) not in selected and plans.get(id(region)):
+            region._free_text_attempt_qa["conflicting_region_ids"] = [
+                str(getattr(other, "region_id", "")) for other in regions if id(other) in selected
+                and any(rendered_masks_conflict(*data[id(candidate)], candidate.font_size,
+                    *data[id(selected[id(other)])], selected[id(other)].font_size) for candidate in plans[id(region)])]
     return selected
 
 
@@ -297,48 +303,15 @@ def _free_text_fast_conflict_regions(
     plans: Dict[int, List[LayoutCandidate]],
     image_shape: Tuple[int, int],
 ) -> set[int]:
-    """Return fast-only placements that collide and need exhaustive alternatives."""
-    fast_regions = [
-        region for region in regions
-        if len(plans.get(id(region), [])) == 1
-        and plans[id(region)][0].status in {"free_text_ideal", "free_text_local"}
-    ]
-    if not fast_regions:
-        return set()
-
-    candidate_data = {}
-
-    def masks_for(candidate):
-        data = candidate_data.get(id(candidate))
-        if data is None:
-            crop_box, glyph_mask, _, _ = _candidate_data(candidate, image_shape)
-            data = (crop_box, glyph_mask)
-            candidate_data[id(candidate)] = data
-        return data
-
-    conflicts: set[int] = set()
-    for first_region in fast_regions:
-        first_id = id(first_region)
-        first_candidate = plans[first_id][0]
-        first_box, first_mask = masks_for(first_candidate)
-        for second_region in regions:
-            second_id = id(second_region)
-            if first_id == second_id:
-                continue
-            second_candidates = plans.get(second_id, [])
-            if not second_candidates:
-                continue
-            all_collide = True
-            for second_candidate in second_candidates:
-                second_box, second_mask = masks_for(second_candidate)
-                if not _cropped_masks_overlap(first_box, first_mask, second_box, second_mask):
-                    all_collide = False
-                    break
-            if not all_collide:
-                continue
-            conflicts.add(first_id)
-            if len(second_candidates) == 1 and second_candidates[0].status in {"free_text_ideal", "free_text_local"}:
-                conflicts.add(second_id)
+    """Find pairs whose retained candidates all conflict and need smaller-size alternatives."""
+    active = [region for region in regions if plans.get(id(region))]
+    data = {id(c): _candidate_data(c, image_shape)[:2] for r in active for c in plans[id(r)]}
+    conflicts = set()
+    for index, first in enumerate(active):
+        for second in active[index + 1:]:
+            if all(rendered_masks_conflict(*data[id(a)], a.font_size, *data[id(b)], b.font_size)
+                   for a in plans[id(first)] for b in plans[id(second)]):
+                conflicts.update((id(first), id(second)))
     return conflicts
 
 
@@ -401,6 +374,8 @@ def _apply_free_text_candidate(
     region._solver_score = candidate.penalty
     region._solver_status = candidate.status
     region._solver_qa = candidate.qa
+    if candidate.qa.get("emergency_word_split"):
+        region.review_required, region.review_reason = True, "emergency_word_split"
     region._render_suppressed = False
     zone = getattr(region, "_free_text_zone", None)
     if zone is not None and np.any(zone.coverable_damage_mask):
@@ -664,10 +639,8 @@ def _build_region_layout_plan(
         return None
 
     render_cfg = config.render
-    minimum = render_cfg.font_size_minimum
-    if minimum == -1:
-        minimum = round(sum(image_shape) / 200)
-    minimum = max(1, minimum)
+    from .readable_text import readable_font_minimum
+    minimum = readable_font_minimum(render_cfg, image_shape)
 
     adaptive_target = _estimate_adaptive_font_size(interior, text, minimum)
     effective_baseline = None if is_preserved_region(region) else page_font_baseline
@@ -723,10 +696,9 @@ def _build_region_layout_plan(
     candidates_a = stage_a_result if isinstance(stage_a_result, list) else ([stage_a_result] if stage_a_result is not None else [])
     normal = candidates_a[0] if candidates_a else None
 
-    # ponytail: cap review-only fallback at half target; use measured readability data before lowering it.
-    emergency_floor = max(font_policy.absolute_minimum, (font_policy.preferred_size + 1) // 2)
+    emergency_floor = font_policy.absolute_minimum
     emergency_candidates: List[LayoutCandidate] = []
-    if normal is None and is_bubble and font_policy.consistency_floor - 1 >= emergency_floor:
+    if (normal is None or normal.qa.get("center_error_px", 0) > normal.font_size / 2) and is_bubble and font_policy.consistency_floor - 1 >= emergency_floor:
         emergency_result = solve_layout(
             geom=geom,
             words=split_layout_words(text),
@@ -776,7 +748,7 @@ def _build_region_layout_plan(
         "hyphenation_attempted": False,
         "hyphenation_selected": False,
         "hyphenation_rescue_selected": False,
-        "hyphenation_reason": "satisfactory_font_ratio" if normal is not None else "stage_a_failed",
+        "hyphenation_reason": "disabled_by_config" if render_cfg.no_hyphenation else ("satisfactory_font_ratio" if normal is not None else "stage_a_failed"),
         "longest_word": None,
         "longest_word_width": 0,
         "max_usable_row_width": 0,
@@ -793,159 +765,67 @@ def _build_region_layout_plan(
         "emergency_compression": bool(emergency_candidates),
     }
 
-    # Evaluate if hyphenation rescue is needed or permitted
-    needs_rescue = (normal is None or normal.font_size < font_policy.hyphenation_trigger_size)
-    rescue = None
-    rescue_word = None
-    rescue_variant_obj = None
-
-    if needs_rescue:
-        if getattr(render_cfg, "no_hyphenation", False):
-            diagnostics["hyphenation_reason"] = "disabled_by_config"
-        elif not is_bubble:
-            diagnostics["hyphenation_reason"] = "not_bubble_placement"
-        elif is_preserved_region(region):
-            diagnostics["hyphenation_reason"] = "preserved_region"
-        else:
-            normal_words = normalize_words(split_layout_words(text))
-            pressure, bottleneck_index = _long_word_pressure(
-                geom, normal_words, font_policy.preferred_size, stroke_width, solver_margin
-            )
-            diagnostics.update(pressure)
-            diagnostics["hyphenation_reason"] = "no_long_word_bottleneck"
-            if bottleneck_index is not None:
-                variants = _hyphenation_variants(
-                    normal_words, bottleneck_index,
-                    getattr(region, "target_lang", "en_US") or "en_US", font_policy.preferred_size,
-                    max_variants=3,
-                )
-                single_var = _hyphenation_variant(
-                    normal_words, bottleneck_index,
-                    getattr(region, "target_lang", "en_US") or "en_US", font_policy.preferred_size,
-                )
-                if not single_var:
-                    variants = []
-                diagnostics["hyphenation_reason"] = "no_dictionary_breakpoint"
-                if variants:
-                    diagnostics["hyphenation_rescue_attempted"] = True
-                    diagnostics["hyphenation_attempted"] = True
-                    diagnostics["hyphenation_reason"] = "long_word_width_bottleneck"
-                    rescue_word = normal_words[bottleneck_index]
-
-                    best_rescue_cand = None
-                    best_rescue_variant = None
-
-                    for v_obj in variants:
-                        variant = v_obj.words
-                        variant_widths, _ = _precompute_widths(variant, font_policy.preferred_size)
-                        original_width = _precompute_widths([rescue_word], font_policy.preferred_size)[0][0]
-                        materially_narrower = max(variant_widths[bottleneck_index:bottleneck_index + 2], default=original_width) < original_width
-
-                        if materially_narrower:
-                            v_res = solve_layout(
-                                geom=geom,
-                                words=variant,
-                                font_size_max=font_policy.preferred_size,
-                                font_size_min=font_policy.consistency_floor,
-                                language=getattr(region, "target_lang", "en_US") or "en_US",
-                                hyphenate=False,
-                                line_spacing=render_cfg.line_spacing or 0.0,
-                                stroke_width=stroke_width,
-                                margin=solver_margin,
-                                y_origin_step=max(2, target // 8),
-                                max_y_origin_trials=solver_max_y_trials,
-                                source_profile=source_profile,
-                                preferred_mask=zone_local,
-                                top_k=1,
-                                is_single_region=(preferred_mask is None or not np.any(preferred_mask)),
-                                lobe_graph=lobe_graph,
-                                forced_break_after=bottleneck_index,
-                            )
-                            cand = v_res[0] if isinstance(v_res, list) and v_res else (
-                                v_res if isinstance(v_res, LayoutCandidate) else None
-                            )
-                            if cand is not None:
-                                if best_rescue_cand is None or cand.font_size > best_rescue_cand.font_size or (
-                                    cand.font_size == best_rescue_cand.font_size and len(cand.lines) < len(best_rescue_cand.lines)
-                                ) or (
-                                    cand.font_size == best_rescue_cand.font_size and len(cand.lines) == len(best_rescue_cand.lines) and cand.penalty < best_rescue_cand.penalty
-                                ):
-                                    best_rescue_cand = cand
-                                    best_rescue_variant = v_obj
-
-                    rescue = best_rescue_cand
-                    rescue_variant_obj = best_rescue_variant
-
-                    if rescue is not None:
-                        diagnostics["rescue_candidate_font_size"] = rescue.font_size
-                        diagnostics["rescue_font_size"] = rescue.font_size
-                        rescue_gain = (
-                            rescue.font_size / float(max(1, normal.font_size))
-                            if normal else None
-                        )
-                        diagnostics["font_gain_ratio"] = round(rescue_gain, 4) if rescue_gain is not None else None
-                        gain_px = (rescue.font_size - normal.font_size) if normal else rescue.font_size
-                        
-                        meaningful = (
-                            normal is None
-                            or (gain_px >= HYPHEN_MIN_GAIN_PX and (rescue_gain >= HYPHEN_MIN_GAIN_RATIO or rescue.font_size >= font_policy.consistency_floor))
-                        )
-                        if meaningful:
-                            diagnostics["hyphenation_reason"] = "long_word_width_bottleneck"
-                            diagnostics["hyphenation_selected"] = True
-                            diagnostics["hyphenation_rescue_selected"] = True
-                            diagnostics["final_font_size"] = rescue.font_size
-                            diagnostics["font_policy_status"] = "hyphen_rescue"
-                        else:
-                            diagnostics["hyphenation_reason"] = "insufficient_font_gain"
-                    else:
-                        diagnostics["hyphenation_reason"] = "no_valid_rescue_layout"
-            elif diagnostics["long_word_bottleneck"]:
-                diagnostics["hyphenation_reason"] = "no_hyphenatable_bottleneck"
-
-    candidates: List[LayoutCandidate] = []
-    if rescue is not None and diagnostics["hyphenation_rescue_selected"]:
-        rescue.qa.update(diagnostics)
-        rescue.qa["hyphenation_rescue_selected"] = True
-        rescue.qa["hyphenation_selected"] = True
-        rescue.qa["final_font_size"] = rescue.font_size
-        rescue.qa["font_policy_status"] = "hyphen_rescue"
-        rescue.qa["font_ratio_after_rescue"] = round(
-            rescue.font_size / float(max(1, target)), 4
-        )
-        rescue.qa["introduced_hyphen_count"] = 1
-        rescue.qa["introduced_hyphen_words"] = [rescue_word]
-        if normal is not None:
-            rescue.penalty = min(rescue.penalty, normal.penalty - 1e-3)
-        candidates.append(rescue)
-    elif normal is not None:
-        candidates = list(candidates_a)
-        if normal.font_size >= font_policy.consistency_floor:
-            diagnostics["font_policy_status"] = "preferred"
-        elif normal.font_size >= font_policy.mild_compression_floor:
-            diagnostics["font_policy_status"] = "mild_compression"
-        else:
-            diagnostics["font_policy_status"] = "emergency_compression"
-        diagnostics["final_font_size"] = normal.font_size
-    elif emergency_candidates:
-        candidates = list(emergency_candidates)
-        diagnostics["font_policy_status"] = "emergency_review"
-        diagnostics["final_font_size"] = emergency_candidates[0].font_size
-        region.review_required = True
-        region.review_reason = "text_requires_emergency_compression"
-
+    # Try all oversized tokens, including compounds, before accepting a tiny layout.
+    from .readable_text import split_oversized_words, centered_candidate_key
+    candidates = list(candidates_a) + list(emergency_candidates)
     for candidate in candidates:
-        if candidate is rescue and candidate.qa.get("hyphenation_rescue_selected"):
-            continue
-        candidate.qa.update(diagnostics)
-        candidate.qa["hyphenation_rescue_selected"] = False
-        candidate.qa["hyphenation_selected"] = False
+        candidate.qa.update({key: value for key, value in diagnostics.items() if key not in candidate.qa})
+    if normal is None and is_bubble and not is_preserved_region(region) and not render_cfg.no_hyphenation:
+        for allow_emergency in (False, True):
+            if allow_emergency and candidates:
+                break
+            for size in range(font_policy.preferred_size, minimum - 1, -1):
+                max_width = _max_usable_row_width(geom, size, stroke_width, solver_margin, min_width=max(size, 8))
+                row_widths = [
+                    max((slot.width for slot in slots), default=0)
+                    for slots in _cached_row_slot_table(geom, size, stroke_width, solver_margin, max(size, 8)).values()
+                ]
+                row_widths = [w for w in row_widths if w > 0]
+                central_width = int(np.percentile(row_widths, 50)) if row_widths else max_width
+                trial_widths = [max_width] + ([central_width] if 0 < central_width < max_width else [])
+                size_rescued = []
+                for width in trial_widths:
+                    words, splits = split_oversized_words(split_layout_words(text), size, width, getattr(region, "target_lang", "ENG"), allow_emergency=allow_emergency)
+                    if not splits:
+                        continue
+                    diagnostics["hyphenation_rescue_attempted"] = True
+                    result = solve_layout(
+                        geom, words, size, size, language=getattr(region, "target_lang", "ENG"),
+                        hyphenate=False, line_spacing=render_cfg.line_spacing or 0.0,
+                        stroke_width=stroke_width, margin=solver_margin,
+                        max_y_origin_trials=solver_max_y_trials, source_profile=source_profile,
+                        preferred_mask=zone_local, top_k=top_k, lobe_graph=lobe_graph,
+                        is_single_region=(preferred_mask is None or not np.any(preferred_mask)),
+                    )
+                    rescued = result if isinstance(result, list) else ([result] if result else [])
+                    for candidate in rescued:
+                        candidate.qa.update({key: value for key, value in diagnostics.items() if key not in candidate.qa})
+                        candidate.qa.update({"wrapping_splits": splits, "hyphenation_selected": True,
+                            "hyphenation_rescue_selected": True, "font_policy_status": "hyphen_rescue",
+                            "emergency_word_split": any("emergency" in split["strategies"] for split in splits),
+                            "introduced_hyphen_count": sum(strategy != "existing_break" for split in splits for strategy in split["strategies"]),
+                            "introduced_hyphen_words": [split["word"] for split in splits],
+                            "hyphenation_reason": "oversized_token", "emergency_compression": False})
+                    size_rescued.extend(rescued)
+                    if any(c.qa.get("center_error_px", float("inf")) <= c.font_size / 2 for c in size_rescued):
+                        break
+                candidates.extend(size_rescued)
+                if any(c.qa.get("center_error_px", float("inf")) <= c.font_size / 2 for c in size_rescued):
+                    break
+    candidates.sort(key=centered_candidate_key)
+    for candidate in candidates:
         candidate.qa["final_font_size"] = candidate.font_size
-        candidate.qa["font_ratio_after_rescue"] = round(
-            candidate.font_size / float(max(1, target)), 4
-        )
-        candidate.qa["introduced_hyphen_count"] = 0
-        candidate.qa["introduced_hyphen_words"] = []
+        candidate.qa["absolute_minimum"] = minimum
+        candidate.qa["font_ratio_after_rescue"] = candidate.font_size / max(1, target)
+    if candidates:
+        diagnostics.update(candidates[0].qa)
+        if candidates[0].font_size < target * 0.85:
+            region.review_required, region.review_reason = True, "text_requires_emergency_compression"
+        if candidates[0].qa.get("center_error_px", 0) > candidates[0].font_size / 2:
+            region.review_required, region.review_reason = True, "closest_valid_bubble_placement"
+        if candidates[0].qa.get("emergency_word_split"):
+            region.review_required = True
+            region.review_reason = "emergency_word_split"
 
     # Store policy diagnostics on region
     region._font_policy_diagnostics = dict(diagnostics)
@@ -1022,6 +902,8 @@ def _apply_layout_candidate(
     region._solver_score = candidate.penalty
     region._solver_status = candidate.status
     region._solver_qa = candidate.qa
+    if candidate.qa.get("emergency_word_split"):
+        region.review_required, region.review_reason = True, "emergency_word_split"
     region._hyphenation_diagnostics = {
         key: candidate.qa[key]
         for key in (

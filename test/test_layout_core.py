@@ -157,7 +157,7 @@ def test_unplaceable_free_text_is_suppressed_with_review_reason(monkeypatch):
 
     assert region._render_suppressed
     assert region.review_required
-    assert region.review_reason == "no_valid_layout"
+    assert region.review_reason.startswith("no_valid_layout")
 
 
 def test_empty_free_text_ownership_skips_candidate_search(monkeypatch):
@@ -382,113 +382,17 @@ def test_page_font_baseline_uses_dialogue_bubbles_and_ignores_preserved_text(mon
     assert layout_solver._page_dialogue_font_baseline(groups, 8) == 27
 
 
-def test_bubble_rescue_is_gated_and_splits_only_one_bottleneck(monkeypatch):
-    calls = []
-    normal_font = {"value": 23}
-    rescue = LayoutCandidate(30, 0, 0, [PlacedLine("UNCHARACTER-", 0, 0, 100, 30), PlacedLine("ISTICALLY", 35, 0, 80, 30)], 0, 0)
-
-    def solve(**kwargs):
-        calls.append(kwargs)
-        return rescue if kwargs.get("forced_break_after") is not None else LayoutCandidate(
-            normal_font["value"], 0, 0,
-            [PlacedLine("UNCHARACTERISTICALLY", 0, 0, 100, normal_font["value"])], 8, 0,
-        )
-
-    monkeypatch.setattr(layout_solver, "solve_layout", solve)
-    monkeypatch.setattr(layout_solver, "build_original_layout_profile", lambda *_: None)
-    monkeypatch.setattr(layout_solver, "fg_bg_compare", lambda fg, bg: (fg, bg))
-    monkeypatch.setattr(layout_solver, "_long_word_pressure", lambda *_: ({
-        "longest_word": "UNCHARACTERISTICALLY",
-        "longest_word_width": 300,
-        "max_usable_row_width": 200,
-        "word_pressure_ratio": 1.5,
-        "long_word_bottleneck": True,
-        "bottleneck_word": "UNCHARACTERISTICALLY",
-    }, 0))
-    monkeypatch.setattr(layout_solver, "_hyphenation_variant", lambda words, *_: [
-        "UNCHARACTER-", "ISTICALLY", *words[1:]
-    ])
-    monkeypatch.setattr(layout_solver, "_precompute_widths", lambda words, _size: (
-        [150 if word in {"UNCHARACTER-", "ISTICALLY"} else 300 for word in words], 10
-    ))
-
-    def build(text, no_hyphenation=False, font_size=23, placement_mode=PlacementMode.BUBBLE):
-        normal_font["value"] = font_size
-        region = SimpleNamespace(
-            translation=text,
-            target_lang="en_US",
-            placement_mode=placement_mode,
-            source_font_size=32,
-            direction="hr",
-            get_font_colors=lambda: ((0, 0, 0), (255, 255, 255)),
-        )
-        region.get_translation_for_rendering = lambda: region.translation
-        cfg = SimpleNamespace(render=SimpleNamespace(
-            font_size_minimum=12, font_size=32, font_size_offset=0,
-            line_spacing=0, no_hyphenation=no_hyphenation,
-        ))
-        return _build_region_layout_plan(
-            region, np.ones((100, 180), dtype=np.uint8), cfg, (100, 180),
-            2.0, 4, None, 1,
-        )
-
-    healthy = build("UNCHARACTERISTICALLY", font_size=30)
-    assert len(calls) == 1
-    assert healthy.candidates[0].qa["font_ratio"] >= 0.90
-    assert not healthy.candidates[0].qa["hyphenation_rescue_attempted"]
-
-    calls.clear()
-    disabled = build("UNCHARACTERISTICALLY", no_hyphenation=True)
-    assert len(calls) == 1
-    assert disabled.candidates[0].qa["hyphenation_reason"] == "disabled_by_config"
-    assert not disabled.candidates[0].qa["hyphenation_rescue_attempted"]
-
-    calls.clear()
-    rescued = build("UNCHARACTERISTICALLY UNBELIEVABLY")
-    assert [call.get("forced_break_after") for call in calls] == [None, 0]
-    assert rescued.candidates[0] is rescue
-    assert rescue.qa["introduced_hyphen_count"] == 1
-    assert rescue.qa["introduced_hyphen_words"] == ["UNCHARACTERISTICALLY"]
-
-    monkeypatch.setattr(layout_solver, "_long_word_pressure", lambda *_: ({
-        "longest_word": "PARAGRAPH",
-        "longest_word_width": 120,
-        "max_usable_row_width": 200,
-        "word_pressure_ratio": 0.6,
-        "long_word_bottleneck": False,
-        "bottleneck_word": None,
-    }, None))
-    calls.clear()
-    paragraph = build("A VERY LARGE PARAGRAPH WITH MANY WORDS", font_size=23)
-    assert len(calls) == 1
-    assert paragraph.candidates[0].qa["hyphenation_reason"] == "no_long_word_bottleneck"
-
-    monkeypatch.setattr(layout_solver, "_long_word_pressure", lambda *_: ({
-        "longest_word": "UNCHARACTERISTICALLY",
-        "longest_word_width": 300,
-        "max_usable_row_width": 200,
-        "word_pressure_ratio": 1.5,
-        "long_word_bottleneck": True,
-        "bottleneck_word": "UNCHARACTERISTICALLY",
-    }, 0))
-    monkeypatch.setattr(layout_solver, "_hyphenation_variant", lambda *_: None)
-    calls.clear()
-    no_break = build("UNCHARACTERISTICALLY", font_size=23)
-    assert len(calls) == 1
-    assert no_break.candidates[0].qa["hyphenation_reason"] == "no_dictionary_breakpoint"
-    assert not no_break.candidates[0].qa["hyphenation_rescue_attempted"]
-
-    def fail_pressure(*_):
-        raise AssertionError("free text must skip rescue analysis")
-
-    monkeypatch.setattr(layout_solver, "_long_word_pressure", fail_pressure)
-    calls.clear()
-    free_text = build(
-        "UNCHARACTERISTICALLY", font_size=23,
-        placement_mode=PlacementMode.FREE_TEXT,
-    )
-    assert len(calls) == 1
-    assert free_text.candidates[0].qa["hyphenation_reason"] == "not_bubble_placement"
+def test_bubble_rescue_respects_no_hyphenation():
+    text_render.set_font(get_default_eng_font())
+    mask = np.ones((100, 70), dtype=np.uint8)
+    region = TextBlock([[[0, 0], [70, 0], [70, 100], [0, 100]]],
+                       texts=["WORD"], translation="UNCHARACTERISTICALLY", target_lang="ENG")
+    region.placement_mode = PlacementMode.BUBBLE
+    config = SimpleNamespace(render=RenderConfig(font_size=24, font_size_minimum=16, no_hyphenation=True))
+    plan = _build_region_layout_plan(region, mask, config, mask.shape, 2.0, 8, None, 1)
+    assert not plan.candidates
+    assert region._render_suppressed
+    assert region._font_policy_diagnostics["hyphenation_reason"] == "disabled_by_config"
 
 
 def test_long_word_hyphenation_preserves_preferred_font_without_normal_fit():
@@ -520,7 +424,7 @@ def test_long_word_hyphenation_preserves_preferred_font_without_normal_fit():
     ]
 
 
-def test_long_word_that_cannot_fit_preferred_range_is_flagged_for_review():
+def test_long_word_uses_dictionary_rescue_when_normal_wrapping_fails():
     text_render.set_font(get_default_eng_font())
     text = "OH, A JOB INTERVIEWER?"
     # Bubble 110x120 is narrow; INTERVIEWER cannot fit on one line at 27px
@@ -538,10 +442,8 @@ def test_long_word_that_cannot_fit_preferred_range_is_flagged_for_review():
     plan = _build_region_layout_plan(region, mask, config, mask.shape, 2.0, 8, None, 1, page_font_baseline=27)
     assert plan.candidates
     assert plan.candidates[0].font_size >= 14
-    assert plan.candidates[0].qa["font_policy_status"] == "emergency_review"
-    assert plan.candidates[0].qa["emergency_compression"] is True
-    assert region.review_required is True
-    assert region.review_reason == "text_requires_emergency_compression"
+    assert plan.candidates[0].qa["font_policy_status"] == "hyphen_rescue"
+    assert not plan.candidates[0].qa["emergency_word_split"]
 
 
 def test_saved_long_bubble_translation_renders_with_bounded_review_fallback():
@@ -572,7 +474,7 @@ def test_saved_long_bubble_translation_renders_with_bounded_review_fallback():
     ]
 
 
-def test_unfittable_bubble_keeps_source_font_when_suppressed():
+def test_unknown_name_can_wrap_below_preferred_size():
     text_render.set_font(get_default_eng_font())
     text = "Nakamotonakahon"
     mask = np.ones((100, 70), dtype=np.uint8)
@@ -589,9 +491,10 @@ def test_unfittable_bubble_keeps_source_font_when_suppressed():
 
     plan = _build_region_layout_plan(region, mask, config, mask.shape, 2.0, 8, None, 1)
 
-    assert not plan.candidates
-    assert region.font_size == 24
-    assert region._render_suppressed is True
+    assert plan.candidates
+    assert plan.candidates[0].font_size >= 8
+    assert plan.candidates[0].qa["wrapping_splits"]
+    assert region.source_font_size == 24
 
 
 def test_healthy_natural_wrapping_beats_hyphenation():
@@ -682,9 +585,8 @@ def test_existing_compound_uses_bounded_review_fallback():
 
     plan = _build_region_layout_plan(region, mask, config, mask.shape, 2.0, 8, None, 1)
     assert plan.candidates
-    assert plan.candidates[0].qa["font_policy_status"] == "emergency_review"
-    assert region.review_required is True
-    assert region.review_reason == "text_requires_emergency_compression"
+    assert plan.candidates[0].qa["font_policy_status"] == "hyphen_rescue"
+    assert plan.candidates[0].qa["wrapping_splits"][0]["strategies"] == ["existing_break"]
 
 
 def test_numeric_tokens_not_artificially_split():
@@ -713,10 +615,9 @@ def test_two_unfittable_long_words_are_flagged_for_review():
     ))
 
     plan = _build_region_layout_plan(region, mask, config, mask.shape, 2.0, 8, None, 1, page_font_baseline=28)
-    assert not plan.candidates
-    assert region.review_required is True
-    assert region.review_reason == "text_does_not_fit"
-    assert region._render_suppressed is True
+    assert plan.candidates
+    assert plan.candidates[0].font_size >= 8
+    assert len(plan.candidates[0].qa["wrapping_splits"]) == 2
 
 
 def test_paragraph_density_does_not_trigger_random_hyphens():

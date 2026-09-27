@@ -80,7 +80,7 @@ def _rasterize_candidate_crop(
             if lx2 > lx1 and ly2 > ly1:
                 ink_crop[ly1:ly2, lx1:lx2] = True
         else:
-            glyph = alpha > 127
+            glyph = alpha > 0
             ay, ax = glyph.shape
             gx1 = max(0, line.x - cx1)
             gy1 = max(0, line.y - cy1)
@@ -180,7 +180,7 @@ def _candidate_global_glyph_mask(
         if alpha is None:
             glyph = np.ones((line.height, line.width), dtype=bool)
         else:
-            glyph = alpha > 127
+            glyph = alpha > 0
         ay, ax = glyph.shape
         x1, y1 = max(0, line.x), max(0, line.y)
         x2, y2 = min(w, line.x + ax), min(h, line.y + ay)

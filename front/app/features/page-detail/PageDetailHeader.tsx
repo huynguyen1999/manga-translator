@@ -324,7 +324,7 @@ export const PageDetailHeader: React.FC<PageDetailHeaderProps> = ({
             </div>
           )}
 
-            <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-l border-white/10 pl-1.5">
+            <div className="flex basis-full flex-wrap items-center justify-end gap-1.5 border-t border-white/10 pt-1.5">
             {/* Edit / Typeset Button */}
             {onEdit && image.hasTextRegions && image.sourceType !== "original" && (
               <button

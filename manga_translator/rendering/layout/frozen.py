@@ -17,7 +17,7 @@ from .regions import prepare_regions
 from ...utils import resolve_render_content
 
 
-LAYOUT_ALGORITHM_REVISION = 3
+LAYOUT_ALGORITHM_REVISION = 5
 
 
 def _jsonable(value):

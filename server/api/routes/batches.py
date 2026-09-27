@@ -34,7 +34,6 @@ def create_batch_router(
     max_upload_bytes: int,
 ) -> tuple[APIRouter, tuple[Callable[..., Any], ...]]:
     router = APIRouter()
-
     @router.get("/batches", tags=["api", "batches"])
     @router.get("/api/batches", tags=["api", "batches"])
     async def list_batches():
@@ -42,23 +41,25 @@ def create_batch_router(
             return await get_store().list_batch_summaries()
         except Exception as error:
             raise batch_http_error(error) from error
-
     async def _batch_events():
         last_snapshot = None
+        last_revision = object()
         previous_batches = {}
-        has_previous_snapshot = False
         while True:
             store = get_store()
+            revision = await store.summary_revision() if hasattr(store, "summary_revision") else object()
+            if revision == last_revision:
+                yield ": keep-alive\n\n"
+                await asyncio.sleep(1)
+                continue
             batches = await store.list_batch_summaries()
+            last_revision = revision
             snapshot = json.dumps(batches, sort_keys=True, separators=(",", ":"))
             if snapshot != last_snapshot:
-                current_batches = {
-                    batch["id"]: json.dumps(batch, sort_keys=True, separators=(",", ":"))
-                    for batch in batches
-                }
-                last_snapshot = snapshot
+                current_batches = {batch["id"]: json.dumps(batch, sort_keys=True, separators=(",", ":"))
+                                   for batch in batches}
                 yield f"data: {snapshot}\n\n"
-                if has_previous_snapshot:
+                if last_snapshot is not None:
                     # ponytail: broadcast changed full batches; scoped subscriptions if payload fanout grows.
                     for batch in batches:
                         encoded = current_batches[batch["id"]]
@@ -70,11 +71,10 @@ def create_batch_router(
                             continue
                         yield f"event: batch_details\ndata: {json.dumps(details)}\n\n"
                 previous_batches = current_batches
-                has_previous_snapshot = True
+                last_snapshot = snapshot
             else:
                 yield ": keep-alive\n\n"
             await asyncio.sleep(1)
-
     @router.get("/batches/events", tags=["api", "batches"])
     @router.get("/api/batches/events", tags=["api", "batches"])
     async def batch_events():

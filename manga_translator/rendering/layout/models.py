@@ -164,7 +164,6 @@ class FreeTextDamageTarget:
 @dataclass
 class FreeTextZone:
     """Disjoint ownership and obstacle masks for one free-text region."""
-
     source_bbox: Tuple[int, int, int, int]
     ownership_mask: np.ndarray
     obstacle_mask: np.ndarray
@@ -176,6 +175,7 @@ class FreeTextZone:
     total_core_coverable: int = 0
     damage_target: Optional[FreeTextDamageTarget] = None
     panel_constraint: Optional[PanelConstraint] = None
+    placement_domain_mask: Optional[np.ndarray] = None
 
 
 @dataclass

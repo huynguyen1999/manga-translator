@@ -250,16 +250,11 @@ class PostgresBatchStore(BatchStore):
         rows = await self._pool.fetch(
             """
             SELECT
-                b.id,
-                b.title,
-                b.status,
-                b.dismissed,
-                b.added_at,
-                b.updated_at,
-                b.total_items,
-                b.completed_count,
+                b.id, b.title, b.status,
+                b.dismissed, b.added_at, b.updated_at,
+                b.total_items, b.completed_count,
                 b.manifest->'settings' AS settings,
-                b.manifest->>'kind' AS kind,
+                b.manifest->>'kind' AS kind, b.manifest->>'rerunMode' AS rerun_mode,
                 COALESCE(b.manifest->>'mangaGroupId', MAX(i.manga_group_id)) AS manga_group_id,
                 (b.manifest->>'priority')::boolean AS priority,
                 COUNT(*) FILTER (WHERE i.status = 'queued' OR i.stage IN ('awaiting_translation', 'reserved')) AS queued_count,
@@ -287,7 +282,7 @@ class PostgresBatchStore(BatchStore):
                 "title": row["title"],
                 "mangaTitle": row["title"],
                 "mangaGroupId": row["manga_group_id"],
-                "kind": row["kind"],
+                "kind": row["kind"], "rerunMode": row["rerun_mode"],
                 "status": row["status"],
                 "dismissed": bool(row["dismissed"]),
                 "addedAt": row["added_at"],
@@ -304,6 +299,11 @@ class PostgresBatchStore(BatchStore):
             }
             for row in rows
         ]
+
+    async def summary_revision(self) -> str | None:
+        return await self._pool.fetchval(
+            "SELECT md5(string_agg(id||':'||xmin::text,',' ORDER BY id)) FROM batches WHERE active"
+        )
 
     async def update_review_for_result(self, folder: str, needs_review: bool) -> int:
         folder = _safe_folder(folder)

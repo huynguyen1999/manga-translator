@@ -6,9 +6,10 @@ import cv2
 import numpy as np
 
 from ...utils import resolve_render_content
+from .clearance import rendered_masks_conflict
+from .failure_policy import should_restore_source
 from .models import LayoutDiagnostics, PageLayoutResult, PlacementMode
 from .obstacles import _region_source_mask, build_page_obstacle_map
-from .raster import _cropped_masks_overlap
 
 
 def _segment_bounds(segment, lines):
@@ -121,7 +122,7 @@ def _warped_alpha_crop(box, points, image_shape):
     return ((x1, y1, x2, y2), alpha > 0), outside
 
 
-def validate_render_output(
+def _validate_render_output_once(
     ctx: Any,
     result: PageLayoutResult,
     diagnostics: LayoutDiagnostics,
@@ -135,6 +136,10 @@ def validate_render_output(
         return
     height, width = image.shape[:2]
     obstacles = build_page_obstacle_map(regions, (height, width))
+    active_bubble_ids = {
+        getattr(r, "bubble_id", None) for r in regions
+        if getattr(r, "bubble_id", None) and not getattr(r, "_render_suppressed", False) and resolve_render_content(r).strip()
+    }
     restored_source_mask = np.zeros((height, width), dtype=np.uint8)
     for region in regions:
         unchanged = (
@@ -142,12 +147,11 @@ def validate_render_output(
             and resolve_render_content(region).strip().casefold()
             == str(getattr(region, "text", "") or "").strip().casefold()
         )
-        if getattr(region, "_render_suppressed", False) or unchanged:
-            cv2.bitwise_or(
-                restored_source_mask,
-                _region_source_mask(region, (height, width)),
-                dst=restored_source_mask,
-            )
+        if (getattr(region, "_render_suppressed", False) and should_restore_source(region, active_bubble_ids)) or unchanged:
+            restore_mask = getattr(region, "_bubble_restore", None)
+            if restore_mask is None:
+                restore_mask = _region_source_mask(region, (height, width))
+            restored_source_mask |= (restore_mask > 0).astype(np.uint8)
     visual_masks = {}
     for region in regions:
         region_id = str(getattr(region, "region_id", "") or "")
@@ -178,6 +182,14 @@ def validate_render_output(
                 diagnostics.errors.append(f"render overlaps restored source text for region {region_id}")
                 suppress(region_id, "final layout overlaps restored source text")
             if mode is PlacementMode.FREE_TEXT or mode == PlacementMode.FREE_TEXT.value:
+                domain = getattr(getattr(region, "_free_text_zone", None), "placement_domain_mask", None)
+                zone = getattr(region, "_free_text_zone", None)
+                center_only = getattr(zone, "domain_center_only", False)
+                leaves_domain = (not domain[(y1 + y2) // 2, (x1 + x2) // 2] if center_only
+                                 else np.any(visual & ~(domain[y1:y2, x1:x2] > 0))) if domain is not None else False
+                if leaves_domain:
+                    diagnostics.errors.append(f"free text leaves local domain for region {region_id}")
+                    suppress(region_id, "final layout leaves its local placement domain")
                 overlap = int(np.count_nonzero(
                     visual & (obstacles.protected_bubble_mask[y1:y2, x1:x2] > 0)
                 ))
@@ -210,14 +222,14 @@ def validate_render_output(
                     if np.any(visual & (np.asarray(bubble[y1:y2, x1:x2]) == 0)):
                         diagnostics.errors.append(f"bubble text leaves safe shape for region {region_id}")
                         suppress(region_id, "final layout leaves its bubble")
-        if region_visuals:
+        if region_visuals and not getattr(region, "_render_suppressed", False):
             visual_masks[region_id] = region_visuals
 
     ids = list(visual_masks)
     for index, first_id in enumerate(ids):
         for second_id in ids[index + 1:]:
             collides = any(
-                _cropped_masks_overlap(first_box, first_mask, second_box, second_mask)
+                rendered_masks_conflict(first_box, first_mask, int(getattr(regions_by_id[first_id], "font_size", 1) or 1), second_box, second_mask, int(getattr(regions_by_id[second_id], "font_size", 1) or 1))
                 for first_box, first_mask in visual_masks[first_id]
                 for second_box, second_mask in visual_masks[second_id]
             )
@@ -232,3 +244,14 @@ def validate_render_output(
                 suppress(first_id, f"final layout collides with region {second_id}")
             else:
                 suppress(second_id, f"final layout collides with region {first_id}")
+
+
+def validate_render_output(ctx, result, diagnostics, regions, regions_by_id, region_metrics, suppress):
+    for _ in range(len(regions) + 1):
+        before = sum(bool(getattr(region, "_render_suppressed", False)) for region in regions)
+        _validate_render_output_once(ctx, result, diagnostics, regions, regions_by_id, region_metrics, suppress)
+        if sum(bool(getattr(region, "_render_suppressed", False)) for region in regions) == before:
+            break
+    for region in regions:
+        region_id = str(getattr(region, "region_id", "") or "")
+        region_metrics.setdefault(region_id, {})["source_restored"] = bool(getattr(region, "_render_suppressed", False))

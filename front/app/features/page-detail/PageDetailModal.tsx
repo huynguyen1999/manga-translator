@@ -211,6 +211,10 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
     setBubbleCount(blocks.length);
     setOriginalRegionCount(countOriginalTextRegions(blocks));
   }, []);
+  const sourceSize = pipelineManifest?.source?.width && pipelineManifest.source.height ? { width: pipelineManifest.source.width, height: pipelineManifest.source.height } : null;
+  const upscaleRatio = Number.parseFloat(String(stepSettings.upscaling?.ratio ?? "1"));
+  const workingSize = sourceSize && upscaleRatio > 1 && pipelineManifest?.stages.some(stage => stage.id === "upscaling" && stage.status === "completed")
+    ? { width: sourceSize.width * upscaleRatio, height: sourceSize.height * upscaleRatio } : null;
 
   return (
     <AppOverlayPortal>
@@ -315,9 +319,8 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                 resultFullUrl={resolvedResultUrl}
                 inpaintedUrl={resolvedInpaintedPreviewUrl}
                 inpaintedFullUrl={resolvedInpaintedUrl}
-                coordinateSize={pipelineManifest?.source?.width && pipelineManifest.source.height
-                  ? { width: pipelineManifest.source.width, height: pipelineManifest.source.height }
-                  : null}
+                coordinateSize={sourceSize}
+                workingCoordinateSize={workingSize}
                 useFullResolution={zoomLevel > 1.5}
                 folder={resolvedFolder}
                 textRegionsUrl={image.textRegionsUrl}

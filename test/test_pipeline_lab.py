@@ -118,6 +118,44 @@ def test_pipeline_render_checkpoints_manga_metadata(tmp_path):
     assert run.documents["meta.json"]["mangaGroupId"] == "group-id"
 
 
+def test_pipeline_render_reverts_upscale_and_keeps_working_canvas(tmp_path):
+    config = Config()
+    config.upscale.upscale_ratio = 2
+    config.upscale.revert_upscaling = True
+    image = Image.new("RGB", (8, 8))
+    region = TextBlock([[[10, 2], [14, 2], [14, 10], [10, 10]]], texts=["source"],
+                       translation="English", font_size=8)
+    region.layout_segments = [{"x": 10, "y": 2, "width": 4, "height": 8,
+                               "font_size": 8, "lines": [{"text": "English", "x": 10, "y": 2}]}]
+    region._bubble_segments = [{"box": np.zeros((8, 4, 4), dtype=np.uint8)}]
+    region._bubble_interior = np.ones((16, 16), dtype=np.uint8)
+    run = PipelineRun(tmp_path, "page", image, config)
+    run.ctx = Context(input=image, img_rgb=np.zeros((16, 16, 3), dtype=np.uint8),
+                      img_inpainted=np.zeros((16, 16, 3), dtype=np.uint8), text_regions=[region])
+    translator = MangaTranslator.__new__(MangaTranslator)
+    translator._current_image_context = None
+    translator._pipeline_run = run
+    translator.font_path = None
+    translator._run_text_rendering = AsyncMock(return_value=np.zeros((16, 16, 3), dtype=np.uint8))
+
+    asyncio.run(run.retry_stage("rendering", config, translator))
+
+    with Image.open(run.path / "final.jpg") as final, Image.open(run.path / "inpainted.jpg") as editor, \
+            Image.open(run.path / "inpainted_working.jpg") as working:
+        assert final.size == editor.size == (8, 8)
+        assert working.size == (16, 16)
+    saved = run.documents["text_regions.json"][0]
+    assert (saved["x"], saved["y"], saved["width"], saved["height"]) == (5, 1, 2, 4)
+    assert saved["lines"][0] == [[5, 1], [7, 1], [7, 5], [5, 5]]
+    assert saved["font_size"] == 4
+    assert saved["layout_segments"][0]["lines"][0]["x"] == 5
+    assert saved["layout_segments"][0]["font_size"] == 4
+    assert saved["bubble_safe_shape"] is not None
+    run.ctx.img_inpainted = None
+    asyncio.run(run.retry_stage("rendering", config, translator))
+    assert run.ctx.img_inpainted.shape[:2] == (16, 16)
+
+
 def test_pipeline_ocr_retry_persists_precomputed_batch_result(tmp_path):
     config = Config()
     image = Image.new("RGB", (8, 8))

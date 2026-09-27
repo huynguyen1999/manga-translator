@@ -282,7 +282,8 @@ class MangaRepository:
             FROM pages p
             JOIN manga_groups g ON g.id = p.manga_group_id
             LEFT JOIN manga_series s ON s.id = g.series_id
-            WHERE p.active AND (p.id=$1 OR p.folder=$1)
+            WHERE p.active AND (p.id=$1 OR p.folder=$1 OR p.metadata->>'id'=$1)
+            ORDER BY (p.id=$1) DESC, (p.folder=$1) DESC
             LIMIT 1
             """,
             record_id,

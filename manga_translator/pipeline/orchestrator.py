@@ -16,6 +16,7 @@ from ..detection.bubble import serialize_bubble_detections
 from ..geometry.bubbles import prepare_page_geometry
 from ..ocr import prepare as prepare_ocr
 from ..pipeline.run import serialize_regions
+from ..rendering.paragraph_coalescing import coalesce_free_text_regions
 from ..translators import prepare as prepare_translation
 from ..upscaling import prepare as prepare_upscaling
 from ..utils import Context, load_image
@@ -180,18 +181,6 @@ async def translate_until_translation(
             raise
         ctx.text_regions = []
 
-    if ctx.text_regions:
-        merged_docs = serialize_regions(ctx.text_regions)
-        ctx.result_documents['text_regions_merged.json'] = merged_docs
-        if translator._pipeline_run is not None:
-            translator._pipeline_run.write_json('text_regions_merged.json', merged_docs)
-        elif translator._current_image_context:
-            await save_documents_fn(
-                translator._current_image_context['subfolder'],
-                {'text_regions_merged.json': merged_docs},
-                translator.result_root,
-            )
-
     if not ctx.text_regions:
         await translator._report_progress('skip-no-regions', True)
         ctx.result = ctx.upscaled
@@ -199,9 +188,17 @@ async def translate_until_translation(
             ctx.image_context = translator._current_image_context.copy()
         return await translator._revert_upscale(config, ctx)
 
-    # Optional speech-bubble detection runs after OCR merging so every
-    # assigned bubble is translated as one text flow.
     await translator._detect_speech_bubbles(config, ctx)
+    ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
+    merged_docs = serialize_regions(ctx.text_regions)
+    ctx.result_documents['text_regions_merged.json'] = merged_docs
+    if translator._pipeline_run is not None:
+        translator._pipeline_run.write_json('text_regions_merged.json', merged_docs)
+    elif translator._current_image_context:
+        await save_documents_fn(
+            translator._current_image_context['subfolder'],
+            {'text_regions_merged.json': merged_docs}, translator.result_root,
+        )
     ctx.page_geometry, ctx.bubble_mask = prepare_page_geometry(
         ctx.img_rgb,
         ctx.text_regions,
@@ -266,4 +263,3 @@ async def translate_until_translation(
         ctx.image_context = translator._current_image_context.copy()
 
     return ctx
-

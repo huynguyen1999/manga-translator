@@ -24,6 +24,7 @@ from .paragraph_flow import _classify_adjacent_gaps, _compact_vertical_rhythm
 from .centering import _center_layout_block, _optimize_x
 from .profiling import get_solver_profile
 from .text_normalization import normalize_words
+from .readable_text import centered_candidate_key
 
 
 def solve_layout(
@@ -94,8 +95,7 @@ def solve_layout(
         # monotonically below the target: prune once the font term alone can
         # no longer beat the incumbent.
         cutoff = sorted((candidate.penalty for candidate in candidates if candidate.valid))[:max(1, top_k)]
-        if len(cutoff) >= top_k and _font_penalty(S, font_target) >= cutoff[-1]:
-            continue
+        # Centering outranks font preference, so a font penalty cannot prune a smaller candidate.
 
         if not geom.has_safe_pixels(S, stroke_width, margin):
             continue
@@ -333,7 +333,7 @@ def solve_layout(
                 candidates.append(candidate)
                 prof.refined_candidates += 1
 
-            candidates.sort(key=lambda item: (not item.valid, item.penalty))
+            candidates.sort(key=lambda item: (not item.valid, centered_candidate_key(item)))
             del candidates[max(top_k * 4, 32):]
 
         # Phase 7: Clear ephemeral caches on BubbleGeometry periodically
@@ -419,6 +419,7 @@ def solve_layout(
                 valid_candidates.append(candidate)
                 break
 
+    valid_candidates.sort(key=centered_candidate_key)
     if top_k > 1:
         return valid_candidates[:top_k]
     return valid_candidates[0] if valid_candidates else None

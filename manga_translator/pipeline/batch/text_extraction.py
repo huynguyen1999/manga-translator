@@ -6,6 +6,7 @@ from typing import Awaitable, Callable, List
 from PIL import Image
 
 from manga_translator.config import Colorizer, Config, Detector, Ocr
+from manga_translator.rendering.paragraph_coalescing import coalesce_free_text_regions
 from manga_translator.utils import Context, load_image
 
 
@@ -18,7 +19,6 @@ async def extract_text_batch(
     load_dictionary_fn,
     apply_dictionary_fn,
 ) -> List[Context]:
-    """Extract text from a bounded group using the normal image-stage order."""
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
     if not images_with_configs:
@@ -36,8 +36,7 @@ async def extract_text_batch(
     def groups(indices, section):
         grouped = {}
         for index in indices:
-            settings = getattr(images_with_configs[index][1], section).dict()
-            key = json.dumps(settings, sort_keys=True, default=str)
+            key = json.dumps(getattr(images_with_configs[index][1], section).dict(), sort_keys=True, default=str)
             grouped.setdefault(key, []).append(index)
         return grouped.values()
 
@@ -86,6 +85,7 @@ async def extract_text_batch(
             ctx.text_regions = await owner._run_textline_merge(config, ctx)
             if ctx.text_regions:
                 await owner._detect_speech_bubbles(config, ctx, report_progress=False)
+                ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
                 for region in ctx.text_regions:
                     region.text = apply_dictionary_fn(region.text, pre_dict)
     await report("textline_merge")

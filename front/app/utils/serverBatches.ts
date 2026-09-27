@@ -9,7 +9,7 @@ import type {
 import { apiUrl } from "./api";
 
 export interface ServerBatchItem {
-  id: string;
+  id: string; rerunMode?: PipelineRerunMode; settings?: TranslationSettings;
   name: string;
   mangaGroupId?: string | null;
   pageId?: string | null;
@@ -37,8 +37,7 @@ export interface ServerBatchItem {
 }
 
 export interface ServerBatchSummary {
-  id: string;
-  kind?: TranslationBatchKind | null;
+  id: string; kind?: TranslationBatchKind | null; rerunMode?: PipelineRerunMode;
   title: string;
   mangaTitle: string;
   mangaGroupId?: string | null;
@@ -211,7 +210,7 @@ const asDate = (value: number | string | undefined) =>
 
 export const toTranslationBatch = (batch: ServerBatch | ServerBatchSummary): TranslationBatch => ({
   id: batch.id,
-  kind: getBatchKind(batch),
+  kind: getBatchKind(batch), rerunMode: batch.rerunMode,
   addedAt: asDate(batch.addedAt),
   updatedAt: asDate(batch.updatedAt),
   mangaTitle: batch.mangaTitle || batch.title || "Ungrouped",

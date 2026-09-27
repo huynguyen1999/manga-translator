@@ -165,6 +165,9 @@ async def execute_retry_stage(
                 )
             elif not defer_bubble_detection:
                 await translator._detect_speech_bubbles(config, ctx, report_progress=False)
+            if not defer_bubble_detection:
+                from ..rendering.paragraph_coalescing import coalesce_free_text_regions
+                ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
             ctx._bubble_detection_done = True
             run.write_json("text_regions_merged.json", serialize_regions(ctx.text_regions))
 
@@ -181,6 +184,8 @@ async def execute_retry_stage(
                 report_progress=False,
                 precomputed_detections=precomputed_bubbles,
             )
+            from ..rendering.paragraph_coalescing import coalesce_free_text_regions
+            ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
             detections = getattr(ctx, "bubble_detections", None) or []
             from ..detection.bubble import serialize_bubble_detections
 
@@ -200,6 +205,17 @@ async def execute_retry_stage(
                     ctx.text_regions = deserialize_textblocks(merged)
             if not getattr(ctx, "text_regions", None):
                 raise RuntimeError("No text regions available for translation")
+            bubble_data = run._document("bubble_detections.json")
+            if bubble_data is not None and ctx.img_rgb is not None:
+                from ..detection.bubble import deserialize_bubble_detections
+                from ..rendering.bubble_layout import restore_bubble_assignments
+
+                ctx.bubble_detections = deserialize_bubble_detections(bubble_data, ctx.img_rgb.shape)
+                if ctx.bubble_detections:
+                    restore_bubble_assignments(ctx.text_regions, ctx.bubble_detections)
+            from ..rendering.paragraph_coalescing import coalesce_free_text_regions
+            ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
+            run.write_json("text_regions_merged.json", serialize_regions(ctx.text_regions))
             translation_request = [
                 {"index": index, "text": getattr(region, "text", "")}
                 for index, region in enumerate(ctx.text_regions)
@@ -339,10 +355,13 @@ async def execute_retry_stage(
             if ctx.img_inpainted is not None:
                 save_jpeg(ctx.img_inpainted, run.path / "inpainted.jpg")
                 (run.path / "inpainted.png").unlink(missing_ok=True)
+                (run.path / "inpainted_working.jpg").unlink(missing_ok=True)
 
         elif stage_id == "rendering":
             if getattr(ctx, "img_inpainted", None) is None:
-                inpainted_path = find_asset(run.path, "inpainted")
+                inpainted_path = (run.path / "inpainted_working.jpg")
+                if not inpainted_path.is_file():
+                    inpainted_path = find_asset(run.path, "inpainted")
                 if inpainted_path is not None:
                     with Image.open(inpainted_path) as image:
                         ctx.img_inpainted = np.array(image.convert("RGB"))
@@ -379,7 +398,17 @@ async def execute_retry_stage(
                     ctx.inpaint_mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
             ctx.img_rendered = await translator._run_text_rendering(config, ctx)
             ctx.result = dump_image(ctx.input, ctx.img_rendered, ctx.img_alpha)
-            run.write_json("text_regions.json", serialize_editor_regions(ctx.text_regions))
+            working_height, working_width = ctx.img_inpainted.shape[:2]
+            if (config.upscale.upscale_ratio and config.upscale.revert_upscaling
+                    and ctx.result.size != ctx.input.size):
+                save_jpeg(ctx.img_inpainted, run.path / "inpainted_working.jpg")
+                ctx.result = ctx.result.resize(ctx.input.size)
+            target_width, target_height = ctx.result.size
+            scale_x, scale_y = target_width / working_width, target_height / working_height
+            inpainted = (cv2.resize(ctx.img_inpainted, ctx.result.size, interpolation=cv2.INTER_AREA)
+                         if (scale_x, scale_y) != (1.0, 1.0) else ctx.img_inpainted)
+            save_jpeg(inpainted, run.path / "inpainted.jpg")
+            run.write_json("text_regions.json", serialize_editor_regions(ctx.text_regions, scale_x, scale_y))
             final_img = np.array(ctx.result)
             save_jpeg(final_img, run.path / "final.jpg")
             run.write_json("meta.json", translator._build_result_metadata(config, ctx))

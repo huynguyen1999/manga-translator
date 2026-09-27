@@ -2,11 +2,13 @@ import asyncio
 from types import SimpleNamespace
 
 import cv2
+import freetype
 import numpy as np
 
 from manga_translator.config import Config, RenderConfig, Renderer
 from manga_translator.pipeline.run import deserialize_textblocks, serialize_regions
 from manga_translator.rendering import get_default_eng_font, render_page, text_render
+from manga_translator.rendering.text_render import FALLBACK_FONTS
 from manga_translator.rendering.bubble_layout import encode_safe_shape
 from manga_translator.rendering.serialization import encode_rendered_box
 from manga_translator.rendering.placement_geometry import _points_for_rect
@@ -45,6 +47,27 @@ def _region(source, translation="", region_id="region-a", font_size=24):
         target_lang="ENG",
         region_id=region_id,
     )
+
+
+def test_heart_uses_symbol_font_while_letters_keep_main_font():
+    text_render.set_font("fonts/anime_ace.ttf")
+    main = text_render.get_cached_font("fonts/anime_ace.ttf")
+    symbols = text_render.get_cached_font(FALLBACK_FONTS[0])
+    for char, face in (("O", main), ("♥", symbols)):
+        face.set_pixel_sizes(0, 31)
+        face.load_char(char)
+        expected = bytes(face.glyph.bitmap.buffer)
+        actual = bytes(text_render.get_char_glyph(char, 31, 0).bitmap.buffer)
+        assert actual == expected
+
+        face.load_char(char, freetype.FT_LOAD_DEFAULT | freetype.FT_LOAD_NO_BITMAP)
+        expected_border = face.glyph.get_glyph().to_bitmap(
+            freetype.FT_RENDER_MODE_NORMAL, freetype.Vector(0, 0), True
+        )
+        actual_border = text_render.get_char_border(char, 31, 0).to_bitmap(
+            freetype.FT_RENDER_MODE_NORMAL, freetype.Vector(0, 0), True
+        )
+        assert bytes(actual_border.bitmap.buffer) == bytes(expected_border.bitmap.buffer)
 
 
 def test_missing_translation_never_falls_back_to_japanese_source():
@@ -92,17 +115,18 @@ def test_source_provenance_survives_layout_mutation_and_retry():
     assert region.source_geometry["bbox"] == [10, 10, 90, 40]
 
 
-def test_free_text_prefers_source_minus_one_or_two_and_never_auto_enlarges():
+def test_free_text_tries_source_size_first_and_never_auto_enlarges():
     text_render.set_font(get_default_eng_font())
     profile = OriginalLayoutProfile(
         font_size=24, line_count=2, lines=[], centroid=(60, 40),
-        bbox=(10, 10, 110, 70), block_width=100, block_height=60, occupancy=0.5,
+        bbox=(10, 10, 210, 100), block_width=200, block_height=90, occupancy=0.5,
     )
     config = Config(render=RenderConfig(font_size_minimum=8))
 
     candidates = _free_text_typography_candidates("NORMAL FREE TEXT", profile, config, (120, 160))
 
     assert candidates
+    assert candidates[0].font_size == 24
     assert all(candidate.font_size <= 24 for candidate in candidates)
     assert any(candidate.font_size in {22, 23} for candidate in candidates)
 
@@ -111,11 +135,11 @@ def test_free_text_candidates_can_use_more_height_but_never_exceed_source_cap():
     text_render.set_font(get_default_eng_font())
     profile = OriginalLayoutProfile(
         font_size=24, line_count=1, lines=[], centroid=(60, 40),
-        bbox=(10, 10, 110, 70), block_width=100, block_height=60, occupancy=0.5,
+        bbox=(10, 10, 210, 100), block_width=200, block_height=90, occupancy=0.5,
     )
     candidates = _free_text_typography_candidates(
         "ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE TEN",
-        profile, Config(render=RenderConfig(font_size_minimum=8)), (120, 160),
+        profile, Config(render=RenderConfig(font_size_minimum=8)), (250, 400),
     )
     heights = [max(line.y + line.height for line in candidate.lines) for candidate in candidates]
 
@@ -310,8 +334,8 @@ def test_final_font_readability_floor_requests_review():
 
     assert layout.calibrated_font_size == 24
     assert region.review_required
-    assert region._render_suppressed
-    assert region.review_reason == "font_below_readability_floor"
+    assert not getattr(region, "_render_suppressed", False)
+    assert region.review_reason == "font_compressed_from_source"
 
 
 def test_rotated_placement_is_not_clamped_into_a_distorted_page_quad():

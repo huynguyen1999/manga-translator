@@ -297,7 +297,7 @@ class Glyph:
 
 @functools.lru_cache(maxsize = 1024, typed = True)
 def _get_char_glyph_cached(cdpt: str, font_size: int, direction: int, font_face_id: Tuple[str, ...]) -> Glyph:
-    font_selection = _font_state().selection
+    font_selection = [get_cached_font(FALLBACK_FONTS[0]), *_font_state().selection] if cdpt == '♥' else _font_state().selection
     for i, face in enumerate(font_selection):
         if face.get_char_index(cdpt) == 0 and i != len(font_selection) - 1:
             continue
@@ -322,7 +322,7 @@ get_char_glyph.__wrapped__ = _get_char_glyph_cached.__wrapped__
 
 #@functools.lru_cache(maxsize = 1024, typed = True)
 def get_char_border(cdpt: str, font_size: int, direction: int):
-    font_selection = _font_state().selection
+    font_selection = [get_cached_font(FALLBACK_FONTS[0]), *_font_state().selection] if cdpt == '♥' else _font_state().selection
     for i, face in enumerate(font_selection):
         if face.get_char_index(cdpt) == 0 and i != len(font_selection) - 1:
             continue

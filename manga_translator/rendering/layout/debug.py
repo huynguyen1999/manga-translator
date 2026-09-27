@@ -16,7 +16,7 @@ def create_free_text_layout_debug(
     obstacles: PageObstacleMap,
     zones: Dict[int, Union[np.ndarray, FreeTextZone]],
 ) -> np.ndarray:
-    """Rich debug overlay: BLUE (source), MAGENTA (damage), BRIGHT (core), GREEN (zone), RED (bubble), YELLOW (halo), CYAN (visual), WHITE (block)."""
+    """Overlay source, preferred damage, local domain, obstacles, and candidate ink."""
     debug = image.copy()
     h, w = debug.shape[:2]
 
@@ -27,7 +27,7 @@ def create_free_text_layout_debug(
         source = getattr(region, "_free_text_source_mask", np.zeros((h, w), np.uint8)) > 0
         raw_zone = zones.get(rid)
         if isinstance(raw_zone, FreeTextZone):
-            zone_mask = raw_zone.ownership_mask > 0
+            zone_mask = (raw_zone.placement_domain_mask if raw_zone.placement_domain_mask is not None else raw_zone.ownership_mask) > 0
             damage_mask = raw_zone.coverage_target_mask > 0
             core_mask = raw_zone.core_damage_mask > 0
         elif raw_zone is not None:
@@ -42,7 +42,7 @@ def create_free_text_layout_debug(
         tint = np.zeros_like(debug)
         # BLUE: original source footprint
         tint[source] = (255, 0, 0)
-        # GREEN: ownership territory
+        # GREEN: local placement domain
         tint[zone_mask] = (0, 180, 0)
         # MAGENTA: actual damage mask
         tint[damage_mask] = (220, 0, 220)
@@ -50,11 +50,11 @@ def create_free_text_layout_debug(
         tint[core_mask] = (255, 120, 255)
         debug = cv2.addWeighted(debug, 1.0, tint, 0.22, 0)
 
-        # Outlines
         for mask, color, thickness in (
             (obstacles.bubble_mask, (0, 0, 255), 2),              # RED: speech bubbles
             (obstacles.protected_bubble_mask, (0, 255, 255), 1),  # YELLOW: bubble safety halo
-            (zone_mask, (0, 200, 0), 1),                          # GREEN: ownership boundary
+            (zone_mask, (0, 200, 0), 1),                          # GREEN: placement boundary
+            (obstacles.text_mask & ~source, (0, 100, 255), 1),    # ORANGE: foreign source text
             (damage_mask, (200, 0, 200), 1),                      # MAGENTA: damage boundary
             (source, (255, 100, 0), 1),                           # BLUE: source boundary
         ):

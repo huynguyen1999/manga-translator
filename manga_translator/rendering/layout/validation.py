@@ -3,17 +3,17 @@
 from typing import Any, List, Tuple
 
 import numpy as np
+import math
 
 from ...utils import is_preserved_region, resolve_render_content
 from .geometry import BubbleGeometry
-from .models import LayoutDiagnostics, PageLayoutResult, PlacedLine
+from .models import LayoutDiagnostics, PageLayoutResult, PlacementMode, PlacedLine
 from .render_output_validation import (
     _region_render_boxes,
     _warped_alpha_crop,
     validate_render_output,
 )
 from .raster import _render_line_alpha
-
 
 def validate_layout(ctx: Any, result: PageLayoutResult) -> LayoutDiagnostics:
     diagnostics = result.diagnostics
@@ -26,6 +26,7 @@ def validate_layout(ctx: Any, result: PageLayoutResult) -> LayoutDiagnostics:
         region = regions_by_id.get(region_id)
         if region is not None:
             region._render_suppressed = True
+            region._layout_failure_reason = reason
             region.review_required = True
             region.review_reason = getattr(region, "review_reason", None) or reason
 
@@ -85,6 +86,10 @@ def validate_layout(ctx: Any, result: PageLayoutResult) -> LayoutDiagnostics:
         segment_sizes = [size for size in segment_sizes if size > 0]
         if not segment_sizes and final_font > 0:
             segment_sizes = [final_font]
+        shape = getattr(getattr(ctx, "img_rgb", None), "shape", (0, 0))
+        floor = max(int(font_policy.get("absolute_minimum", 0)), math.ceil(12 * max(shape[:2]) / 2048))
+        if segment_sizes and min(segment_sizes) < floor and not is_preserved_region(region):
+            suppress(region_id, "font_below_readability_floor")
         readability_ratio = min(segment_sizes) / readability_target if segment_sizes and readability_target else None
         readability_review = bool(
             not is_preserved_region(region) and not explicit_font
@@ -92,8 +97,7 @@ def validate_layout(ctx: Any, result: PageLayoutResult) -> LayoutDiagnostics:
         )
         if readability_review:
             region.review_required = True
-            region.review_reason = getattr(region, "review_reason", None) or "font_below_readability_floor"
-            region._render_suppressed = True
+            region.review_reason = getattr(region, "review_reason", None) or "font_compressed_from_source"
         region_metrics[region_id] = {
             "font_ratio_to_source": final_font / source_font if source_font else None,
             "font_ratio_to_calibrated": readability_ratio,
@@ -116,7 +120,6 @@ def validate_layout(ctx: Any, result: PageLayoutResult) -> LayoutDiagnostics:
     diagnostics.metrics["render_ownership"] = ownership
     diagnostics.metrics["regions"] = region_metrics
     return diagnostics
-
 
 def _bbox_validate(
     lines: List[PlacedLine],
@@ -154,7 +157,6 @@ def _bbox_validate(
     p5 = float(np.percentile(dt_vals, 5)) if dt_vals else 0.0
     return True, p5
 
-
 def _validate_glyph_pixels(
     lines: List[PlacedLine],
     geom: BubbleGeometry,
@@ -186,7 +188,7 @@ def _validate_glyph_pixels(
             ayc = y2 - ly
             if axc <= 0 or ayc <= 0:
                 return False, 0.0
-            glyph_mask = alpha[:ayc, :axc] > 127
+            glyph_mask = alpha[:ayc, :axc] > 0
             if np.any(glyph_mask):
                 outside_count += int(np.sum(glyph_mask & ~safe[ly:y2, lx:x2]))
                 glyph_dt_values.extend(dist[ly:y2, lx:x2][glyph_mask].tolist())

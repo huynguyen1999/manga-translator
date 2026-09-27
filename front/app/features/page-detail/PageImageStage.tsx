@@ -12,6 +12,7 @@ interface PageImageStageProps {
   resultFullUrl: Blob | string | null;
   inpaintedFullUrl: string | null;
   coordinateSize?: { width: number; height: number } | null;
+  workingCoordinateSize?: { width: number; height: number } | null;
   useFullResolution: boolean;
   resultUrl: Blob | string | null;
   resultPlaceholder?: string | null;
@@ -31,7 +32,7 @@ interface PageImageStageProps {
 
 export const PageImageStage = React.memo<PageImageStageProps>(({
   imageId, zoomLevel, isOriginal, originalUrl, originalFullUrl, resultUrl, resultPlaceholder,
-  resultFullUrl, inpaintedUrl, inpaintedFullUrl, coordinateSize, useFullResolution, folder,
+  resultFullUrl, inpaintedUrl, inpaintedFullUrl, coordinateSize, workingCoordinateSize, useFullResolution, folder,
   textRegionsUrl, viewMode, onViewModeChange, showBubbleBoxes, showBubbleRegions, showOriginalRegions,
   onToggleBubbleBoxes, isHoldingOriginal, onTextRegionsLoaded, showComparisonControls,
 }) => (
@@ -50,6 +51,7 @@ export const PageImageStage = React.memo<PageImageStageProps>(({
         fullResult={typeof resultFullUrl === "string" ? resultFullUrl : null}
         fullInpainted={inpaintedFullUrl}
         coordinateSize={coordinateSize}
+        workingCoordinateSize={workingCoordinateSize}
         useFullResolution={useFullResolution}
         folder={folder}
         textRegionsUrl={textRegionsUrl}

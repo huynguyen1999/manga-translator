@@ -130,7 +130,7 @@ export const BatchCard: React.FC<{
   const isFinishedSummary = batch.status === "completed" && failed === 0;
   const batchKind = getBatchKind(batch);
   const canChangeTranslator = batchKind !== "rerender" && batchKind !== "pipeline-rerun" && canChangeBatchTranslator(batch);
-  const rerunMode = (batch as any).rerunMode || ((batch as any).items?.[0] as any)?.rerunMode;
+  const rerunMode = batch.rerunMode;
   const rerunModeLabel = rerunMode === "full" ? "Full" : rerunMode === "translation_typesetting" ? "Retranslation" : rerunMode === "reprocess_text" ? "Reprocess text" : "Typesetting";
   const batchKindLabel = batchKind === "manga-upload" ? "Manga upload" : batchKind === "rerender" ? "Layout rerender" : batchKind === "pipeline-rerun" ? `Pipeline rerun · ${rerunModeLabel}` : "Translation";
 

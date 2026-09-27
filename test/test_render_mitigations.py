@@ -434,6 +434,20 @@ class TestRenderMitigations(unittest.TestCase):
         self.assertEqual(draw.await_args.args[1], [])
         np.testing.assert_array_equal(output[10:30, 10:30], original[10:30, 10:30])
 
+    def test_render_page_restores_translated_layout_failure(self):
+        region = self._lifecycle_region()
+        region.placement_mode = "FREE_TEXT"
+        region._solver_status = "no_valid_layout"
+        region._render_suppressed = True
+        ctx, config, _original = self._render_lifecycle_fixture(region)
+        draw = AsyncMock(side_effect=lambda canvas, regions, *args, **kwargs: canvas)
+
+        with unittest.mock.patch("manga_translator.rendering.dispatch", draw):
+            output = asyncio.run(render_page(ctx, config))
+
+        self.assertEqual(draw.await_args.args[1], [])
+        np.testing.assert_array_equal(output[10:30, 10:30], ctx.img_rgb[10:30, 10:30])
+
     def test_render_page_keeps_suppressed_bubble_source_and_never_draws_translation(self):
         region = self._lifecycle_region(region_id="suppressed-bubble")
         region._render_suppressed = True
