@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import type { FinishedImage } from "@/types";
-import { getLastReadPageIndex, getMangaReadProgress, mergeGalleryImages } from "./resultGallery";
+import {
+  getLastReadPageIndex,
+  getMangaReadProgress,
+  getMangaSummaryAvailability,
+  isSummaryPending,
+  mergeGalleryImages,
+} from "./resultGallery";
 
 assert.deepEqual(getMangaReadProgress("12", "12", 12), { page: 12, complete: true });
 assert.deepEqual(getMangaReadProgress("11", "12", 12), { page: 11, complete: false });
@@ -29,5 +35,16 @@ assert.deepEqual(
   mergeGalleryImages(loaded, session).map((item) => item.folder),
   ["folder-4", "folder-5"]
 );
+
+assert.equal(
+  getMangaSummaryAvailability({ summary: null, stale: false, jobStatus: "queued", jobDismissed: false }),
+  "queued",
+);
+assert.equal(
+  getMangaSummaryAvailability({ summary: null, stale: false, jobStatus: "queued", jobDismissed: true }),
+  "not-summarized",
+);
+assert.equal(isSummaryPending({ jobStatus: "queued", jobDismissed: false }), true);
+assert.equal(isSummaryPending({ jobStatus: "queued", jobDismissed: true }), false);
 
 console.log("result gallery merge checks passed");

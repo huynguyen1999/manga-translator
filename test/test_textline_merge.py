@@ -1,9 +1,11 @@
 import os
 import cv2
 import pytest
+from types import SimpleNamespace
 from typing import List
 import numpy as np
 from manga_translator.textline_merge import dispatch as dispatch_merge
+from manga_translator.textline_merge.geometry import analyze_textline_pair
 from manga_translator.utils import (
     TextBlock,
     Quadrilateral,
@@ -131,6 +133,31 @@ async def test_orientation_aware_pair_merging_and_diagnostics():
     assert diagnostics[0]["merge_class"] == "strong"
     assert diagnostics[0]["accepted"] is True
     assert "old_distance_px" in diagnostics[0]
+
+
+def test_pair_geometry_thresholds_are_inclusive():
+    def line(y, *, font_size=10.0, direction="h", angle=0.0):
+        points = np.array([[-50, -5], [50, -5], [50, 5], [-50, 5]], dtype=float)
+        if angle:
+            radians = np.deg2rad(angle)
+            rotation = np.array([[np.cos(radians), -np.sin(radians)], [np.sin(radians), np.cos(radians)]])
+            points = points @ rotation.T
+        points[:, 1] += y
+        return SimpleNamespace(
+            pts=points, direction=direction, font_size=font_size,
+            distance=lambda _other: 0.0,
+        )
+
+    first = line(0)
+    assert analyze_textline_pair(first, line(17.5)).merge_class == "strong"
+    assert analyze_textline_pair(first, line(17.51)).rejection_reason == "perpendicular_gap"
+    assert analyze_textline_pair(first, line(17.5, font_size=20)).merge_class == "possible"
+    assert analyze_textline_pair(first, line(17.5, font_size=20.01)).rejection_reason == "font_size_mismatch"
+    assert analyze_textline_pair(first, line(5)).merge_class == "possible"
+    assert analyze_textline_pair(first, line(4.9)).rejection_reason == "perpendicular_overlap"
+    assert analyze_textline_pair(first, line(0, angle=15)).rejection_reason != "angle_mismatch"
+    assert analyze_textline_pair(first, line(0, angle=15.01)).rejection_reason == "angle_mismatch"
+    assert analyze_textline_pair(first, line(0, direction="v")).rejection_reason == "orientation_mismatch"
 
         # # Search for all associated regions
         # associated_regions = []

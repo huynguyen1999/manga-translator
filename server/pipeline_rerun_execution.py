@@ -18,6 +18,8 @@ from manga_translator.pipeline.run import (
     serialize_editor_regions,
     serialize_regions,
 )
+from manga_translator.rendering.grouping import group_regions_by_bubbles
+from manga_translator.rendering.paragraph_coalescing import coalesce_free_text_regions
 from manga_translator.utils import Context, dump_image
 from manga_translator.utils.image_storage import save_jpeg
 from server.pipeline_rerun_plan import (
@@ -123,21 +125,21 @@ async def execute_rerun_plan(
             encoding="utf-8",
         )
 
-        # Textline Merge
         await report("textline_merge")
         ctx.text_regions = await translator._run_textline_merge(config, ctx)
+
+        if not getattr(ctx, "bubble_detections", None):
+            await translator._detect_speech_bubbles(config, ctx)
+        else:
+            ctx.text_regions = group_regions_by_bubbles(
+                ctx.text_regions, ctx.bubble_detections,
+                group=config.bubble_detection.group_regions,
+            )
+        ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
         (staging_dir / "text_regions_merged.json").write_text(
             json.dumps(serialize_regions(ctx.text_regions), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-
-        # Bubble Association / Detection
-        if not getattr(ctx, "bubble_detections", None):
-            await translator._detect_speech_bubbles(config, ctx)
-        else:
-            # Reassociate existing bubble shapes
-            from manga_translator.detection.bubble import associate_regions_with_bubbles
-            ctx.text_regions = associate_regions_with_bubbles(ctx.text_regions, ctx.bubble_detections)
 
         if getattr(ctx, "bubble_detections", None):
             from manga_translator.detection.bubble import serialize_bubble_detections
@@ -146,7 +148,6 @@ async def execute_rerun_plan(
                 encoding="utf-8",
             )
 
-        # Mask Generation
         await report("mask-generation")
         bundle = await run_cpu_stage(
             build_inpaint_masks,
@@ -180,7 +181,6 @@ async def execute_rerun_plan(
         ctx.cleanup_mask_diagnostics()
         bundle = None
 
-        # Inpainting
         await report("inpainting")
         ctx.img_inpainted = await translator._run_inpainting(config, ctx)
         save_jpeg(ctx.img_inpainted, staging_dir / "inpainted.jpg")

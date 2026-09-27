@@ -107,3 +107,45 @@ def test_geodesic_cap_stops_nearby_target_behind_long_corridor():
         far_box, far_visual, obstacles, other_text, placement_domain_mask=domain
     ) == 1.0
     assert qa["geodesic_limit_px"] == 64
+
+
+def test_hard_constraint_rejection_order_and_labels_are_stable():
+    shape = (10, 10)
+    source = np.zeros(shape, dtype=np.uint8)
+    crop = (2, 2, 4, 4)
+    visual = np.ones((2, 2), dtype=bool)
+
+    def rejected(reason, *, candidate_crop=crop, candidate_visual=visual, domain=None,
+                 panel=None, protected=None, other=None, panel_mask=None):
+        zone = _zone(np.ones(shape, dtype=np.uint8) if domain is None else domain, panel)
+        obstacles = _obstacles(
+            source,
+            panel_mask=np.ones(shape, dtype=np.uint8) if panel_mask is None else panel_mask,
+            protected=protected,
+        )
+        other_text = np.zeros(shape, dtype=bool) if other is None else other
+        assert not _free_text_hard_valid(
+            candidate_crop, candidate_visual, zone, obstacles, other_text,
+        )
+        assert zone.rejections == {reason: 1}
+
+    rejected("page_bounds", candidate_crop=(-1, 2, 1, 4))
+    rejected("empty_raster", candidate_visual=np.zeros((2, 2), dtype=bool))
+    rejected("local_domain", domain=np.zeros(shape, dtype=np.uint8))
+    rejected("panel_bounds", panel=PanelConstraint("panel", (0, 0, 10, 10), margin=3))
+
+    panel_shape = np.ones(shape, dtype=np.uint8)
+    panel_shape[2:4, 2:4] = 0
+    rejected("panel_mask", panel=PanelConstraint("panel", (0, 0, 10, 10), mask=panel_shape))
+
+    protected = np.zeros(shape, dtype=np.uint8)
+    protected[2:4, 2:4] = 1
+    rejected("protected_bubble", protected=protected)
+
+    other = np.zeros(shape, dtype=bool)
+    other[2:4, 2:4] = True
+    rejected("other_text", other=other)
+
+    page_panel = np.ones(shape, dtype=np.uint8)
+    page_panel[2:4, 2:4] = 0
+    rejected("panel_mask", panel_mask=page_panel)

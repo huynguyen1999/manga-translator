@@ -219,22 +219,11 @@ def save_summary(result_root: Path, title: str, value: dict[str, Any]) -> None:
 import datetime as dt
 
 def update_summary_job(
-    result_root: Path,
-    title: str,
-    status: str,
-    error: str | None = None,
-    stage: str | None = None,
-    progress: int | None = None,
-    message: str | None = None,
-    current_page: int | None = None,
-    page_count: int | None = None,
-    pages_with_text: int | None = None,
-    extraction_required: bool | None = None,
-    provider: str | None = None,
-    model: str | None = None,
-    refresh_text: bool | None = None,
-    regenerate: bool | None = None,
-    stage_passed_count: int | None = None,
+    result_root: Path, title: str, status: str, error: str | None = None,
+    stage: str | None = None, progress: int | None = None, message: str | None = None,
+    current_page: int | None = None, page_count: int | None = None, pages_with_text: int | None = None,
+    extraction_required: bool | None = None, provider: str | None = None, model: str | None = None,
+    refresh_text: bool | None = None, regenerate: bool | None = None, stage_passed_count: int | None = None,
 ) -> None:
     value = load_summary(result_root, title) or {}
     value.update({
@@ -272,46 +261,55 @@ def update_summary_job(
     save_summary(result_root, title, value)
 
 
+ACTIVE_JOB_STATUSES = {"queued", "generating", "paused"}
+
+
+def dismiss_summary_payload(value: dict[str, Any]) -> dict[str, Any]:
+    if value.get("jobStatus") in ACTIVE_JOB_STATUSES:
+        has_summary = bool(value.get("summary"))
+        value.update({
+            "jobStatus": "ready" if has_summary else None, "jobStage": "complete" if has_summary else None,
+            "jobProgress": 100 if has_summary else None, "jobMessage": None,
+            "jobRegenerate": False, "jobRefreshText": False,
+            "jobUpdatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+        })
+    value["jobDismissed"] = True
+    return value
+
+
+def reconcile_summary_payload(value: dict[str, Any]) -> bool:
+    status = value.get("jobStatus")
+    if value.get("jobDismissed") and status in ACTIVE_JOB_STATUSES:
+        dismiss_summary_payload(value)
+        return True
+    if status == "generating":
+        if value.get("summary"):
+            value.update({"jobStatus": "ready", "jobStage": "complete", "jobProgress": 100, "jobMessage": None})
+        else:
+            stage = "detecting" if value.get("jobExtractionRequired", True) else "concatenating"
+            value.update({"jobStatus": "queued", "jobProgress": 0, "jobMessage": "Waiting for an available worker", "jobStage": stage})
+        value["jobUpdatedAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        return True
+    if status == "queued" and value.get("summary") and not value.get("jobRegenerate") and not value.get("jobRefreshText"):
+        value.update({"jobStatus": "ready", "jobStage": "complete", "jobProgress": 100, "jobMessage": None})
+        value["jobUpdatedAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        return True
+    return False
+
+
 def dismiss_summary_job(result_root: Path, title: str) -> None:
     value = load_summary(result_root, title) or {"mangaTitle": _clean_title(title)}
-    value["jobDismissed"] = True
-    save_summary(result_root, title, value)
+    save_summary(result_root, title, dismiss_summary_payload(value))
 
 
 def reconcile_summary_jobs(result_root: Path) -> None:
-    if not result_root.is_dir():
-        return
     summary_dir = result_root / SUMMARY_DIR
-    if not summary_dir.is_dir():
+    if not result_root.is_dir() or not summary_dir.is_dir():
         return
     for path in summary_dir.glob("*.json"):
         value = _read_json(path, None)
-        if not isinstance(value, dict):
-            continue
-        status = value.get("jobStatus")
-        if status == "generating":
-            if value.get("summary"):
-                value["jobStatus"] = "ready"
-                value["jobStage"] = "complete"
-                value["jobProgress"] = 100
-                value["jobMessage"] = None
-            else:
-                value["jobStatus"] = "queued"
-                value["jobProgress"] = 0
-                value["jobMessage"] = "Waiting for an available worker"
-                value["jobStage"] = (
-                    "detecting" if value.get("jobExtractionRequired", True) else "concatenating"
-                )
-            value["jobUpdatedAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        if isinstance(value, dict) and reconcile_summary_payload(value):
             save_summary(result_root, value.get("mangaTitle") or path.stem, value)
-        elif status == "queued":
-            if value.get("summary") and not value.get("jobRegenerate") and not value.get("jobRefreshText"):
-                value["jobStatus"] = "ready"
-                value["jobStage"] = "complete"
-                value["jobProgress"] = 100
-                value["jobMessage"] = None
-                value["jobUpdatedAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
-                save_summary(result_root, value.get("mangaTitle") or path.stem, value)
 
 
 def list_runnable_summary_jobs(result_root: Path) -> list[dict[str, Any]]:
@@ -435,6 +433,8 @@ def synopsis_status(
     snapshot = source_snapshot(pages)
     if saved is None:
         saved = load_summary(result_root, clean_title)
+    if saved and saved.get("jobDismissed") and saved.get("jobStatus") in ACTIVE_JOB_STATUSES:
+        saved = dismiss_summary_payload(dict(saved))
     job_status = saved.get("jobStatus") if saved else None
     if job_status is None and saved and saved.get("summary"):
         job_status = "ready"
@@ -447,9 +447,7 @@ def synopsis_status(
         "generatedAt": saved.get("generatedAt") if saved else None,
         "sourceFingerprint": saved.get("sourceFingerprint") if saved else snapshot["fingerprint"],
         "stale": bool(
-            saved
-            and saved.get("summary")
-            and saved.get("sourceFingerprint")
+            saved and saved.get("summary") and saved.get("sourceFingerprint")
             and saved.get("sourceFingerprint") != snapshot["fingerprint"]
         ),
         "jobStatus": job_status,
@@ -463,9 +461,7 @@ def synopsis_status(
         "jobPageCount": saved.get("jobPageCount") if saved else None,
         "jobPagesWithText": saved.get("jobPagesWithText") if saved else None,
         "jobExtractionRequired": (
-            saved.get("jobExtractionRequired")
-            if saved and "jobExtractionRequired" in saved
-            else bool(snapshot["missing"])
+            saved.get("jobExtractionRequired") if saved and "jobExtractionRequired" in saved else bool(snapshot["missing"])
         ),
         "jobDismissed": bool(saved.get("jobDismissed")) if saved else False,
         "pageCount": len(pages),

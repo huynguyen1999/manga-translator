@@ -395,6 +395,31 @@ def test_textline_retry_reuses_saved_bubble_geometry(tmp_path):
     assert run.ctx.text_regions[0]._bubble_mask.any()
 
 
+def test_deferred_textline_merge_coalesces_free_text_after_saved_bubbles(tmp_path):
+    run = PipelineRun(tmp_path, "page", Image.new("RGB", (300, 300)), Config())
+    run.ctx = Context(
+        img_rgb=np.zeros((300, 300, 3), dtype=np.uint8),
+        textlines=[TextBlock([[[0, 0], [1, 0], [1, 1], [0, 1]]], texts=["detected"])],
+    )
+    run.documents["bubble_detections.json"] = []
+    run.checkpoint = AsyncMock()
+    regions = [
+        TextBlock([[[0, 0], [272, 0], [272, 283], [0, 283]]], texts=["full"], region_id="winner"),
+        TextBlock([[[43, 52], [179, 52], [179, 187], [43, 187]]], texts=["partial"], region_id="inner"),
+        TextBlock([[[55, 214], [142, 214], [142, 258], [55, 258]]], texts=["fragment"], region_id="lower"),
+    ]
+    translator = type("Translator", (), {})()
+    translator._run_textline_merge = AsyncMock(return_value=regions)
+    translator._detect_speech_bubbles = AsyncMock()
+
+    asyncio.run(run.retry_stage(
+        "textline_merge", Config(), translator, defer_bubble_detection=True,
+    ))
+
+    assert [region.region_id for region in run.ctx.text_regions] == ["winner"]
+    assert run.ctx.text_regions[0].source_region_ids == ["winner", "inner", "lower"]
+
+
 def test_old_manifests_gain_canonical_layout_checkpoint(tmp_path):
     manifest = {
         "stages": [

@@ -108,6 +108,71 @@ class SummaryOcrTests(unittest.IsolatedAsyncioTestCase):
         for context in contexts:
             context.cleanup_all_images.assert_called_once_with()
 
+    async def test_summary_ocr_job_advances_stage_after_batch_phase_completes(self):
+        import asyncio
+        from server.summary_ocr_execution import SummaryOCRJob, run_summary_ocr_job
+
+        updates = []
+
+        async def update_summary_job_for(
+            _store, _group, _title, status, _error, stage, progress, message,
+            current_page, page_count, _pages_with_text, _extraction_required, *, stage_passed_count=None,
+        ):
+            updates.append((status, stage, progress, message, current_page, page_count, stage_passed_count))
+
+        async def run_batch(pages, _lang, _worker, _batch_size, on_progress):
+            for stage in ("detection", "ocr", "textline_merge"):
+                for pos in range(len(pages)):
+                    await on_progress(stage, pos)
+            return [([{"original_text": f"text-{i}"}], None) for i in range(len(pages))]
+
+        pages = [{"name": "1.png", "textRegions": []}, {"name": "2.png", "textRegions": []}]
+        job = SummaryOCRJob(
+            request=None,
+            pages=pages,
+            target_language="ENG",
+            worker=SimpleNamespace(extract_text_batch=AsyncMock()),
+            pause_event=None,
+            store=object(),
+            group_value="Series",
+            clean_title="Series",
+            has_group_text=False,
+            refresh_text=False,
+            extraction_required=True,
+            pages_with_text=0,
+        )
+        runtime = SimpleNamespace(
+            summary_log=Mock(),
+            update_summary_job_for=update_summary_job_for,
+            run_summary_ocr=AsyncMock(),
+            run_summary_ocr_batch=run_batch,
+            summary_ocr_semaphore=asyncio.Semaphore(1),
+            summary_controller=SimpleNamespace(),
+            is_page_text_extracted=lambda *_a, **_kw: False,
+            summary_queue_element=Mock(),
+            task_queue=SimpleNamespace(),
+            wait_in_queue=AsyncMock(),
+            empty_device_cache=Mock(),
+            get_inference_page_batch_size=lambda: 2,
+        )
+
+        pages_with_text, failed, _ = await run_summary_ocr_job(job, runtime)
+        self.assertEqual(pages_with_text, 2)
+        self.assertEqual(failed, [])
+        stage_snapshots = [(stage, passed, message) for _, stage, _, message, _, _, passed in updates]
+        self.assertEqual(
+            stage_snapshots[:6],
+            [
+                ("detecting", 1, "Detecting text · 1/2 pages"),
+                ("ocr", 0, "Reading OCR · 0/2 pages"),
+                ("ocr", 1, "Reading OCR · 1/2 pages"),
+                ("textline_merge", 0, "Merging text lines · 0/2 pages"),
+                ("textline_merge", 1, "Merging text lines · 1/2 pages"),
+                ("textline_merge", 2, "Merging text lines · 2/2 pages"),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
+

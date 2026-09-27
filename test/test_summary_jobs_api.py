@@ -109,6 +109,20 @@ class TestSummaryJobsApi(unittest.TestCase):
         self.assertEqual(stop_resp.json()["status"], "stopped")
         saved = load_summary(self.root, "Series")
         self.assertTrue(saved is None or saved.get("jobDismissed", False))
+        self.assertIsNone(saved.get("jobStatus") if saved else None)
+
+        # Re-requesting summary with regenerate=False must queue it and clear jobDismissed
+        with patch("server.main._generate_manga_summary", new=AsyncMock()):
+            requeue_resp = self.client.post(
+                "/api/results/group/summary",
+                json={"mangaTitle": "Series", "summaryModel": "deepseek-reasoner", "regenerate": False},
+            )
+        self.assertEqual(requeue_resp.status_code, 200)
+        self.assertEqual(requeue_resp.json()["jobStatus"], "queued")
+        self.assertFalse(requeue_resp.json()["jobDismissed"])
+        saved_after = load_summary(self.root, "Series")
+        self.assertEqual(saved_after["jobStatus"], "queued")
+        self.assertFalse(saved_after["jobDismissed"])
 
 
 if __name__ == "__main__":

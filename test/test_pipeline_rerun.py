@@ -334,6 +334,36 @@ class PipelineRerunTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(getattr(outside, "_bubble_mask", None))
             self.assertIsNone(getattr(outside, "bubble_id", None))
 
+    async def test_typesetting_coalesces_nested_free_text_regions(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root) / "page-1"
+            folder.mkdir()
+            Image.new("RGB", (300, 300), "white").save(folder / "input.png")
+            regions = [
+                ("fragment", [[41, 50], [180, 50], [180, 188], [41, 188]], "partial"),
+                ("lower", [[50, 205], [181, 205], [181, 264], [50, 264]], "small"),
+                ("tilted", [[10, 37], [154, 24], [170, 204], [26, 217]], "longer partial"),
+                ("winner", [[0, 0], [272, 0], [272, 282], [0, 282]], "full OCR"),
+            ]
+            (folder / "text_regions.json").write_text(json.dumps([{
+                "id": region_id,
+                "region_id": region_id,
+                "lines": [lines],
+                "original_text": text,
+                "translation": text,
+                "font_size": 14,
+            } for region_id, lines, text in regions]), encoding="utf-8")
+
+            ctx, _ = await load_rerun_context(
+                folder, resolve_rerun_plan(PipelineRerunMode.TYPESETTING), self.config
+            )
+
+            self.assertEqual([region.region_id for region in ctx.text_regions], ["winner"])
+            self.assertEqual(
+                ctx.text_regions[0].source_region_ids,
+                ["winner", "fragment", "lower", "tilted"],
+            )
+
     def test_editor_artifact_keeps_source_font_and_region_identity(self):
         region = TextBlock(
             [[[1, 1], [8, 1], [8, 8], [1, 8]]],
@@ -432,6 +462,8 @@ class PipelineRerunTest(unittest.IsolatedAsyncioTestCase):
             staging_dir = results_dir / ".rerun" / "job-3"
             staging_dir.mkdir(parents=True, exist_ok=True)
             ctx, state = await load_rerun_context(folder, plan, self.config)
+            from manga_translator.detection.bubble import BubbleDetection
+            ctx.bubble_detections = [BubbleDetection(np.zeros((8, 8), dtype=np.uint8), 0.9)]
             executed_ctx, remap_result = await execute_rerun_plan(
                 translator=self.translator,
                 ctx=ctx,

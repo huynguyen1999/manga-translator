@@ -331,7 +331,7 @@ def create_summary_control_router(
 
             force_regenerate = data.regenerate or data.refreshText
             status = await summary_status_for(store, group_value, clean_title, pages)
-            if status["jobStatus"] in {"queued", "generating", "paused"}:
+            if status["jobStatus"] in {"queued", "generating", "paused"} and not status.get("jobDismissed"):
                 if not force_regenerate:
                     summary_log(
                         "skipped",

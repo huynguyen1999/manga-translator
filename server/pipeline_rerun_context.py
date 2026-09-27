@@ -12,6 +12,7 @@ from manga_translator.config import Config
 from manga_translator.pipeline.run import deserialize_textblocks
 from manga_translator.pipeline.stages import PipelineStage
 from manga_translator.rendering.bubble_layout import restore_bubble_assignments
+from manga_translator.rendering.paragraph_coalescing import coalesce_free_text_regions
 from manga_translator.utils import Context, load_image
 from manga_translator.utils.image_storage import find_asset
 from server.image_variants import final_file
@@ -67,7 +68,6 @@ async def load_rerun_context(
                 pass
         return None
 
-    # 1. Canvas / Image loading
     if plan.use_original_input:
         orig_path = (
             find_asset(result_dir, "input")
@@ -95,7 +95,6 @@ async def load_rerun_context(
             ctx.input = img.convert("RGB")
             ctx.img_rgb, ctx.img_alpha = load_image(ctx.input)
 
-    # 2. Inpainted canvas & masks if skipping inpainting
     if not plan.run_inpainting:
         inpainted_path = find_asset(result_dir, "inpainted")
         if inpainted_path:
@@ -109,7 +108,6 @@ async def load_rerun_context(
         elif mask_final_path.is_file():
             ctx.inpaint_mask = cv2.imread(str(mask_final_path), cv2.IMREAD_GRAYSCALE)
         ctx.mask = ctx.inpaint_mask
-    # 3. Speech bubble detections
     bubble_dets_raw = _read_json("bubble_detections.json")
     if bubble_dets_raw:
         try:
@@ -154,5 +152,7 @@ async def load_rerun_context(
 
     if ctx.text_regions and ctx.bubble_detections:
         restore_bubble_assignments(ctx.text_regions, ctx.bubble_detections)
+    if plan.mode in {PipelineRerunMode.TYPESETTING, PipelineRerunMode.TRANSLATION_TYPESETTING}:
+        ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
 
     return ctx, {"old_regions": old_regions, "documents": documents}

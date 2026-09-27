@@ -125,6 +125,11 @@ const SummaryJobRow: React.FC<{
             {stages.map(([stage, label], index) => {
               const complete = job.status === "ready" || index < stageIndex || (!extractionRequired && index < 3);
               const current = (job.status === "generating" || job.status === "paused") && index === stageIndex;
+              const stepPagesDone = complete
+                ? job.jobPageCount
+                : index === stageIndex
+                ? job.jobStagePassedCount ?? 0
+                : 0;
               return (
                 <li key={stage} className={`flex items-center gap-2 text-xs ${complete ? "text-indigo-600 dark:text-indigo-300" : current ? "font-semibold text-zinc-900 dark:text-zinc-100" : "text-zinc-400 dark:text-zinc-600"}`}>
                   <span className={`flex h-5 w-5 items-center justify-center rounded-full border text-xs ${complete ? "border-indigo-500 bg-indigo-50 dark:bg-indigo-950/70" : current ? "border-indigo-500" : "border-zinc-300 dark:border-zinc-700"}`}>
@@ -132,9 +137,9 @@ const SummaryJobRow: React.FC<{
                   </span>
                   <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
                     <span>{!extractionRequired && index < 3 ? `${label} · cached` : label}</span>
-                    {current && index < 3 && job.jobStagePassedCount != null && job.jobPageCount != null && (
-                      <span className="tabular-nums text-indigo-600 dark:text-indigo-300">
-                        {job.jobStagePassedCount}/{job.jobPageCount} pages done
+                    {extractionRequired && index < 3 && job.jobPageCount != null && (
+                      <span className={`tabular-nums ${complete || current ? "text-indigo-600 dark:text-indigo-300" : "text-zinc-400 dark:text-zinc-500"}`}>
+                        {stepPagesDone}/{job.jobPageCount} pages done
                       </span>
                     )}
                   </span>

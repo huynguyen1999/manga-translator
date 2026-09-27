@@ -218,6 +218,32 @@ class TestMangaSummary(unittest.TestCase):
         self.assertEqual(saved["jobStage"], "complete")
         self.assertEqual(saved["jobProgress"], 100)
 
+    def test_dismissed_queued_job_without_summary_is_reconciled_and_not_reported_queued(self):
+        from server.manga_summary import reconcile_summary_jobs
+
+        save_summary(
+            self.root,
+            "Series",
+            {
+                "mangaTitle": "Series",
+                "jobStatus": "queued",
+                "jobDismissed": True,
+                "jobStage": "detecting",
+                "jobProgress": 0,
+                "jobMessage": "Waiting for an available worker",
+            },
+        )
+        status = synopsis_status(self.root, "Series")
+        self.assertIsNone(status["jobStatus"])
+        self.assertIsNone(status["jobStage"])
+        self.assertIsNone(status["jobProgress"])
+        self.assertTrue(status["jobDismissed"])
+
+        reconcile_summary_jobs(self.root)
+        saved = load_summary(self.root, "Series")
+        self.assertIsNone(saved["jobStatus"])
+        self.assertTrue(saved["jobDismissed"])
+
 
 class TestMangaSummaryPerformance(unittest.IsolatedAsyncioTestCase):
     async def test_deepseek_synopsis_keeps_response_content_visible(self):

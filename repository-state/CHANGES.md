@@ -2,6 +2,15 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-27 — Lock text-merge and layout behavior
+
+- Added a durable compatibility contract for OCR pair grouping, nested and adjacent free-text ownership, layout hard constraints, and final validation. Added boundary and rejection-precedence characterization tests so later changes must make behavior changes explicit.
+
+## 2026-09-27 — Incremental per-step page progress and dismissed-job cleanup for manga summaries
+
+- Emit batched text-extraction progress incrementally after each detection sub-batch, OCR sub-batch, and merged page, advance summary OCR stages immediately when a batched phase completes, and display `X/Y pages done` on all three extraction steps (`Detection`, `OCR`, `Merge text lines`) in the Jobs drawer so users can see live per-step progress instead of stage-end jumps.
+- Clear non-terminal `jobStatus` (`queued`, `generating`, `paused`) when summary jobs are dismissed or stopped so dismissed jobs never remain stuck in `Summary queued` or block re-queuing.
+
 ## 2026-09-26 — Preserve suppressed and unchanged text during inpainting
 
 - Prevent pages from failing on unmasked regions that will be restored for review; keep unchanged translations on their source pixels and allow strict render diagnostics after layout scratch is released.

@@ -2,6 +2,34 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-27 — Summary job extraction steps did not show incremental per-step page progress
+
+- Symptom: During summary generation with batched OCR extraction, each step (`Detection`, `OCR`, `Merge text lines`) jumped all at once only after the entire stage finished, remained stuck showing `Detection 38/38 pages done` while the first `OCR` sub-batch ran, and hid `X/Y pages done` on completed and pending steps in `SummaryJobRow`.
+- Root cause: `extract_text_batch` invoked `on_progress` only once at the end of each full stage instead of after each detection/OCR sub-batch and each merged page; `report_stage` in `server/summary_ocr_execution.py` left `stage` on the finished phase when `batch_position == batch_size`; and `SummaryJobRow.tsx` rendered `{jobStagePassedCount}/{jobPageCount} pages done` only for the `current` step.
+- Fix: Emit `on_progress(stage, index)` incrementally after each detection sub-batch, each OCR sub-batch, and each `textline_merge` page in `extract_text_batch`; advance `stage` and reset `stage_passed_count` to `cached_page_count` when a batched phase completes all pages in `report_stage`; and render `{stepPagesDone}/{jobPageCount} pages done` across all three extraction steps in `SummaryJobRow.tsx`.
+- Prevention: Assert interleaved `on_progress` events per sub-batch/page in `test_batch_image_context.py` and verify stage transitions at phase boundaries in `test_summary_ocr.py`.
+
+## 2026-09-27 — Dismissed or stopped summary jobs stayed in zombie `queued` status and blocked re-queuing
+
+- Symptom: Opening an original manga (e.g. group `79531dfc-322c-4c52-b1bf-2f4b88113720`) showed `"Summary queued"` in the header even though no summary job was in the Jobs drawer or running on the scheduler, and clicking `"Summary"` logged `summary_job event=skipped ... reason='already_queued'` without ever processing the job.
+- Root cause: `dismiss_summary_job` and `stop_manga_summary_job` set `jobDismissed = True` without clearing non-terminal `jobStatus` (`"queued"`, `"generating"`, `"paused"`). `list_runnable_summary_jobs` and `list_summary_jobs` filtered out `jobDismissed == True`, so the scheduler never picked up the job, while `synopsis_status` and `create_manga_summary` still treated `jobStatus == "queued"` as an active queued job and skipped new `regenerate=False` submissions.
+- Fix: Normalize active `jobStatus` (`"queued"`, `"generating"`, `"paused"`) to `"ready"` (when a summary exists) or `None` (when no summary exists) on dismissal, in `reconcile_summary_jobs`, and in `synopsis_status`; also guard `create_manga_summary` and frontend availability helpers (`getMangaSummaryAvailability`, `isSummaryPending`) against `jobDismissed`.
+- Prevention: Ensure any job state excluded from scheduler runnable queries (`jobDismissed`) is never reported as active/pending in status or submission dedupe checks, and test re-queuing after stop/dismiss.
+
+## 2026-09-27 — Stage-barrier text grouping skipped nested-region winner selection
+
+- Symptom: Fresh page `1790488916037-149a82a2-2048-ENG-sugoi` persisted nested regions `9bfe792824ba4a4099693adaedc57fed`, `d8e160d797254d66a2a3c3afda26aca1`, and `3a267963f7f54990861e98c46ba84580` separately, suppressing and restoring the two smaller detections instead of assigning one owner.
+- Root cause: Stage-barrier batches defer bubble detection while executing `textline_merge`; even after reloading the already-completed bubble artifact, the defer guard skipped free-text coalescing. Detection previews also referenced a removed bubble-association symbol, preventing end-to-end reproduction.
+- Fix: Coalesce once saved bubble geometry is available (or bubble detection is disabled), and make reprocess previews use the shared bubble-grouping helper before coalescing and persisting merged regions.
+- Prevention: Cover deferred textline merge with saved bubble artifacts and exercise reprocess previews with preloaded bubble detections.
+
+## 2026-09-27 — Typesetting reruns skipped nested free-text winner selection
+
+- Symptom: On page `1790487935215-49657130-2048-ENG-sugoi`, nested regions `5d393822e9c545d2b9ec65544bed686a`, `3e8d70909c8c493892f173efb313a26e`, and `de7039da9059499b86fac4ece3f7fd00` remained separate; only the largest rendered while the others were restored as overlapping source text.
+- Root cause: The shared free-text coalescer ran in production and translation retry paths, but typesetting-only saved-page hydration bypassed it.
+- Fix: Run the existing coalescer after saved bubble assignments are restored for typesetting and translation-plus-typesetting reruns, so the largest direct-covering region owns all nested source IDs.
+- Prevention: Keep a rerun-context regression using the reported nested geometry and assert one owner before layout.
+
 ## 2026-09-26 — Inpainting rejected text that should remain untouched
 
 - Symptom: A page failed capture with “No erasing mask for detected text” even though the uncovered regions were already suppressed for review or had an unchanged translation.

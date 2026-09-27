@@ -3,6 +3,7 @@
 This directory is the project's durable memory for future contributors and coding agents.
 
 - `CURRENT.md`: current purpose, architecture, workflows, and important constraints.
+- `LAYOUT_AND_TEXT_MERGE_RULES.md`: compatibility contract for OCR grouping, free-text coalescing, ownership, placement, and final validation.
 - `BUGS.md`: lessons from discovered bugs, including how to avoid repeating them.
 - `CHANGES.md`: concise history of new features and large changes.
 

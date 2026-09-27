@@ -11,13 +11,8 @@ from manga_translator.utils import Context, load_image
 
 
 async def extract_text_batch(
-    owner,
-    images_with_configs: List[tuple[Image.Image, Config]],
-    batch_size: int,
-    on_progress: Callable[[str, int], Awaitable[None]] | None,
-    *,
-    load_dictionary_fn,
-    apply_dictionary_fn,
+    owner, images_with_configs: List[tuple[Image.Image, Config]], batch_size: int,
+    on_progress: Callable[[str, int], Awaitable[None]] | None, *, load_dictionary_fn, apply_dictionary_fn,
 ) -> List[Context]:
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
@@ -40,10 +35,12 @@ async def extract_text_batch(
             grouped.setdefault(key, []).append(index)
         return grouped.values()
 
-    async def report(stage):
-        if on_progress is not None:
-            for index in range(len(contexts)):
-                await on_progress(stage, index)
+    progress_counts = {"detection": 0, "ocr": 0, "textline_merge": 0}
+
+    async def report(stage, count=1):
+        for _ in range(count if on_progress is not None else 0):
+            await on_progress(stage, progress_counts[stage])
+            progress_counts[stage] += 1
 
     for indexes in groups(range(len(contexts)), "detector"):
         for start in range(0, len(indexes), batch_size):
@@ -59,9 +56,10 @@ async def extract_text_batch(
                     outputs.append(await owner._run_detection(config, ctx))
             for ctx, output in zip(pages, outputs):
                 ctx.textlines, ctx.mask_raw, ctx.mask = output
-    await report("detection")
+            await report("detection", len(group))
 
     recognized = [index for index, ctx in enumerate(contexts) if ctx.textlines]
+    await report("ocr", len(contexts) - len(recognized))
     for indexes in groups(recognized, "ocr"):
         for start in range(0, len(indexes), batch_size):
             group = indexes[start:start + batch_size]
@@ -76,7 +74,7 @@ async def extract_text_batch(
                     outputs.append(await owner._run_ocr(config, ctx))
             for ctx, textlines in zip(pages, outputs):
                 ctx.textlines = textlines
-    await report("ocr")
+            await report("ocr", len(group))
 
     pre_dict = load_dictionary_fn(owner.pre_dict)
     for ctx, (_, config) in zip(contexts, images_with_configs):
@@ -88,5 +86,5 @@ async def extract_text_batch(
                 ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
                 for region in ctx.text_regions:
                     region.text = apply_dictionary_fn(region.text, pre_dict)
-    await report("textline_merge")
+        await report("textline_merge")
     return contexts

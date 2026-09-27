@@ -1,7 +1,8 @@
 import cv2
 import numpy as np
 
-from manga_translator.rendering.paragraph_coalescing import coalesce_free_text_regions
+from manga_translator.rendering.layout.models import PanelConstraint
+from manga_translator.rendering.paragraph_coalescing import _can_coalesce, coalesce_free_text_regions
 from manga_translator.utils import TextBlock
 
 
@@ -221,10 +222,12 @@ def test_direct_polygon_coverage_threshold_and_bubble_exclusion():
     below_threshold = _region((11, 0, 111, 100), "89% covered", "below")
     bubble = _region((10, 0, 110, 100), "bubble", "bubble")
     bubble.bubble_id = "bubble-0"
+    preserved = _region((10, 0, 110, 100), "preserved", "preserved")
+    preserved.translation_policy = "preserve"
 
-    result = coalesce_free_text_regions([large, at_threshold, below_threshold, bubble], None)
+    result = coalesce_free_text_regions([large, at_threshold, below_threshold, bubble, preserved], None)
 
-    assert [region.region_id for region in result] == ["large", "below", "bubble"]
+    assert [region.region_id for region in result] == ["large", "below", "bubble", "preserved"]
     assert result[0].source_region_ids == ["large", "threshold"]
 
 
@@ -237,3 +240,48 @@ def test_overlap_chain_does_not_suppress_without_direct_winner_coverage():
 
     assert [region.region_id for region in result] == ["first", "third"]
     assert result[0].source_region_ids == ["first", "second"]
+
+
+def test_adjacent_coalescing_thresholds_and_eligibility_are_inclusive():
+    first = _region((10, 10, 30, 30), "first", "first")
+    second = _region((10, 55, 30, 75), "second", "second")
+    first.font_size = second.font_size = 20
+
+    def panels(confidence=0.68, second_id="panel"):
+        return {
+            id(first): PanelConstraint("panel", (0, 0, 100, 100), confidence=confidence, source="cv"),
+            id(second): PanelConstraint(second_id, (0, 0, 100, 100), confidence=confidence, source="cv"),
+        }
+
+    assert _can_coalesce(first, second, panels())  # gap = 1.25 font units
+    second.lines = np.array([[[10, 56], [30, 56], [30, 76], [10, 76]]])
+    second.__dict__.pop("xyxy", None)
+    assert not _can_coalesce(first, second, panels())
+    second.lines = np.array([[[10, 55], [30, 55], [30, 75], [10, 75]]])
+    second.__dict__.pop("xyxy", None)
+
+    second.font_size = 25
+    assert _can_coalesce(first, second, panels())  # font ratio = 1.25
+    second.font_size = 25.01
+    assert not _can_coalesce(first, second, panels())
+    second.font_size = 20
+
+    second.angle = 8
+    assert _can_coalesce(first, second, panels())
+    second.angle = 8.01
+    assert not _can_coalesce(first, second, panels())
+    second.angle = 0
+
+    second.lines = np.array([[[17, 55], [37, 55], [37, 75], [17, 75]]], dtype=float)
+    second.__dict__.pop("xyxy", None)
+    assert _can_coalesce(first, second, panels())  # flow overlap = 0.65
+    second.lines += np.array([[[1, 0], [1, 0], [1, 0], [1, 0]]])
+    second.__dict__.pop("xyxy", None)
+    assert not _can_coalesce(first, second, panels())
+    second.lines = np.array([[[10, 55], [30, 55], [30, 75], [10, 75]]])
+    second.__dict__.pop("xyxy", None)
+
+    assert not _can_coalesce(first, second, panels(confidence=0.679))
+    assert not _can_coalesce(first, second, panels(second_id="other"))
+    second.translation_policy = "preserve"
+    assert not _can_coalesce(first, second, panels())

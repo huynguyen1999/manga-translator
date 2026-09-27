@@ -159,17 +159,17 @@ export function shouldShowEmptyLibraryState({
   );
 }
 
-export function getMangaSummaryAvailability(summary: Pick<MangaSummary, 'summary' | 'stale' | 'jobStatus'>): SummaryAvailabilityState {
-  if (summary.jobStatus === 'queued') return 'queued';
-  if (summary.jobStatus === 'generating') return 'generating';
-  if (summary.jobStatus === 'paused') return 'paused';
-  if (summary.jobStatus === 'error') return 'error';
+export function getMangaSummaryAvailability(summary: Pick<MangaSummary, 'summary' | 'stale' | 'jobStatus' | 'jobDismissed'>): SummaryAvailabilityState {
+  if (!summary.jobDismissed && summary.jobStatus === 'queued') return 'queued';
+  if (!summary.jobDismissed && summary.jobStatus === 'generating') return 'generating';
+  if (!summary.jobDismissed && summary.jobStatus === 'paused') return 'paused';
+  if (!summary.jobDismissed && summary.jobStatus === 'error') return 'error';
   if (summary.summary && summary.stale) return 'stale';
   return summary.summary ? 'summarized' : 'not-summarized';
 }
 
-export const isSummaryPending = (summary: Pick<MangaSummary, 'jobStatus'>): boolean =>
-  summary.jobStatus === 'queued' || summary.jobStatus === 'generating' || summary.jobStatus === 'paused';
+export const isSummaryPending = (summary: Pick<MangaSummary, 'jobStatus' | 'jobDismissed'>): boolean =>
+  !summary.jobDismissed && (summary.jobStatus === 'queued' || summary.jobStatus === 'generating' || summary.jobStatus === 'paused');
 
 export const loadedThumbnailUrls = new Set<string>();
 const blobUrlCache = new WeakMap<Blob, string>();

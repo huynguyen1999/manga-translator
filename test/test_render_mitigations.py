@@ -169,6 +169,48 @@ class TestRenderMitigations(unittest.TestCase):
         self.assertGreater(right_margin, 20, "Text is flush right instead of centered!")
         self.assertAlmostEqual(ratio, 1.0, delta=0.5, msg=f"Margins unbalanced: left={left_margin}, right={right_margin}")
 
+    def test_horizontal_alignment_positions_content_and_auto_matches_center(self):
+        boxes = {
+            alignment: text_render.put_text_horizontal(
+                24, "Hi", 160, 60, alignment, False,
+                (255, 255, 255), None, "en_US", False, 0,
+            )
+            for alignment in ("left", "center", "auto", "right")
+        }
+        x_bounds = {}
+        for alignment, box in boxes.items():
+            _, xs = np.where(box[:, :, 3] > 0)
+            x_bounds[alignment] = (int(xs.min()), int(xs.max()))
+
+        self.assertEqual(x_bounds["left"][0], 0)
+        self.assertEqual(x_bounds["right"][1], 159)
+        self.assertEqual(x_bounds["auto"], x_bounds["center"])
+        center = sum(x_bounds["center"]) / 2
+        self.assertAlmostEqual(center, 79.5, delta=1)
+
+    def test_vertical_alignment_moves_short_column_along_flow_axis(self):
+        from manga_translator.rendering.text_render_vertical import put_text_vertical
+
+        comic_font = os.path.join(repo_root, 'fonts', 'comic shanns 2.ttf')
+        text_render.set_font(os.path.join(repo_root, 'fonts', 'NotoSansMonoCJK-VF.ttf.ttc'))
+        try:
+            top_by_alignment = {}
+            for alignment in ("left", "center", "right"):
+                box = put_text_vertical(
+                    24, "日本語縦書文字列九", 96, alignment,
+                    (0, 0, 0), (255, 255, 255), 0,
+                )
+                alpha = box[:, :, 3]
+                occupied_x = np.where(alpha.any(axis=0))[0]
+                left_column_end = occupied_x.min() + (occupied_x.max() - occupied_x.min()) // 3
+                ys, _ = np.where(alpha[:, :left_column_end + 1] > 0)
+                top_by_alignment[alignment] = int(ys.min())
+        finally:
+            text_render.set_font(comic_font)
+
+        self.assertLess(top_by_alignment["left"], top_by_alignment["center"])
+        self.assertLess(top_by_alignment["center"], top_by_alignment["right"])
+
     def test_put_text_horizontal_rejects_unfittable_clipped_canvas(self):
         """Unfittable text must fail so its caller can request review, not return a clipped raster."""
         text = "This is a sentence that must wrap into multiple lines to fill the bubble without overflowing."

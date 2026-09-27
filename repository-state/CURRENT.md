@@ -1,6 +1,8 @@
 # Current state
 
-Last reviewed: 2026-09-26
+Last reviewed: 2026-09-27
+
+The behavior-preserving contract for OCR text-line merge, nested/adjacent free-text coalescing, layout ownership, hard placement constraints, and final raster validation is recorded in `repository-state/LAYOUT_AND_TEXT_MERGE_RULES.md`. Changes to those rules must update the contract and characterization tests together.
 
 ## Active architecture migration — behavior-preserving extraction
 - The standalone MangaStudio window now composes settings, translator-settings, queue, visual-test, pipeline, theme, and API mixins from `MangaStudio_Data/app/ui/main_window_*`; `TranslatorStudioApp` retains its original entry point and signals.
@@ -298,7 +300,7 @@ Manga Image Translator translates text in manga and other images through a pipel
 - The batch SSE stream sends changed full batch details to the Web Studio; loaded items update live without follow-up detail GETs, while REST detail reads occur on first expansion only.
 - Manga summary job lists and open summary progress now share an SSE stream; the server publishes changed snapshots and clients fetch the full summary only once the job reaches a terminal state.
 - Summary OCR holds detection, OCR, and text-line merge behind manga-wide stage barriers for all uncached pages; model inference still uses worker-sized batches, and a failed group falls back to the existing single-page path.
-- Summary progress records how many manga pages have completed the active detection, OCR, or text-line merge step, counting cached pages as reused work and pages with no detected text as processed; Jobs and the open summary view show the active step and this count.
+- Summary progress records how many manga pages have completed the active detection, OCR, or text-line merge step incrementally after each detection/OCR sub-batch and merged page, advances immediately to the next stage when a batched phase completes, and displays `X/Y pages done` across all three extraction steps in Jobs alongside the open summary view; dismissing or stopping a summary job clears any non-terminal `jobStatus` so dismissed jobs are never reported as queued.
 - Search Lab status and embedding progress also use a change-only SSE stream; explicit refresh still performs a one-time status read.
 - Search Lab's collection filter distinguishes indexed from unindexed manga; each manga shows summary/page coverage and can have its embeddings removed without deleting Gallery content. Removal is blocked while an embedding job is active.
 - Dropping or uploading loose image files loads them directly into the studio cards list without intermediate staging, while multi-archive drops retain volume arrangement before extraction. Manga detail gallery supports smooth proximity-accelerated vertical auto-scrolling when dragging pages near viewport edges during page reordering. Selecting multiple pages or multiple manga cards supports batch deletion with confirmation prompts and atomic cache and state invalidation.

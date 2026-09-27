@@ -79,27 +79,25 @@ async def run_summary_ocr_job(
                     last_progress = 0
 
                     async def report_stage(
-                        pipeline_stage: str,
-                        *,
-                        page_number: int,
-                        batch_position: int | None = None,
-                        batch_size: int = 1,
-                        batch_number: int = 0,
-                        batch_count: int = 1,
+                        pipeline_stage: str, *, page_number: int, batch_position: int | None = None,
+                        batch_size: int = 1, batch_number: int = 0, batch_count: int = 1,
                     ) -> None:
                         nonlocal last_progress
                         stage_info = {
-                            "detection": ("detecting", 0, "Detecting text"),
-                            "ocr": ("ocr", 1 / 3, "Reading OCR"),
-                            "textline_merge": ("textline_merge", 2 / 3, "Merging text lines"),
+                            "detection": ("detecting", 0, "Detecting text", "ocr", "Reading OCR"),
+                            "ocr": ("ocr", 1 / 3, "Reading OCR", "textline_merge", "Merging text lines"),
+                            "textline_merge": ("textline_merge", 2 / 3, "Merging text lines", None, None),
                         }.get(pipeline_stage)
                         if stage_info is None:
                             return
-                        stage, offset, label = stage_info
+                        stage, offset, label, next_stage, next_label = stage_info
                         pending_passed_count = pending_positions[page_number - 1]
                         if batch_position is None:
                             pending_passed_count -= 1
                         passed_count = cached_page_count + pending_passed_count
+                        if batch_position is not None and batch_position >= batch_size and next_stage is not None:
+                            stage, label, passed_count = next_stage, next_label, cached_page_count
+                        message = f"{label} · {passed_count}/{page_count} pages"
                         if batch_position is None:
                             progress = round(((page_number - 1 + offset) / max(1, page_count)) * 70)
                         else:
@@ -110,19 +108,9 @@ async def run_summary_ocr_job(
                             )
                         last_progress = max(last_progress, progress)
                         await _update_summary_job_for(
-                            store,
-                            group_value,
-                            clean_title,
-                            "generating",
-                            None,
-                            stage,
-                            last_progress,
-                            label,
-                            page_number,
-                            page_count,
-                            pages_with_text,
-                            extraction_required,
-                            stage_passed_count=passed_count,
+                            store, group_value, clean_title, "generating", None, stage,
+                            last_progress, message, page_number, page_count, pages_with_text,
+                            extraction_required, stage_passed_count=passed_count,
                         )
 
                     async def wait_if_paused(page_number: int) -> None:
@@ -184,6 +172,7 @@ async def run_summary_ocr_job(
                             ocr_errors[page["name"]] = str(exc)
 
                         last_progress = max(last_progress, round(current_page / max(1, page_count) * 70))
+                        passed_count = cached_page_count + pending_positions[index]
                         await _update_summary_job_for(
                             store,
                             group_value,
@@ -192,12 +181,12 @@ async def run_summary_ocr_job(
                             None,
                             "textline_merge",
                             last_progress,
-                            "Merging text lines",
+                            f"Merging text lines · {passed_count}/{page_count} pages",
                             current_page,
                             page_count,
                             pages_with_text,
                             extraction_required,
-                            stage_passed_count=cached_page_count + pending_positions[index],
+                            stage_passed_count=passed_count,
                         )
 
                     batch_extractor = getattr(active_worker, "extract_text_batch", None)

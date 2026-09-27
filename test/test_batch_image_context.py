@@ -66,6 +66,7 @@ class BatchImageContextTest(unittest.TestCase):
             progress = []
 
             async def on_progress(stage, index):
+                events.append(f"progress:{stage}:{index}")
                 progress.append((stage, index))
 
             contexts = await translator.extract_text_batch(
@@ -74,7 +75,23 @@ class BatchImageContextTest(unittest.TestCase):
                 on_progress=on_progress,
             )
 
-            self.assertEqual(events, ["detection", "ocr", "merge", "bubbles", "merge", "bubbles"])
+            self.assertEqual(
+                events,
+                [
+                    "detection",
+                    "progress:detection:0",
+                    "progress:detection:1",
+                    "ocr",
+                    "progress:ocr:0",
+                    "progress:ocr:1",
+                    "merge",
+                    "bubbles",
+                    "progress:textline_merge:0",
+                    "merge",
+                    "bubbles",
+                    "progress:textline_merge:1",
+                ],
+            )
             self.assertEqual(
                 progress,
                 [(stage, index) for stage in ("detection", "ocr", "textline_merge") for index in (0, 1)],

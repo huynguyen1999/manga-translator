@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from server.manga_summary import synopsis_status
+from server.manga_summary import dismiss_summary_payload, reconcile_summary_payload, synopsis_status
 from server.postgres_common import _json_dump, _json_load
 from server.series_repository import GroupNotFound
 
@@ -137,8 +137,7 @@ class SummaryRepository:
         if group_id is None:
             raise GroupNotFound("Manga group not found")
         value = await self.get_summary_payload(group_id) or {}
-        value["jobDismissed"] = True
-        await self.save_summary_payload(group_id, value)
+        await self.save_summary_payload(group_id, dismiss_summary_payload(value))
 
     async def reconcile_summary_jobs(self) -> None:
         if self.pool is None:
@@ -147,37 +146,13 @@ class SummaryRepository:
             """
             SELECT group_id, payload
             FROM manga_summaries
-            WHERE payload->>'jobStatus' IN ('generating', 'queued')
+            WHERE payload->>'jobStatus' IN ('generating', 'queued', 'paused')
             """
         )
         for row in rows:
             payload = _json_load(row["payload"], {})
-            if not isinstance(payload, dict):
-                continue
-            status = payload.get("jobStatus")
-            if status == "generating":
-                if payload.get("summary"):
-                    payload["jobStatus"] = "ready"
-                    payload["jobStage"] = "complete"
-                    payload["jobProgress"] = 100
-                    payload["jobMessage"] = None
-                else:
-                    payload["jobStatus"] = "queued"
-                    payload["jobProgress"] = 0
-                    payload["jobMessage"] = "Waiting for an available worker"
-                    payload["jobStage"] = (
-                        "detecting" if payload.get("jobExtractionRequired", True) else "concatenating"
-                    )
-                payload["jobUpdatedAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
+            if isinstance(payload, dict) and reconcile_summary_payload(payload):
                 await self.save_summary_payload(str(row["group_id"]), payload)
-            elif status == "queued":
-                if payload.get("summary") and not payload.get("jobRegenerate") and not payload.get("jobRefreshText"):
-                    payload["jobStatus"] = "ready"
-                    payload["jobStage"] = "complete"
-                    payload["jobProgress"] = 100
-                    payload["jobMessage"] = None
-                    payload["jobUpdatedAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
-                    await self.save_summary_payload(str(row["group_id"]), payload)
 
     async def list_runnable_summary_jobs(self) -> list[dict[str, Any]]:
         if self.pool is None:

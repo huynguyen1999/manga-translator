@@ -165,7 +165,8 @@ async def execute_retry_stage(
                 )
             elif not defer_bubble_detection:
                 await translator._detect_speech_bubbles(config, ctx, report_progress=False)
-            if not defer_bubble_detection:
+            if (bubble_data is not None or not defer_bubble_detection
+                    or not config.bubble_detection.enabled):
                 from ..rendering.paragraph_coalescing import coalesce_free_text_regions
                 ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
             ctx._bubble_detection_done = True
