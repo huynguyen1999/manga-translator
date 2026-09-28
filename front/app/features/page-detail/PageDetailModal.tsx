@@ -73,15 +73,14 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
 }) => {
   const [zoomLevel, setZoomLevel] = useState(1);
   const [viewMode, setViewMode] = useState<PageDetailViewMode>("translated");
-  const [showBubbleBoxes, setShowBubbleBoxes] = useState(image.sourceType !== "original");
+  const [showBubbleBoxes, setShowBubbleBoxes] = useState(false), [showReviewBubbles, setShowReviewBubbles] = useState(image.sourceType !== "original");
   const [showOriginalRegions, setShowOriginalRegions] = useState(false);
   const [isHoldingOriginal, setIsHoldingOriginal] = useState(false);
   const [copyLinkStatus, setCopyLinkStatus] = useState<"copied" | "error" | null>(null);
   const [isCompactViewport, setIsCompactViewport] = useState(() =>
     typeof window !== "undefined" && window.matchMedia("(max-width: 640px)").matches,
   );
-  const [bubbleCount, setBubbleCount] = useState<number | null>(null);
-  const [originalRegionCount, setOriginalRegionCount] = useState<number | null>(null);
+  const [bubbleCount, setBubbleCount] = useState<number | null>(null), [reviewBubbleCount, setReviewBubbleCount] = useState<number | null>(null), [originalRegionCount, setOriginalRegionCount] = useState<number | null>(null);
 
   const [isRetrying, setIsRetrying] = useState(false);
   const [retryStatus, setRetryStatus] = useState<"queued" | "error" | null>(null);
@@ -128,11 +127,10 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   useEffect(() => {
     setZoomLevel(1);
     setViewMode(image.sourceType === "original" ? "original" : "translated");
-    setShowBubbleBoxes(image.sourceType !== "original");
+    setShowBubbleBoxes(false); setShowReviewBubbles(image.sourceType !== "original");
     setShowOriginalRegions(false);
     setIsHoldingOriginal(false);
-    setBubbleCount(null);
-    setOriginalRegionCount(null);
+    setBubbleCount(null); setReviewBubbleCount(null); setOriginalRegionCount(null);
     setIsRetrying(false);
     setRetryStatus(null);
     setIsRerendering(false);
@@ -208,8 +206,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
     image.hasTextRegions || image.textRegionsUrl || (bubbleCount !== null && bubbleCount > 0),
   );
   const handleTextRegionsLoaded = useCallback((blocks: EditableTextBlock[]) => {
-    setBubbleCount(blocks.length);
-    setOriginalRegionCount(countOriginalTextRegions(blocks));
+    setBubbleCount(blocks.length); setReviewBubbleCount(blocks.filter((block) => block.review_required).length); setOriginalRegionCount(countOriginalTextRegions(blocks));
   }, []);
   const sourceSize = pipelineManifest?.source?.width && pipelineManifest.source.height ? { width: pipelineManifest.source.width, height: pipelineManifest.source.height } : null;
   const upscaleRatio = Number.parseFloat(String(stepSettings.upscaling?.ratio ?? "1"));
@@ -245,6 +242,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
           setShowBubbleBoxes={setShowBubbleBoxes}
           showBubbleBoxes={showBubbleBoxes}
           bubbleCount={bubbleCount}
+          setShowReviewBubbles={setShowReviewBubbles} showReviewBubbles={showReviewBubbles} reviewBubbleCount={reviewBubbleCount}
           setShowOriginalRegions={setShowOriginalRegions}
           showOriginalRegions={showOriginalRegions}
           originalRegionCount={originalRegionCount}
@@ -326,7 +324,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
                 textRegionsUrl={image.textRegionsUrl}
                 viewMode={viewMode}
                 onViewModeChange={setViewMode}
-                showBubbleBoxes={showBubbleBoxes}
+                showBubbleBoxes={showBubbleBoxes} showReviewBubbles={showReviewBubbles}
                 showBubbleRegions={viewMode === "speech-bubbles"}
                 showOriginalRegions={showOriginalRegions}
                 onToggleBubbleBoxes={setShowBubbleBoxes}

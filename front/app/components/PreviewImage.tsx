@@ -22,6 +22,7 @@ interface PreviewImageProps {
   textRegionsUrl?: string | null;
   textRegions?: EditableTextBlock[] | null;
   showBubbleBoxes?: boolean;
+  showReviewBubbles?: boolean;
   showBubbleRegions?: boolean;
   showPanels?: boolean;
   showOriginalRegions?: boolean;
@@ -84,6 +85,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     textRegionsUrl,
     textRegions,
     showBubbleBoxes: controlledShowBubbleBoxes,
+    showReviewBubbles = false,
     showBubbleRegions = false,
     showPanels: controlledShowPanels,
     showOriginalRegions = false,
@@ -356,6 +358,11 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
 
     // Load text regions from prop or URL/folder
     const effectiveBlocks = textRegions ?? internalTextRegions;
+    const overlayBlocks = showBubbleBoxes
+      ? effectiveBlocks
+      : showReviewBubbles
+      ? effectiveBlocks.filter((block) => block.review_required)
+      : [];
     const fallbackOriginalTextLines = useMemo<DetectedRegionLine[]>(() => {
       return effectiveBlocks.flatMap((block) => {
         const lines = block.lines && block.lines.length > 0
@@ -1007,7 +1014,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
         </div>
 
         {/* Text Region Overlays & Interactive Panel / Bubble Inspector Layer */}
-        {(showBubbleRegions || showPanels || showBubbleBoxes || (showOriginalRegions && hasOriginalRegionData)) && imageRect && imageCoordinateSize && imageCoordinateSize.width > 0 && imageCoordinateSize.height > 0 && (
+        {(showBubbleRegions || showPanels || overlayBlocks.length > 0 || (showOriginalRegions && hasOriginalRegionData)) && imageRect && imageCoordinateSize && imageCoordinateSize.width > 0 && imageCoordinateSize.height > 0 && (
           <div
             className="absolute pointer-events-none z-20"
             style={{
@@ -1037,8 +1044,8 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
               onHoverRegionIndex={setHoveredRegionIndex}
               selectedRegionIndex={selectedRegionIndex}
               onSelectRegionIndex={setSelectedRegionIndex}
-              showBubbleBoxes={showBubbleBoxes}
-              effectiveBlocks={effectiveBlocks}
+              showBubbleBoxes={overlayBlocks.length > 0}
+              effectiveBlocks={overlayBlocks}
               selectedBlockId={selectedBlockId}
               onSelectBlockId={setSelectedBlockId}
               copiedKind={copiedKind}

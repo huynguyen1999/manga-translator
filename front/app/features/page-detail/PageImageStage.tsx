@@ -22,6 +22,7 @@ interface PageImageStageProps {
   viewMode: "split" | "translated" | "inpainted" | "original" | "speech-bubbles";
   onViewModeChange: (mode: "split" | "translated" | "inpainted" | "original") => void;
   showBubbleBoxes: boolean;
+  showReviewBubbles?: boolean;
   showBubbleRegions: boolean;
   showOriginalRegions: boolean;
   onToggleBubbleBoxes: (show: boolean) => void;
@@ -33,7 +34,7 @@ interface PageImageStageProps {
 export const PageImageStage = React.memo<PageImageStageProps>(({
   imageId, zoomLevel, isOriginal, originalUrl, originalFullUrl, resultUrl, resultPlaceholder,
   resultFullUrl, inpaintedUrl, inpaintedFullUrl, coordinateSize, workingCoordinateSize, useFullResolution, folder,
-  textRegionsUrl, viewMode, onViewModeChange, showBubbleBoxes, showBubbleRegions, showOriginalRegions,
+  textRegionsUrl, viewMode, onViewModeChange, showBubbleBoxes, showReviewBubbles, showBubbleRegions, showOriginalRegions,
   onToggleBubbleBoxes, isHoldingOriginal, onTextRegionsLoaded, showComparisonControls,
 }) => (
   <RenderProfiler id="PageDetailImageStage">
@@ -58,6 +59,7 @@ export const PageImageStage = React.memo<PageImageStageProps>(({
         viewMode={isOriginal ? "original" : viewMode === "speech-bubbles" ? "original" : viewMode}
         onViewModeChange={isOriginal ? undefined : onViewModeChange}
         showBubbleBoxes={showBubbleBoxes}
+        showReviewBubbles={showReviewBubbles}
         showBubbleRegions={showBubbleRegions}
         showOriginalRegions={showOriginalRegions}
         onToggleBubbleBoxes={onToggleBubbleBoxes}

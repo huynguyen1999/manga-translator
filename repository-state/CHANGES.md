@@ -1496,9 +1496,9 @@ Record new features and large changes here. Keep implementation detail in code, 
 
 - Reused source ownership maps for damage assignment, limited scope dilation to its padded source region, and shared ink measurements between scoring and candidate diagnostics. The measured maps and masks preserve their existing ownership and placement semantics.
 
-## 2026-09-29 — Show speech-bubble boxes in Page Detail by default
+## 2026-09-29 — Highlight only review-required bubbles in Page Detail
 
-- Translated results now open with the Bubbles overlay enabled, including when navigating between pages. Original-only pages keep it disabled so detected-text overlays remain opt-in.
+- Translated results open with only review-required bubbles highlighted; the full Bubbles overlay remains opt-in. The same behavior applies in Translation Jobs because they use Page Detail.
 
 ## 2026-09-29 — Download original images from batch rows
 
