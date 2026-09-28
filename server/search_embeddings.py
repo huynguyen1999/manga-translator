@@ -7,25 +7,16 @@ import os
 import uuid
 from pathlib import Path
 
-TEXT_MODEL = "BAAI/bge-small-en-v1.5"
-TEXT_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
-QWEN_TEXT_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-QWEN_TEXT_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
-GTE_TEXT_MODEL = "thenlper/gte-base"
-GTE_TEXT_REVISION = "8bd7d0ccf716162b629db940a086503c6a06419a"
-IMAGE_MODEL = "google/siglip-base-patch16-256"
-IMAGE_REVISION = "b078df89e446d623010d890864d4207fe6399f61"
-PROFILE = "bge-small-siglip-base-v1"
+TEXT_MODEL = "BAAI/bge-base-en-v1.5"
+TEXT_REVISION = "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a"
+RERANK_MODEL = "mixedbread-ai/mxbai-rerank-xsmall-v1"
+RERANK_REVISION = "b5c6e9da73abc3711f593f705371cdbe9e0fe422"
+PROFILE = "bge-base-siglip-base-v1"
 COLLECTION = "manga_search_v1"
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
-VECTOR_NAMES = {"summary": "summary_dense", "image": "page_image"}
-DIMENSIONS = {"summary": 384, "image": 768}
-TEXT_MODEL_OPTIONS = {
-    "bge": (TEXT_MODEL, TEXT_REVISION, 384),
-    "qwen3": (QWEN_TEXT_MODEL, QWEN_TEXT_REVISION, 1024),
-    "gte": (GTE_TEXT_MODEL, GTE_TEXT_REVISION, 768),
-}
-QWEN_QUERY_INSTRUCTION = "Given a manga search query, retrieve relevant manga summaries that match its meaning."
+VECTOR_NAMES = {"summary": "summary_dense"}
+DIMENSIONS = {"summary": 768}
+CANDIDATE_LIMIT = 50
 
 
 def fingerprint(value: str | bytes) -> str:
@@ -74,43 +65,47 @@ def validate_vector(vector, dimension):
     return [x / norm for x in vector]
 
 
-def rank_results(summary, images, mode, limit=20):
-    """Inputs are grouped by manga already. Similarities never cross vector spaces."""
-    scores = {}
-    for modality, groups in (("summary", summary), ("image", images)):
-        if mode != "combined" and mode != modality:
+def rank_results(summary, limit=CANDIDATE_LIMIT):
+    """Order grouped summary matches deterministically by highest chunk cosine score."""
+    ordered = sorted(summary.items(), key=lambda item: (-item[1][0]["score"], item[0]))
+    return [(group_id, float(hits[0]["score"])) for group_id, hits in ordered[:limit]]
+
+
+def rerank_candidates(candidates, scores, limit=20, min_score=None):
+    """Attach reranker scores to Stage 1 candidates, filter by min_score, and sort deterministically."""
+    if len(candidates) != len(scores):
+        raise ValueError("Candidate and rerank score counts must match")
+    scored = []
+    for idx, (item, rerank) in enumerate(zip(candidates, scores), 1):
+        initial_rank = item.get("rank", idx)
+        score = float(rerank["score"])
+        logit = float(rerank["logit"])
+        if not (math.isfinite(score) and math.isfinite(logit)):
+            raise ValueError("Reranker returned an invalid score")
+        if min_score is not None and score < min_score:
             continue
-        ordered = sorted(groups.items(), key=lambda item: (-item[1][0]["score"], item[0]))
-        for rank, (group_id, hits) in enumerate(ordered, 1):
-            scores[group_id] = scores.get(group_id, 0) + (
-                1 / (60 + rank) if mode == "combined" else hits[0]["score"]
-            )
-    return [(group_id, score) for group_id, score in sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:limit]]
-
-
-def prepare_image(path: Path):
-    from PIL import Image, ImageOps
-
-    with Image.open(path) as original:
-        image = ImageOps.exif_transpose(original).convert("RGB")
-        return ImageOps.pad(image, (256, 256), method=Image.Resampling.LANCZOS, color="white")
+        scored.append({**item, "initialRank": initial_rank, "rerankScore": score, "rerankLogit": logit})
+    scored.sort(key=lambda row: (
+        -row["rerankScore"],
+        -row["rerankLogit"],
+        -(row.get("summarySimilarity") if row.get("summarySimilarity") is not None else row.get("score", 0.0)),
+        row.get("groupId") or row.get("id") or "",
+    ))
+    return [{**row, "rank": rank, "rankDelta": row["initialRank"] - rank}
+            for rank, row in enumerate(scored[:limit], 1)]
 
 
 class SearchEncoders:
     """Production calls run on the shared model executor; local tools use it directly."""
 
-    def __init__(self, device=None, text_model="bge"):
-        if text_model not in TEXT_MODEL_OPTIONS:
-            raise ValueError(f"Unknown text model: {text_model}")
+    def __init__(self, device=None):
         self.models = {}
         self.processors = {}
         self.device = device
-        self.text_model = text_model
-        self.text_dimension = TEXT_MODEL_OPTIONS[text_model][2]
 
     def _load(self, modality):
         import torch
-        from transformers import AutoModel, AutoProcessor, AutoTokenizer
+        from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
 
         if self.device is None:
             if torch.cuda.is_available():
@@ -120,54 +115,56 @@ class SearchEncoders:
             else:
                 self.device = "cpu"
         if modality not in self.models:
-            name, revision, _ = (TEXT_MODEL_OPTIONS[self.text_model] if modality == "summary"
-                                 else (IMAGE_MODEL, IMAGE_REVISION, None))
-            loader = AutoTokenizer if modality == "summary" else AutoProcessor
             cache = os.getenv("MANGA_SEARCH_MODEL_CACHE", str(Path(__file__).resolve().parents[1] / "models" / "search"))
-            options = {"padding_side": "left"} if modality == "summary" and self.text_model == "qwen3" else {}
-            self.processors[modality] = loader.from_pretrained(name, revision=revision, cache_dir=cache, **options)
-            self.models[modality] = AutoModel.from_pretrained(name, revision=revision, cache_dir=cache).eval().to(self.device)
+            if modality == "summary":
+                self.processors[modality] = AutoTokenizer.from_pretrained(TEXT_MODEL, revision=TEXT_REVISION, cache_dir=cache)
+                self.models[modality] = AutoModel.from_pretrained(TEXT_MODEL, revision=TEXT_REVISION, cache_dir=cache).eval().to(self.device)
+            elif modality == "rerank":
+                self.processors[modality] = AutoTokenizer.from_pretrained(RERANK_MODEL, revision=RERANK_REVISION, cache_dir=cache)
+                self.models[modality] = AutoModelForSequenceClassification.from_pretrained(
+                    RERANK_MODEL, revision=RERANK_REVISION, cache_dir=cache
+                ).eval().to(self.device)
+            else:
+                raise ValueError(f"Unsupported search modality: {modality}")
         return self.models[modality], self.processors[modality]
 
     def encode(self, modality, values, query=False):
         import torch
 
-        model, processor = self._load(modality)
-        if modality == "summary":
-            if query and self.text_model == "qwen3":
-                texts = [f"Instruct: {QWEN_QUERY_INSTRUCTION}\nQuery: {value}" for value in values]
-            elif query and self.text_model == "bge":
-                texts = [QUERY_PREFIX + value for value in values]
-            else:
-                texts = values
-            for value in texts:
-                validate_query(value, processor, 512)
-            inputs = processor(texts, padding=True, truncation=False, return_tensors="pt").to(self.device)
-        elif query:
-            for value in values:
-                validate_query(value, processor.tokenizer, 64)
-            inputs = processor(text=values, padding="max_length", max_length=64, truncation=False, return_tensors="pt").to(self.device)
-        else:
-            inputs = processor(images=[prepare_image(Path(value)) for value in values], return_tensors="pt").to(self.device)
+        if modality != "summary":
+            raise ValueError(f"Unsupported encoding modality: {modality}")
+        model, processor = self._load("summary")
+        texts = [QUERY_PREFIX + value if query else value for value in values]
+        for value in texts:
+            validate_query(value, processor, 512)
+        inputs = processor(texts, padding=True, truncation=False, return_tensors="pt").to(self.device)
         with torch.inference_mode():
-            if modality == "summary":
-                hidden = model(**inputs).last_hidden_state
-                if self.text_model == "qwen3":
-                    features = hidden[:, -1]
-                elif self.text_model == "gte":
-                    mask = inputs["attention_mask"].unsqueeze(-1)
-                    features = (hidden * mask).sum(dim=1) / mask.sum(dim=1)
-                else:
-                    features = hidden[:, 0]
-            elif query:
-                features = model.get_text_features(**inputs)
-            else:
-                features = model.get_image_features(**inputs)
+            features = model(**inputs).last_hidden_state[:, 0]
             if not isinstance(features, torch.Tensor):
                 features = features.pooler_output
             vectors = features.float().cpu().tolist()
-        dimension = self.text_dimension if modality == "summary" else DIMENSIONS[modality]
-        return [validate_vector(vector, dimension) for vector in vectors]
+        return [validate_vector(vector, DIMENSIONS["summary"]) for vector in vectors]
+
+    def rerank(self, query: str, passages: list[str], batch_size: int = 8) -> list[dict]:
+        import torch
+
+        if not passages:
+            return []
+        model, tokenizer = self._load("rerank")
+        validate_query(query, tokenizer, 512)
+        results = []
+        for offset in range(0, len(passages), batch_size):
+            batch = passages[offset:offset + batch_size]
+            pairs = [[query, passage or ""] for passage in batch]
+            inputs = tokenizer(pairs, padding=True, truncation=True, max_length=512, return_tensors="pt").to(self.device)
+            with torch.inference_mode():
+                logits = model(**inputs).logits.squeeze(-1).float().cpu()
+                if logits.ndim == 0:
+                    logits = logits.unsqueeze(0)
+                probs = torch.sigmoid(logits)
+            for prob, logit in zip(probs.tolist(), logits.tolist()):
+                results.append({"score": float(prob), "logit": float(logit)})
+        return results
 
     def chunks(self, text):
         _, tokenizer = self._load("summary")

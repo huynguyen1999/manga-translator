@@ -373,6 +373,8 @@ class TranslatorConfig(BaseModel):
     """Language translator to use"""
     target_lang: str = 'ENG' #todo: validate VALID_LANGUAGES #todo: convert to enum
     """Destination language"""
+    draft_translator: Optional[Translator] = None
+    """First draft translator to use in professional mode (defaults to main translator if unset)"""
     translation_quality: str = 'fast'
     """Translation workflow: fast or professional."""
     translation_batch_size: int = 20
@@ -406,6 +408,18 @@ class TranslatorConfig(BaseModel):
     
     _translator_gen = None
     _gpt_config = None
+
+    @field_validator("draft_translator", mode="before")
+    @classmethod
+    def _validate_draft_translator(cls, value: Any) -> Optional[Translator]:
+        if value in (None, "", "none"):
+            return None
+        if isinstance(value, str):
+            val = value.strip().lower()
+            if val in ("", "none"):
+                return None
+            return Translator(val)
+        return value
 
     @field_validator("translation_quality")
     @classmethod

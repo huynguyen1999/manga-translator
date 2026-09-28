@@ -30,6 +30,7 @@ import { createGalleryRenameActions } from '@/features/gallery/renameActions';
 import { createGalleryMoveActions } from '@/features/gallery/movePages';
 import { downloadGalleryImage, downloadMangaCbzArchive } from '@/features/gallery/downloads';
 import { applyGalleryEditorSave } from '@/features/gallery/editorSave';
+import { approveMangaReview } from '@/features/gallery/approveMangaReview';
 import { usePageDragAutoScroll } from '@/features/gallery/usePageDragAutoScroll';
 import { useGallerySelection } from '@/features/gallery/useGallerySelection';
 import { useGalleryPageModalRoutes } from '@/features/gallery/useGalleryPageModalRoutes';
@@ -101,7 +102,9 @@ interface ResultGalleryProps {
   galleryPageSize?: number;
   gallerySearch?: string;
   gallerySort?: GallerySort;
-  galleryStatus?: MangaStatusFilter;
+  galleryStatus?: MangaStatusFilter | string;
+  galleryMinPages?: number;
+  galleryMaxPages?: number;
   reviewOnly?: boolean;
   isLoading?: boolean;
   onDeleteImage?: (image: FinishedImage) => void;
@@ -110,6 +113,7 @@ interface ResultGalleryProps {
   onDeleteMangas?: (mangaList: Array<{ title: string; images: FinishedImage[] }>) => void | Promise<void>;
   onReorderMangaPages?: (groupId: string, pageIds: string[]) => Promise<void>;
   onRestoreBatchPages?: (groupId: string, title: string) => Promise<number>;
+  onApproveMangaReview?: (groupId: string, mangaTitle: string) => Promise<number>;
   onUpdateImage?: (image: FinishedImage) => void;
   onUpdateMangaTitle?: (pageIds: string[], newMangaTitle: string, oldMangaTitle?: string, groupId?: string, folders?: string[]) => void;
   onOpenPageView?: (folder: string) => void;
@@ -138,7 +142,8 @@ interface ResultGalleryProps {
   onGalleryPageSizeChange?: (pageSize: number) => void;
   onGallerySearchChange?: (search: string) => void;
   onGallerySortChange?: (sort: GallerySort) => void;
-  onGalleryStatusChange?: (status: MangaStatusFilter) => void;
+  onGalleryStatusChange?: (status: string) => void;
+  onGalleryPageRangeChange?: (minPages?: number, maxPages?: number) => void;
   onGalleryReviewChange?: (pending: boolean) => void;
 }
 
@@ -159,6 +164,8 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
   gallerySearch = '',
   gallerySort: requestedGallerySort = 'date-desc',
   galleryStatus,
+  galleryMinPages,
+  galleryMaxPages,
   reviewOnly = false,
   isLoading,
   onDeleteImage,
@@ -167,6 +174,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
   onDeleteMangas,
   onReorderMangaPages,
   onRestoreBatchPages,
+  onApproveMangaReview,
   onUpdateImage,
   onUpdateMangaTitle,
   onOpenPageView,
@@ -196,6 +204,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
   onGallerySearchChange,
   onGallerySortChange,
   onGalleryStatusChange,
+  onGalleryPageRangeChange,
   onGalleryReviewChange,
 }) => {
   const location = useLocation();
@@ -214,6 +223,8 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
     sortBy,
     setSortBy,
     statusFilter,
+    minPages,
+    maxPages,
     activeMangaFilter,
     setActiveMangaFilter,
     mangaSearchQuery,
@@ -221,11 +232,17 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
     setMangaSearchInput,
     viewMode,
     handleStatusFilterChange,
+    handleSourceChange,
+    toggleStatusFlag,
+    handlePageRangeChange,
+    handleClearFilters,
     closeMangaDetail,
     handleSearchSubmit,
   } = useGalleryFilters({
     requestedGallerySort,
     galleryStatus,
+    galleryMinPages,
+    galleryMaxPages,
     reviewOnly,
     selectedMangaTitle,
     gallerySearch,
@@ -233,6 +250,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
     onGalleryPageChange,
     onGallerySearchChange,
     onGalleryStatusChange,
+    onGalleryPageRangeChange,
     onGalleryReviewChange,
     onCloseMangaDetail,
   });
@@ -657,6 +675,46 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
     }
   };
 
+  const [isApprovingAllReviews, setIsApprovingAllReviews] = useState(false);
+  const handleApproveAllReviews = async () => {
+    if (!currentSingleGroup || isApprovingAllReviews) return;
+    setIsApprovingAllReviews(true);
+    try {
+      if (onApproveMangaReview) {
+        await onApproveMangaReview(currentSingleGroup.id, currentSingleGroup.title);
+      } else {
+        await approveMangaReview(currentSingleGroup.id, currentSingleGroup.title);
+      }
+      const nowIso = new Date().toISOString();
+      setMangaImages((prev) => {
+        const title = currentSingleGroup.title;
+        if (!prev[title]) return prev;
+        return {
+          ...prev,
+          [title]: prev[title].map((img) => ({ ...img, reviewStatus: 'approved' as const, reviewedAt: nowIso })),
+        };
+      });
+      if (reviewOnly) {
+        setMangaImages((prev) => ({ ...prev, [currentSingleGroup.title]: [] }));
+      }
+      if (onUpdateImage && currentSingleGroup.images) {
+        for (const img of currentSingleGroup.images) {
+          if (img.reviewStatus === 'pending') {
+            onUpdateImage({ ...img, reviewStatus: 'approved', reviewedAt: nowIso });
+          }
+        }
+      }
+      if (onSeriesChanged) {
+        void onSeriesChanged();
+      }
+    } catch (error) {
+      console.error('Failed to accept review pages:', error);
+      alert(error instanceof Error ? error.message : 'Could not accept review pages.');
+    } finally {
+      setIsApprovingAllReviews(false);
+    }
+  };
+
   useEffect(() => {
     setPageSort('order');
   }, [currentSingleGroup?.id]);
@@ -728,6 +786,8 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
     moveMangaSearch,
     activeMangaFilter,
     statusFilter,
+    minPages,
+    maxPages,
     onGallerySearchChange,
     totalMangaCount,
     requestedGalleryPageSize,
@@ -897,6 +957,8 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
       totalImagesCount,
       mangaSearchQuery,
       statusFilter,
+      minPages,
+      maxPages,
       activeMangaFilter,
       reviewOnly,
     })
@@ -918,7 +980,12 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
         reviewOnly={reviewOnly}
         onGalleryReviewChange={onGalleryReviewChange}
         statusFilter={statusFilter}
-        handleStatusFilterChange={handleStatusFilterChange}
+        minPages={minPages}
+        maxPages={maxPages}
+        handleSourceChange={handleSourceChange}
+        toggleStatusFlag={toggleStatusFlag}
+        handlePageRangeChange={handlePageRangeChange}
+        handleClearFilters={handleClearFilters}
         mangaSearchInput={mangaSearchInput}
         setMangaSearchInput={setMangaSearchInput}
         handleSearchSubmit={handleSearchSubmit}
@@ -994,6 +1061,8 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
             restoreBatchMessage={restoreBatchMessage}
             reviewOnly={reviewOnly}
             handleCardEdit={handleCardEdit}
+            handleApproveAllReviews={handleApproveAllReviews}
+            isApprovingAllReviews={isApprovingAllReviews}
           />
 
           {/* Bulk Selection Action Bar inside single manga view */}

@@ -20,11 +20,11 @@ const linesFrom = (value: unknown): Array<Array<[number, number]>> => {
   const rawLines = Array.isArray(value[0]) && Array.isArray(value[0][0]) ? value : [value];
   return rawLines.flatMap((rawLine) => {
     if (!Array.isArray(rawLine)) return [];
-    const points: Array<[number, number]> = rawLine.flatMap((point) => {
+    const points = rawLine.flatMap((point) => {
       if (!Array.isArray(point)) return [];
       const x = numberValue(point[0]);
       const y = numberValue(point[1]);
-      return x !== null && y !== null ? [[x, y]] : [];
+      return x !== null && y !== null ? [[x, y] as [number, number]] : [];
     });
     return points.length >= 3 ? [points] : [];
   });
@@ -52,12 +52,9 @@ const boundsFrom = (item: RawRegion): { x: number; y: number; width: number; hei
 
   const points = pointsFrom(item.pts ?? item.points ?? item.lines);
   if (points.length === 0) return null;
-  const xs = points.map(([x]) => x);
-  const ys = points.map(([, y]) => y);
-  const x = Math.min(...xs);
-  const y = Math.min(...ys);
-  const width = Math.max(...xs) - x;
-  const height = Math.max(...ys) - y;
+  const xs = points.map(([x]) => x), ys = points.map(([, y]) => y);
+  const x = Math.min(...xs), y = Math.min(...ys);
+  const width = Math.max(...xs) - x, height = Math.max(...ys) - y;
   return width > 0 && height > 0 ? { x, y, width, height } : null;
 };
 
@@ -85,25 +82,19 @@ export const parseTextRegions = (data: unknown): EditableTextBlock[] => {
       layout_segments: Array.isArray(item.layout_segments)
         ? item.layout_segments.flatMap((rawSegment) => {
             if (!rawSegment || typeof rawSegment !== "object") return [];
-            const segment = rawSegment as RawRegion;
-            const segmentBounds = boundsFrom(segment);
-            return segmentBounds
-              ? [{
-                  ...segmentBounds,
-                  text: String(segment.text ?? ""),
-                  font_size: numberValue(segment.font_size) ?? undefined,
-                  rendered_png: typeof segment.rendered_png === "string" ? segment.rendered_png : null,
-                  positioned_lines: Array.isArray(segment.positioned_lines)
-                    ? segment.positioned_lines.flatMap((rawLine) => {
-                        if (!rawLine || typeof rawLine !== "object") return [];
-                        const line = rawLine as RawRegion;
-                        return [{ text: String(line.text ?? ""), x: numberValue(line.x) ?? 0,
-                                  y: numberValue(line.y) ?? 0 }];
-                      }) : undefined,
-                }]
-              : [];
-          })
-        : undefined,
+            const segmentBounds = boundsFrom(rawSegment as RawRegion);
+            return segmentBounds ? [{
+              ...segmentBounds,
+              text: String((rawSegment as RawRegion).text ?? ""),
+              font_size: numberValue((rawSegment as RawRegion).font_size) ?? undefined,
+              rendered_png: typeof (rawSegment as RawRegion).rendered_png === "string" ? (rawSegment as RawRegion).rendered_png as string : null,
+              positioned_lines: Array.isArray((rawSegment as RawRegion).positioned_lines)
+                ? ((rawSegment as RawRegion).positioned_lines as unknown[]).flatMap((rawLine: unknown) => {
+                    if (!rawLine || typeof rawLine !== "object") return [];
+                    return [{ text: String((rawLine as RawRegion).text ?? ""), x: numberValue((rawLine as RawRegion).x) ?? 0, y: numberValue((rawLine as RawRegion).y) ?? 0 }];
+                  }) : undefined,
+            }] : [];
+          }) : undefined,
       lines: linesFrom(item.lines),
       original_text: typeof item.original_text === "string" ? item.original_text : "",
       translation: String(item.translation ?? ""),

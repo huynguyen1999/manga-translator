@@ -1,10 +1,8 @@
 import { apiUrl } from './api';
 
-export type SearchMode = 'summary' | 'image' | 'combined';
 export type SearchStatusFilter = 'all' | 'indexed' | 'not-indexed' | 'summarized' | 'not-summarized';
 export interface SearchManga {
-  id: string; title: string; pageCount: number; originalCount: number; indexedPages: number;
-  outdatedPages: number; summaryAvailable: boolean; summaryStale: boolean;
+  id: string; title: string; pageCount: number; summaryAvailable: boolean; summaryStale: boolean;
   summaryIndexed: boolean; summaryOutdated: boolean; outdated: boolean; partial: boolean;
   coverUrl?: string | null;
 }
@@ -15,22 +13,24 @@ export interface SearchJob {
 }
 export interface SearchStatus {
   available: boolean; error: string | null; device: string; profile: string;
-  models: { summary: string; image: string }; jobs: SearchJob[];
+  models: { summary: string; reranker: string }; jobs: SearchJob[];
   metrics: { embeddingSeconds: number; embeddedItems: number };
 }
-export interface SearchResult {
+export interface SearchInitialResult {
   rank: number; groupId: string; title: string; summarySimilarity: number | null;
-  imageSimilarity: number | null; combinedScore: number | null; excerpt: string | null;
-  readerUrl: string; coverage: SearchManga;
-  pages: { pageId: string; pageNumber: number; similarity: number; imageUrl: string; readerUrl: string }[];
+  excerpt: string | null; readerUrl: string; coverage: SearchManga;
+}
+export interface SearchResult extends SearchInitialResult {
+  initialRank: number; rankDelta: number; rerankScore: number; rerankLogit: number;
 }
 export interface SearchResponse {
-  results: SearchResult[]; mode: SearchMode; query: string; elapsedMs: number;
-  partial: boolean; indexing: boolean; profile: string;
-  coverage: { manga: number; pages: number; indexedPages: number; indexedSummaries: number };
+  results: SearchResult[]; initialResults: SearchInitialResult[]; query: string; minScore: number | null;
+  elapsedMs: number; embeddingMs: number; rerankMs: number; partial: boolean; indexing: boolean;
+  profile: string; coverage: { manga: number; indexedSummaries: number };
 }
 
 export const formatSimilarity = (score: number | null) => score === null ? 'Not indexed' : score.toFixed(4);
+export const formatRankDelta = (delta: number, initialRank: number) => delta > 0 ? `↑ +${delta} (from #${initialRank})` : delta < 0 ? `↓ ${delta} (from #${initialRank})` : `= #${initialRank}`;
 export const isActiveSearchJob = (job: SearchJob) => job.status === 'queued' || job.status === 'running';
 export const finishedSearchItems = (job: SearchJob) => job.completed + job.unchanged + job.skipped + job.failed;
 

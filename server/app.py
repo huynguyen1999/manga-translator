@@ -209,17 +209,14 @@ def create_app(runtime) -> FastAPI:
     app.include_router(runtime._manga_router)
 
     runtime._manga_management_router, management_exports = create_manga_management_router(
-        runtime._postgres,
-        lambda: runtime.RESULT_ROOT,
-        runtime._reorder_file_backed_pages,
-        runtime._update_file_backed_meta,
-        runtime.final_file,
-        runtime._invalidate_meta_cache,
-        runtime.rename_summary,
-        runtime.remove_summary,
+        runtime._postgres, lambda: runtime.RESULT_ROOT,
+        runtime._reorder_file_backed_pages, runtime._update_file_backed_meta,
+        runtime.final_file, runtime._invalidate_meta_cache,
+        runtime.rename_summary, runtime.remove_summary,
+        lambda folder, needs_review: runtime._sync_batch_review(folder, needs_review),
     )
     _bind(runtime, management_exports, (
-        "reorder_manga_pages", "update_meta", "delete_manga_group_endpoint",
+        "reorder_manga_pages", "update_meta", "delete_manga_group_endpoint", "approve_all_manga_review",
     ))
     app.include_router(runtime._manga_management_router)
 

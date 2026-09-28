@@ -48,6 +48,21 @@ export function getConfidenceStyle(conf: number | null | undefined) {
   return { stroke: "#ef4444", fill: "#ef4444", dot: "bg-rose-400", tier: "low" };
 }
 
+export function getDetectionPaintOrder(regions: Pick<DetectedRegionLine, "points">[]): number[] {
+  const area = (points: Array<[number, number]>) => {
+    if (points.length < 3) return 0;
+    return Math.abs(points.reduce((sum, [x, y], index) => {
+      const [nextX, nextY] = points[(index + 1) % points.length];
+      return sum + x * nextY - nextX * y;
+    }, 0));
+  };
+
+  return regions
+    .map((region, index) => ({ index, area: area(region.points) }))
+    .sort((a, b) => b.area - a.area || a.index - b.index)
+    .map(({ index }) => index);
+}
+
 export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
   ({
     file,
@@ -942,7 +957,8 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                   viewBox={`0 0 ${detectionCoordinateSize.width} ${detectionCoordinateSize.height}`}
                   preserveAspectRatio="none"
                 >
-                  {originalTextLines.map((region, lineIdx) => {
+                  {getDetectionPaintOrder(originalTextLines).map((lineIdx) => {
+                    const region = originalTextLines[lineIdx];
                     const line = region.points;
                     if (line.length < 3) return null;
                     const confStyle = getConfidenceStyle(region.confidence);

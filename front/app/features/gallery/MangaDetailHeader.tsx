@@ -7,6 +7,7 @@ import { mangaIdForTitle } from '@/utils/routeState';
 import { getStoredMangaReadProgress } from '@/utils/resultGallery';
 import { MangaGroupThumbnail } from './MangaGroupThumbnail';
 import { MangaReadBadge } from './MangaCard';
+import { MangaDetailReviewBanner } from './MangaDetailReviewBanner';
 import type { SummaryAvailabilityState } from './useMangaSummaryActions';
 
 type MangaDetailGroup = {
@@ -59,6 +60,8 @@ interface MangaDetailHeaderProps {
   restoreBatchMessage: string | null;
   reviewOnly: boolean;
   handleCardEdit: (image: FinishedImage) => void;
+  handleApproveAllReviews?: () => void | Promise<void>;
+  isApprovingAllReviews?: boolean;
 }
 
 export const MangaDetailHeader: React.FC<MangaDetailHeaderProps> = ({
@@ -91,6 +94,8 @@ export const MangaDetailHeader: React.FC<MangaDetailHeaderProps> = ({
   restoreBatchMessage,
   reviewOnly,
   handleCardEdit,
+  handleApproveAllReviews,
+  isApprovingAllReviews = false,
 }) => (
 <div className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-xs dark:border-zinc-800 dark:bg-zinc-900/70">
             <div className="flex min-w-0 flex-wrap items-start gap-4">
@@ -414,26 +419,16 @@ export const MangaDetailHeader: React.FC<MangaDetailHeaderProps> = ({
               </div>
             )}
 
-            {reviewOnly && currentSingleGroup.needsReviewCount > 0 && (
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-800/70 bg-amber-950/30 px-3.5 py-3 text-amber-100">
-                <div className="flex min-w-0 items-start gap-2.5">
-                  <Icon icon="carbon:warning-alt" className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
-                  <p className="text-xs leading-5 text-amber-200/85">
-                    {currentSingleGroup.needsReviewCount} flagged {currentSingleGroup.needsReviewCount === 1 ? 'page' : 'pages'} remain. Open a page, fix the highlighted bubble, then save to approve it.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const firstReviewPage = currentSingleGroup.images[0];
-                    if (firstReviewPage) handleCardEdit(firstReviewPage);
-                  }}
-                  disabled={!currentSingleGroup.images[0]}
-                  className="shrink-0 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-semibold text-amber-950 transition-colors hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
-                >
-                  Review next page
-                </button>
-              </div>
-            )}
+            <MangaDetailReviewBanner
+              needsReviewCount={currentSingleGroup.needsReviewCount}
+              hasImages={Boolean(currentSingleGroup.images[0])}
+              mangaTitle={currentSingleGroup.title}
+              onReviewNextPage={() => {
+                const firstReviewPage = currentSingleGroup.images.find((img) => img.reviewStatus === 'pending') || currentSingleGroup.images[0];
+                if (firstReviewPage) handleCardEdit(firstReviewPage);
+              }}
+              onAcceptAll={() => void handleApproveAllReviews?.()}
+              isAccepting={Boolean(isApprovingAllReviews)}
+            />
           </div>
 );

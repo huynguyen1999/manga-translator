@@ -66,7 +66,7 @@ const QueueItemRow: React.FC<{
                 ? apiUrl(`/result/${item.folder}/final.png`)
                 : (typeof item.result === "string" ? apiUrl(item.result) : (item.result || (item.folder ? apiUrl(`/result/${item.folder}/final.png`) : null))),
               undefined,
-              undefined,
+              "translated",
               {
                 folder: item.folder,
                 mangaTitle: item.mangaTitle,

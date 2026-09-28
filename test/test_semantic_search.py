@@ -10,12 +10,11 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from PIL import Image
 
 from server.search_api import search_router
 from server.search_embeddings import (
-    COLLECTION, DIMENSIONS, chunk_summary, fingerprint, point_id, prepare_image,
-    rank_results, validate_query, validate_vector,
+    COLLECTION, DIMENSIONS, chunk_summary, fingerprint, point_id,
+    rank_results, rerank_candidates, validate_query, validate_vector,
 )
 
 
@@ -41,40 +40,63 @@ class SearchCoreTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Shorten"):
             validate_query("word " * 64, Tokenizer(), 64)
 
-    def test_normalization_and_original_page_preprocessing(self):
+    def test_vector_normalization(self):
         self.assertEqual(validate_vector([3, 4], 2), [0.6, 0.8])
         for vector in ([0, 0], [float("nan"), 1], [1]):
             with self.assertRaises(ValueError):
                 validate_vector(vector, 2)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "input.png"
-            Image.new("RGB", (20, 80), "red").save(path)
-            image = prepare_image(path)
-            self.assertEqual(image.size, (256, 256))
-            self.assertEqual(image.getpixel((0, 0)), (255, 255, 255))
-            self.assertEqual(image.getpixel((128, 0)), (255, 0, 0))
 
-    def test_fusion_is_manga_level_and_deterministic(self):
-        summary = {"a": [{"score": 0.9}], "b": [{"score": 0.8}]}
-        images = {"a": [{"score": 0.5}, {"score": 0.4}], "c": [{"score": 0.9}]}
-        ranked = rank_results(summary, images, "combined")
-        self.assertEqual(ranked[0][0], "a")
-        self.assertAlmostEqual(ranked[0][1], 1 / 61 + 1 / 62)
-        self.assertEqual(rank_results(summary, images, "image")[0][0], "c")
+    def test_stage1_ranking_and_stage2_reranking(self):
+        summary = {"a": [{"score": 0.9}], "b": [{"score": 0.8}], "c": [{"score": 0.7}]}
+        ranked = rank_results(summary)
+        self.assertEqual([item[0] for item in ranked], ["a", "b", "c"])
+        self.assertAlmostEqual(ranked[0][1], 0.9)
+
+        candidates = [
+            {"rank": 1, "groupId": "a", "summarySimilarity": 0.9, "excerpt": "First"},
+            {"rank": 2, "groupId": "b", "summarySimilarity": 0.8, "excerpt": "Second"},
+            {"rank": 3, "groupId": "c", "summarySimilarity": 0.7, "excerpt": "Third"},
+        ]
+        scores = [
+            {"score": 0.25, "logit": -1.1},
+            {"score": 0.92, "logit": 2.4},
+            {"score": 0.60, "logit": 0.4},
+        ]
+        reranked = rerank_candidates(candidates, scores, limit=3)
+        self.assertEqual([row["groupId"] for row in reranked], ["b", "c", "a"])
+        self.assertEqual(reranked[0]["rank"], 1)
+        self.assertEqual(reranked[0]["initialRank"], 2)
+        self.assertEqual(reranked[0]["rankDelta"], 1)
+        self.assertEqual(reranked[2]["initialRank"], 1)
+        self.assertEqual(reranked[2]["rankDelta"], -2)
+
+        filtered = rerank_candidates(candidates, scores, limit=3, min_score=0.5)
+        self.assertEqual([row["groupId"] for row in filtered], ["b", "c"])
+
         self.assertEqual(point_id("a", "v", 0), point_id("a", "v", 0))
         self.assertNotEqual(point_id("a", "v", 0), point_id("a", "new", 0))
 
     def test_api_validation_and_unavailable_service(self):
         service = AsyncMock()
-        service.query.return_value = {"results": []}
+        service.query.return_value = {"results": [], "initialResults": []}
         service.db.manga.return_value = {"items": [], "total": 0}
         app = FastAPI()
         app.include_router(search_router(lambda: service), prefix="/api")
         client = TestClient(app)
-        for body in ({"query": " "}, {"query": "x", "groupIds": []}, {"query": "x", "mode": "unknown"}, {"query": "x", "limit": 51}):
+        for body in (
+            {"query": " "},
+            {"query": "x", "groupIds": []},
+            {"query": "x", "limit": 51},
+            {"query": "x", "minScore": 1.5},
+            {"query": "x", "minScore": -0.1},
+        ):
             self.assertEqual(client.post("/api/search/query", json=body).status_code, 422)
         self.assertEqual(client.post("/api/search/query", json={"query": " story "}).status_code, 200)
-        service.query.assert_awaited_once_with("story", "combined", None, 20)
+        service.query.assert_awaited_once_with("story", None, 20, None)
+
+        service.query.reset_mock()
+        self.assertEqual(client.post("/api/search/query", json={"query": "story", "minScore": 0.4, "limit": 5}).status_code, 200)
+        service.query.assert_awaited_once_with("story", None, 5, 0.4)
 
         self.assertEqual(client.get("/api/search/manga?status=invalid").status_code, 422)
         self.assertEqual(client.get("/api/search/manga?status=summarized").status_code, 200)
@@ -96,6 +118,7 @@ class FakeEncoders:
 
     def __init__(self):
         self.calls = 0
+        self.rerank_calls = 0
 
     def chunks(self, text):
         return chunk_summary(text, Tokenizer(), max_tokens=10, overlap=2)
@@ -103,6 +126,14 @@ class FakeEncoders:
     def encode(self, modality, values, query=False):
         self.calls += 1
         return [[1.0] + [0.0] * (DIMENSIONS[modality] - 1) for _ in values]
+
+    def rerank(self, query, passages, batch_size=8):
+        self.rerank_calls += 1
+        return [
+            {"score": 0.9 if query.lower() in (passage or "").lower() else 0.3,
+             "logit": 2.1 if query.lower() in (passage or "").lower() else -0.8}
+            for passage in passages
+        ]
 
     def unload(self):
         pass
@@ -128,7 +159,8 @@ class SearchIntegrationTest(unittest.IsolatedAsyncioTestCase):
         await pool.execute("""
             CREATE TABLE manga_groups(id text PRIMARY KEY,title text);
             CREATE TABLE pages(id text PRIMARY KEY,folder text,manga_group_id text,active boolean DEFAULT true,
-              original_name text,page_order int,metadata jsonb DEFAULT '{}',text_regions jsonb DEFAULT '[]');
+              original_name text,page_order int,original_sort_key text DEFAULT '',source_type text DEFAULT 'translated',
+              has_regions boolean DEFAULT false,metadata jsonb DEFAULT '{}',text_regions jsonb DEFAULT '[]');
             CREATE TABLE manga_summaries(id text PRIMARY KEY,group_id text UNIQUE,payload jsonb,updated_at timestamptz DEFAULT now());
         """)
         await pool.execute((Path(__file__).parents[1] / "server/migrations/012_semantic_search.sql").read_text())
@@ -150,7 +182,6 @@ class SearchIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 page_id = group_id + str(number)
                 folder = self.root / page_id
                 folder.mkdir()
-                Image.new("RGB", (20, 40), "red").save(folder / "input.png")
                 await pool.execute("INSERT INTO pages(id,folder,manga_group_id,original_name,page_order) VALUES($1,$1,$2,$1,$3)", page_id, group_id, number)
             snapshot = await self.store.summary_status(group_id)
             await self.store.save_summary_payload(group_id, {"summary": "A traveler makes an unexpected friend. " * 6,
@@ -176,47 +207,51 @@ class SearchIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_index_search_reuse_replace_and_delete(self):
         job = await self.embed()
-        self.assertEqual(job["completed"], 6)
+        self.assertEqual(job["completed"], 2)
         calls = self.encoder.calls
         again = await self.embed()
-        self.assertEqual(again["unchanged"], 6)
+        self.assertEqual(again["unchanged"], 2)
         self.assertEqual(self.encoder.calls, calls)
-        response = await self.service.query("a traveler", "combined")
+        response = await self.service.query("a traveler")
         self.assertEqual(len(response["results"]), 2)
+        self.assertEqual(len(response["initialResults"]), 2)
         self.assertEqual(response["results"][0]["rank"], 1)
-        self.assertEqual(len(response["results"][0]["pages"]), 2)
-        self.assertGreater(response["results"][0]["combinedScore"], 0)
-        selected = await self.service.query("a traveler", "image", ["b"])
+        self.assertEqual(response["results"][0]["initialRank"], 1)
+        self.assertEqual(response["results"][0]["rankDelta"], 0)
+        self.assertGreater(response["results"][0]["rerankScore"], 0)
+        self.assertGreater(response["results"][0]["summarySimilarity"], 0)
+        self.assertGreaterEqual(response["embeddingMs"], 0)
+        self.assertGreaterEqual(response["rerankMs"], 0)
+        selected = await self.service.query("a traveler", ["b"])
         self.assertEqual([result["groupId"] for result in selected["results"]], ["b"])
+        filtered = await self.service.query("nonexistent topic", min_score=0.5)
+        self.assertEqual(filtered["results"], [])
+        self.assertEqual(len(filtered["initialResults"]), 2)
         with self.assertRaisesRegex(ValueError, "no longer exist"):
-            await self.service.query("story", "combined", ["missing"])
+            await self.service.query("story", ["missing"])
         old = await self.service.db.source("summary:a")
         saved = await self.store.get_summary_payload("a")
         saved["summary"] = "A new story."
         await self.store.save_summary_payload("a", saved)
-        stale = await self.service.query("a traveler", "summary", ["a"])
+        stale = await self.service.query("a traveler", ["a"])
         self.assertTrue(stale["results"][0]["coverage"]["outdated"])
         self.assertIn("traveler", stale["results"][0]["excerpt"])
         await self.embed(["a"])
         self.assertFalse(await self.service.client.retrieve(self.collection, old["point_ids"]))
-        await self.store.pool.execute("UPDATE pages SET active=false WHERE id='a1'")
-        after_delete = await self.service.query("story", "image", ["a"])
-        self.assertEqual([page["pageId"] for page in after_delete["results"][0]["pages"]], ["a2"])
         await self.store.pool.execute("DELETE FROM manga_groups WHERE id='a'")
-        deleted = await self.service.query("story", "combined")
+        deleted = await self.service.query("story")
         self.assertEqual([result["groupId"] for result in deleted["results"]], ["b"])
 
-    async def test_missing_original_cancel_resume_and_restart(self):
-        (self.root / "a1/input.png").unlink()
-        Image.new("RGB", (20, 40), "blue").save(self.root / "a1/final.png")
+    async def test_missing_summary_cancel_resume_and_restart(self):
+        await self.store.pool.execute("DELETE FROM manga_summaries WHERE group_id='a'")
         job = await self.embed(["a"])
         self.assertEqual(job["skipped"], 1)
-        self.assertIsNone(await self.service.db.source("image:a1"))
-        self.assertEqual((await self.service.db.manga(group_ids=["a"]))["items"][0]["originalCount"], 1)
-        Image.new("RGB", (20, 40), "red").save(self.root / "a1/input.png")
+        self.assertIsNone(await self.service.db.source("summary:a"))
+        snapshot = await self.store.summary_status("a")
+        await self.store.save_summary_payload("a", {"summary": "Restored summary.", "sourceFingerprint": snapshot["sourceFingerprint"]})
         await self.service.submit(resume_id=job["id"])
         await self.service.task
-        self.assertIsNotNone(await self.service.db.source("image:a1"))
+        self.assertIsNotNone(await self.service.db.source("summary:a"))
         cancelled_id = await self.service.db.create_job(["b"])
         await self.service.cancel(cancelled_id)
         await self.service.run_job(cancelled_id)
@@ -239,11 +274,11 @@ class SearchIntegrationTest(unittest.IsolatedAsyncioTestCase):
         await self.service.task
         self.assertEqual((await self.service.db.jobs(job["id"]))[0]["status"], "error")
         self.service.db.save_source = original_save
-        result = await self.service.query("traveler", "summary", ["a"])
+        result = await self.service.query("traveler", ["a"])
         self.assertIn("traveler", result["results"][0]["excerpt"])
         await self.service.submit(resume_id=job["id"])
         await self.service.task
-        result = await self.service.query("story", "summary", ["a"])
+        result = await self.service.query("story", ["a"])
         self.assertEqual(result["results"][0]["excerpt"], "Replacement story.")
 
     async def test_cancellation_between_summary_batches_keeps_unfinished_source_hidden(self):
@@ -258,7 +293,7 @@ class SearchIntegrationTest(unittest.IsolatedAsyncioTestCase):
         await self.service.task
         self.assertEqual((await self.service.db.jobs(job["id"]))[0]["status"], "cancelled")
         self.assertIsNone(await self.service.db.source("summary:a"))
-        result = await self.service.query("story", "summary", ["a"])
+        result = await self.service.query("story", ["a"])
         self.assertEqual(result["results"], [])
         self.service.client.upsert = original_upsert
         await self.service.submit(resume_id=job["id"])
@@ -270,7 +305,6 @@ class SearchIntegrationTest(unittest.IsolatedAsyncioTestCase):
         await self.store.pool.execute("INSERT INTO manga_groups VALUES('c', 'Manga c')")
         folder = self.root / "c1"
         folder.mkdir()
-        Image.new("RGB", (20, 40), "red").save(folder / "input.png")
         await self.store.pool.execute("INSERT INTO pages(id,folder,manga_group_id,original_name,page_order) VALUES('c1','c1','c','c1',1)")
 
         all_manga = await self.service.db.manga(status="all")
@@ -290,14 +324,12 @@ class SearchIntegrationTest(unittest.IsolatedAsyncioTestCase):
         from server.search_embeddings import SearchEncoders
         self.service.encoders = SearchEncoders()
         job = await self.embed(["a"])
-        self.assertEqual(job["completed"], 3)
-        for mode in ("summary", "image", "combined"):
-            result = await self.service.query("A traveler makes a friend", mode, ["a"])
-            self.assertEqual(len(result["results"]), 1)
-            self.assertEqual(result["results"][0]["groupId"], "a")
-            print(f"real model {mode}: {result['elapsedMs']} ms, device={self.service.encoders.device}")
-        with self.assertRaisesRegex(ValueError, "Shorten"):
-            await self.service.query("traveler " * 80, "image")
+        self.assertEqual(job["completed"], 1)
+        result = await self.service.query("A traveler makes a friend", ["a"])
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["groupId"], "a")
+        self.assertGreater(result["results"][0]["rerankScore"], 0)
+        print(f"real model summary+rerank: {result['elapsedMs']} ms, device={self.service.encoders.device}")
 
 
 if __name__ == "__main__":

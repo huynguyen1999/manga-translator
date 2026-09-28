@@ -70,6 +70,7 @@ export const App: React.FC = () => {
     handleGallerySortChange,
     handleGalleryReviewChange,
     handleGalleryStatusChange,
+    handleGalleryPageRangeChange,
     handleCloseMangaDetail,
     handleCloseOverlay,
     handleOpenSeriesDetail,
@@ -119,7 +120,7 @@ export const App: React.FC = () => {
     galleryPageCacheRef,
   } = useGalleryData();
   const [summaryJobs, setSummaryJobs] = useState<SummaryJob[]>([]);
-  const [isJobsOpen, setIsJobsOpen] = useState(false);
+  const [isJobsOpen, setIsJobsOpen] = useState(true);
   const [jobToast, setJobToast] = useState<{ status: "ready" | "error"; title: string; message: string } | null>(null);
   const previousSummaryJobsRef = useRef<SummaryJob[] | null>(null);
   const folderMapRef = useRef<Map<string, string>>(new Map());
@@ -284,6 +285,8 @@ export const App: React.FC = () => {
     setTargetLanguage,
     translationQuality,
     setTranslationQuality,
+    draftTranslator,
+    setDraftTranslator,
     inpaintingSize,
     setInpaintingSize,
     customUnclipRatio,
@@ -518,6 +521,7 @@ export const App: React.FC = () => {
     reorderMangaPages,
     deleteMangaGroup,
     deleteMangaGroups,
+    approveMangaReview,
   } = createGalleryMutationActions({
     setFinishedImages,
     setMangaSummaries,
@@ -646,7 +650,8 @@ export const App: React.FC = () => {
         galleryCount={totalGalleryCount}
         jobCount={actionableJobCount}
         jobAttentionCount={jobAttentionCount}
-        onOpenJobs={() => setIsJobsOpen(true)}
+        isJobsOpen={isJobsOpen}
+        onOpenJobs={() => setIsJobsOpen((prev) => !prev)}
       />
 
       {jobToast && (
@@ -659,34 +664,9 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      <JobsDrawer
-        open={isJobsOpen}
-        onClose={handleCloseJobs}
-        batches={translationBatches}
-        summaryJobs={summaryJobs}
-        onLoadBatchDetails={loadTranslationBatchDetails}
-        onPause={pauseTranslation}
-        onResume={resumeTranslation}
-        onDismissBatch={dismissTranslationBatch}
-        onRemoveBatch={removeTranslationBatch}
-        onRetryItem={retryTranslationItem}
-        onRemoveItem={removeTranslationItem}
-        onTranslatorChange={updateTranslationBatchTranslator}
-        onManualReviewChange={updateTranslationBatchManualReview}
-        onPriorityChange={updateTranslationBatchPriority}
-        onMangaTitleChange={handleBatchMangaTitleChange}
-        onOpenLightbox={handleOpenLightbox}
-        onOpenPageEdit={handleOpenPageEdit}
-        isColorizerActive={colorizer !== "none" || colorizeOnly}
-        onToggleExcludeColor={toggleQueueItemColor}
-        onDismissSummary={handleDismissSummaryJob}
-        onRetrySummary={handleRetrySummaryJob}
-        onPauseSummary={handlePauseSummaryJob}
-        onResumeSummary={handleResumeSummaryJob}
-        onStopSummary={handleStopSummaryJob}
-      />
-
-      <main className="min-w-0 flex-1 mx-auto w-full max-w-7xl space-y-6 px-3 py-4 sm:space-y-8 sm:px-6 sm:py-8 lg:px-8">
+      <div className="mx-auto w-full max-w-[1720px] px-3 py-4 sm:px-6 sm:py-6 lg:px-8">
+        <div className="flex flex-col lg:flex-row items-start gap-6">
+          <main className="min-w-0 flex-1 w-full space-y-6 sm:space-y-8">
         {/* Studio View (Default) */}
         {activeView === "studio" && (
           <StudioWorkspace
@@ -701,6 +681,7 @@ export const App: React.FC = () => {
               summaryModel,
               targetLanguage,
               translationQuality,
+              draftTranslator,
               inpaintingSize,
               customUnclipRatio,
               customBoxThreshold,
@@ -728,6 +709,7 @@ export const App: React.FC = () => {
               setSummaryModel,
               setTargetLanguage,
               setTranslationQuality,
+              setDraftTranslator,
               setInpaintingSize,
               setCustomUnclipRatio,
               setCustomBoxThreshold,
@@ -797,20 +779,14 @@ export const App: React.FC = () => {
               totalGalleryCount={totalGalleryCount}
               totalMangaCount={totalMangaCount}
               isLoading={isGalleryLoading}
-              onDeleteImage={deleteFinishedImage}
-              onDeleteImages={deleteFinishedImages}
-              onDeleteManga={deleteMangaGroup}
-              onDeleteMangas={deleteMangaGroups}
-              onReorderMangaPages={reorderMangaPages}
-              onRestoreBatchPages={restoreBatchPages}
-              onUpdateImage={updateFinishedImage}
+              onDeleteImage={deleteFinishedImage} onDeleteImages={deleteFinishedImages}
+              onDeleteManga={deleteMangaGroup} onDeleteMangas={deleteMangaGroups}
+              onReorderMangaPages={reorderMangaPages} onRestoreBatchPages={restoreBatchPages}
+              onApproveMangaReview={approveMangaReview} onUpdateImage={updateFinishedImage}
               onUpdateMangaTitle={handleUpdateMangaTitle}
-              onOpenPageView={handleOpenPageView}
-              onOpenPageEdit={handleOpenPageEdit}
-              onRetryImage={retryFinishedImage}
-              onRetryFromStage={retryFinishedImage}
-              onRerenderImage={(image) => rerenderImages([image])}
-              onRerenderImages={rerenderImages}
+              onOpenPageView={handleOpenPageView} onOpenPageEdit={handleOpenPageEdit}
+              onRetryImage={retryFinishedImage} onRetryFromStage={retryFinishedImage}
+              onRerenderImage={(image) => rerenderImages([image])} onRerenderImages={rerenderImages}
               galleryRevision={galleryRevision}
               onOpenReader={handleOpenReader}
               onCloseOverlay={handleCloseOverlay}
@@ -823,12 +799,12 @@ export const App: React.FC = () => {
               gallerySearch={parsedRoute.overlay === "none" ? parsedRoute.gallerySearch : undefined}
               gallerySort={parsedRoute.overlay === "none" ? parsedRoute.gallerySort : undefined}
               galleryStatus={parsedRoute.overlay === "none" ? parsedRoute.galleryStatus : undefined}
+              galleryMinPages={parsedRoute.overlay === "none" ? parsedRoute.galleryMinPages : undefined}
+              galleryMaxPages={parsedRoute.overlay === "none" ? parsedRoute.galleryMaxPages : undefined}
               reviewOnly={parsedRoute.overlay === "none" ? parsedRoute.reviewOnly : false}
-              onGalleryPageChange={handleGalleryPageChange}
-              onGalleryPageSizeChange={handleGalleryPageSizeChange}
-              onGallerySearchChange={handleGallerySearchChange}
-              onGallerySortChange={handleGallerySortChange}
-              onGalleryStatusChange={handleGalleryStatusChange}
+              onGalleryPageChange={handleGalleryPageChange} onGalleryPageSizeChange={handleGalleryPageSizeChange}
+              onGallerySearchChange={handleGallerySearchChange} onGallerySortChange={handleGallerySortChange}
+              onGalleryStatusChange={handleGalleryStatusChange} onGalleryPageRangeChange={handleGalleryPageRangeChange}
               onGalleryReviewChange={handleGalleryReviewChange}
               selectedMangaId={parsedRoute.overlay === "none" ? (parsedRoute.mangaId ?? null) : undefined}
               selectedMangaTitle={parsedRoute.overlay === "none" ? (parsedRoute.mangaTitle ?? null) : undefined}
@@ -846,6 +822,28 @@ export const App: React.FC = () => {
         {/* Diagnostic workspace */}
         {activeView === "search" && <React.Suspense fallback={<p role="status">Loading Search Lab…</p>}><SearchLab /></React.Suspense>}
       </main>
+
+        <JobsDrawer
+          open={isJobsOpen}
+          onClose={handleCloseJobs}
+          batches={translationBatches}
+          summaryJobs={summaryJobs}
+          onLoadBatchDetails={loadTranslationBatchDetails}
+          onPause={pauseTranslation} onResume={resumeTranslation}
+          onDismissBatch={dismissTranslationBatch} onRemoveBatch={removeTranslationBatch}
+          onRetryItem={retryTranslationItem} onRemoveItem={removeTranslationItem}
+          onTranslatorChange={updateTranslationBatchTranslator}
+          onManualReviewChange={updateTranslationBatchManualReview}
+          onPriorityChange={updateTranslationBatchPriority}
+          onMangaTitleChange={handleBatchMangaTitleChange}
+          onOpenLightbox={handleOpenLightbox} onOpenPageEdit={handleOpenPageEdit}
+          isColorizerActive={colorizer !== "none" || colorizeOnly}
+          onToggleExcludeColor={toggleQueueItemColor}
+          onDismissSummary={handleDismissSummaryJob} onRetrySummary={handleRetrySummaryJob}
+          onPauseSummary={handlePauseSummaryJob} onResumeSummary={handleResumeSummaryJob} onStopSummary={handleStopSummaryJob}
+        />
+      </div>
+    </div>
 
       {/* Fast submissions keep the original one-step group dialog. */}
       <GroupSelectionModal
@@ -908,6 +906,12 @@ export const App: React.FC = () => {
           onRetry={selectedImageRetry ?? (selectedImageForModal.folder ? retryFinishedImage : undefined)}
           onRetryFromStage={selectedImageForModal.folder ? retryFinishedImage : undefined}
           onRerender={selectedImageForModal.folder ? (image) => handleOpenPipelineRerun([image], selectedImageForModal.mangaTitle) : undefined}
+          onEdit={selectedImageForModal.folder ? (image) => {
+            if (image.folder) {
+              closeStudioViewer();
+              handleOpenPageEdit(image.folder);
+            }
+          } : undefined}
           titlePrefix="Studio preview"
         />
       )}

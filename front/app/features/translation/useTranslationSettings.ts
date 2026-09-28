@@ -20,6 +20,7 @@ export const useTranslationSettings = () => {
   const [summaryModel, setSummaryModel] = useState("deepseek-flash");
   const [targetLanguage, setTargetLanguage] = useState("ENG");
   const [translationQuality, setTranslationQuality] = useState<"fast" | "professional">("fast");
+  const [draftTranslator, setDraftTranslator] = useState<TranslatorKey | "">("");
 
   const [inpaintingSize, setInpaintingSize] = useState("2048");
   const [customUnclipRatio, setCustomUnclipRatio] = useState<number>(2.3);
@@ -53,6 +54,7 @@ export const useTranslationSettings = () => {
     translator,
     targetLanguage,
     translationQuality,
+    draftTranslator: draftTranslator || undefined,
     inpaintingSize,
     customUnclipRatio,
     customBoxThreshold,
@@ -113,6 +115,7 @@ export const useTranslationSettings = () => {
       }
     }
     if (shouldRememberSettings && savedSettings.translationQuality) setTranslationQuality(savedSettings.translationQuality);
+    if (shouldRememberSettings && savedSettings.draftTranslator) setDraftTranslator(savedSettings.draftTranslator);
     if (shouldRememberSettings && savedSettings.inpaintingSize) setInpaintingSize(savedSettings.inpaintingSize);
     if (shouldRememberSettings && savedSettings.customUnclipRatio !== undefined) setCustomUnclipRatio(savedSettings.customUnclipRatio);
     if (shouldRememberSettings && savedSettings.customBoxThreshold !== undefined) setCustomBoxThreshold(savedSettings.customBoxThreshold);
@@ -168,6 +171,7 @@ export const useTranslationSettings = () => {
       summaryModel,
       targetLanguage,
       translationQuality,
+      draftTranslator: draftTranslator || undefined,
       inpaintingSize,
       customUnclipRatio,
       customBoxThreshold,
@@ -204,6 +208,7 @@ export const useTranslationSettings = () => {
     summaryModel,
     targetLanguage,
     translationQuality,
+    draftTranslator,
     inpaintingSize,
     customUnclipRatio,
     customBoxThreshold,
@@ -246,6 +251,8 @@ export const useTranslationSettings = () => {
     setTargetLanguage,
     translationQuality,
     setTranslationQuality,
+    draftTranslator,
+    setDraftTranslator,
     inpaintingSize,
     setInpaintingSize,
     customUnclipRatio,

@@ -24,9 +24,9 @@ class EmbedRequest(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=5000)
-    mode: Literal["summary", "image", "combined"] = "combined"
     groupIds: list[str] | None = Field(default=None, max_length=1000)
     limit: int = Field(default=20, ge=1, le=50)
+    minScore: float | None = Field(default=None, ge=0.0, le=1.0)
 
     @field_validator("query")
     @classmethod
@@ -112,9 +112,9 @@ def search_router(get_service):
         return await call(service().submit(body.groupIds))
 
     @router.delete("/manga/{group_id}/index")
-    async def remove_index(group_id: str):
-        removed = await call(service().remove_group(group_id))
-        return {"groupId": group_id, **removed}
+    async def remove_index(group_id: str): return {"groupId": group_id, **(await call(service().remove_group(group_id)))}
+    @router.delete("/index")
+    async def remove_all_index(): return await call(service().remove_group())
 
     @router.get("/jobs")
     async def jobs():
@@ -131,6 +131,6 @@ def search_router(get_service):
 
     @router.post("/query")
     async def query(body: SearchRequest):
-        return await call(service().query(body.query, body.mode, body.groupIds, body.limit))
+        return await call(service().query(body.query, body.groupIds, body.limit, body.minScore))
 
     return router

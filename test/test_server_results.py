@@ -206,6 +206,20 @@ class TestServerResults(unittest.TestCase):
         self.assertEqual(result["totalImages"], 2)
         self.assertEqual(result["groups"][0]["title"], "Test Manga Series")
 
+        # Out-of-order token search
+        result_tokens = _scan_manga_groups(self.test_dir, search="Series Test")
+        self.assertEqual(result_tokens["totalGroups"], 1)
+        self.assertEqual(result_tokens["groups"][0]["title"], "Test Manga Series")
+
+    def test_scan_manga_groups_page_range_filters(self):
+        result_min2 = _scan_manga_groups(self.test_dir, min_pages=2)
+        self.assertEqual(result_min2["totalGroups"], 1)
+        self.assertEqual(result_min2["groups"][0]["title"], "Test Manga Series")
+
+        result_max1 = _scan_manga_groups(self.test_dir, max_pages=1)
+        self.assertEqual(result_max1["totalGroups"], 1)
+        self.assertEqual(result_max1["groups"][0]["title"], "Other Title")
+
     def test_ensure_bbox_artifact_already_exists(self):
         folder = self.test_dir / "folder_001"
         existing_file = folder / "bboxes_unfiltered.png"

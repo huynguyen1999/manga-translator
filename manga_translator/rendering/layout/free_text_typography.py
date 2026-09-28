@@ -210,9 +210,10 @@ def _free_text_typography_score(
     target: Optional[FreeTextDamageTarget] = None,
     target_width_override: Optional[float] = None,
     target_height_override: Optional[float] = None,
+    ink_metrics: Optional[Dict[str, Any]] = None,
 ) -> float:
     """Score real glyph footprint without page coordinates or obstacle geometry."""
-    ink = _free_text_candidate_ink_metrics(candidate)
+    ink = ink_metrics if ink_metrics is not None else _free_text_candidate_ink_metrics(candidate)
     widths = [float(line.width) for line in candidate.lines]
     target_width = float(target_width_override or (target.width if target is not None else profile.block_width))
     target_height = float(target_height_override or (target.height if target is not None else profile.block_height))

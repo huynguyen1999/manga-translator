@@ -36,16 +36,10 @@ export const createGalleryMutationActions = ({
     folders: string[] = pageIds,
   ) => {
     const cleanTitle = newMangaTitle.trim() || "Ungrouped";
-    setFinishedImages((prev) =>
-      prev.map((img) =>
-        pageIds.includes(img.id) ||
-        (img.folder && folders.includes(img.folder)) ||
-        (oldMangaTitle && img.mangaTitle === oldMangaTitle)
-          ? { ...img, mangaTitle: cleanTitle }
-          : img
-      )
-    );
-
+    setFinishedImages((prev) => prev.map((img) =>
+      pageIds.includes(img.id) || (img.folder && folders.includes(img.folder)) || (oldMangaTitle && img.mangaTitle === oldMangaTitle)
+        ? { ...img, mangaTitle: cleanTitle } : img
+    ));
     try {
       const validPageIds = pageIds.filter((id) => id.length > 0);
       const validFolders = folders.filter((folder) => !folder.includes("/") && folder.length > 0);
@@ -70,15 +64,12 @@ export const createGalleryMutationActions = ({
     const cleanTitle = mangaTitle.trim().toLocaleLowerCase();
     const summaries = await fetchServerBatches();
     const candidates = summaries.filter((batch) =>
-      getBatchKind(batch) === "translation" &&
-      (batch.status === "completed" || batch.status === "error") &&
+      getBatchKind(batch) === "translation" && (batch.status === "completed" || batch.status === "error") &&
       (batch.mangaGroupId === groupId || batch.mangaTitle.trim().toLocaleLowerCase() === cleanTitle)
     );
     const batches = await Promise.all(candidates.map((batch) => fetchServerBatch(batch.id)));
     const folders = Array.from(new Set(batches.flatMap((batch) =>
-      batch.items
-        .filter((item) => item.status === "completed" && item.resultFolder)
-        .map((item) => item.resultFolder as string)
+      batch.items.filter((item) => item.status === "completed" && item.resultFolder).map((item) => item.resultFolder as string)
     )));
     if (folders.length === 0) throw new Error("No completed batch pages were found for this manga.");
 
@@ -88,10 +79,7 @@ export const createGalleryMutationActions = ({
       body: JSON.stringify({ folders, mangaTitle }),
     });
     const payload = await response.json().catch(() => ({})) as { detail?: string; updated?: number };
-    if (!response.ok) {
-      throw new Error(payload.detail || `Could not restore batch pages (${response.status})`);
-    }
-
+    if (!response.ok) throw new Error(payload.detail || `Could not restore batch pages (${response.status})`);
     galleryPageCacheRef.current.clear();
     setGalleryRevision((revision) => revision + 1);
     await loadMangaSummaries();
@@ -99,28 +87,18 @@ export const createGalleryMutationActions = ({
   };
 
   const updateFinishedImage = (updated: FinishedImage) => {
-    setFinishedImages((prev) =>
-      prev.map((img) =>
-        img.id === updated.id || (img.folder && img.folder === updated.folder) ? updated : img
-      )
-    );
+    setFinishedImages((prev) => prev.map((img) => (img.id === updated.id || (img.folder && img.folder === updated.folder) ? updated : img)));
   };
 
   const deleteFinishedImage = async (image: FinishedImage) => {
     if (image.folder) {
-      try {
-        await fetch(apiUrl(`/api/results/${image.folder}`), { method: "DELETE" });
-      } catch (err) {
-        console.warn(`Failed to delete result ${image.folder} on server:`, err);
-      }
+      try { await fetch(apiUrl(`/api/results/${image.folder}`), { method: "DELETE" }); } catch (err) { console.warn(`Failed to delete result ${image.folder} on server:`, err); }
     }
     setFinishedImages((prev) => prev.filter((img) => img.id !== image.id));
     setTotalGalleryCount((prev) => Math.max(0, prev - 1));
     setMangaSummaries((prev) => {
       const mangaTitle = (image.mangaTitle || "Ungrouped").trim() || "Ungrouped";
-      return prev
-        .map((g) => (g.title === mangaTitle ? { ...g, count: Math.max(0, g.count - 1) } : g))
-        .filter((g) => g.count > 0);
+      return prev.map((g) => (g.title === mangaTitle ? { ...g, count: Math.max(0, g.count - 1) } : g)).filter((g) => g.count > 0);
     });
   };
 
@@ -142,15 +120,12 @@ export const createGalleryMutationActions = ({
       const title = (img.mangaTitle || "Ungrouped").trim() || "Ungrouped";
       titleCounts.set(title, (titleCounts.get(title) || 0) + 1);
     }
-
     setFinishedImages((prev) => prev.filter((img) => !deletedIds.has(img.id)));
     setTotalGalleryCount((prev) => Math.max(0, prev - images.length));
-    setMangaSummaries((prev) => prev
-      .map((g) => {
-        const removed = titleCounts.get(g.title) || 0;
-        return removed > 0 ? { ...g, count: Math.max(0, g.count - removed) } : g;
-      })
-      .filter((g) => g.count > 0));
+    setMangaSummaries((prev) => prev.map((g) => {
+      const removed = titleCounts.get(g.title) || 0;
+      return removed > 0 ? { ...g, count: Math.max(0, g.count - removed) } : g;
+    }).filter((g) => g.count > 0));
   };
 
   const reorderMangaPages = async (groupId: string, pageIds: string[]) => {
@@ -213,24 +188,29 @@ export const createGalleryMutationActions = ({
     const titlesToDelete = new Set(mangaList.map((m) => m.title));
     const allImagesToDelete = mangaList.flatMap((m) => m.images || []);
     const idsToDelete = new Set(allImagesToDelete.map((img) => img.id));
-    setFinishedImages((prev) =>
-      prev.filter(
-        (img) => !idsToDelete.has(img.id) && !titlesToDelete.has((img.mangaTitle || "Ungrouped").trim() || "Ungrouped")
-      )
-    );
+    setFinishedImages((prev) => prev.filter((img) => !idsToDelete.has(img.id) && !titlesToDelete.has((img.mangaTitle || "Ungrouped").trim() || "Ungrouped")));
     setMangaSummaries((prev) => {
-      let removedTotal = 0;
-      let removedCount = 0;
+      let removedTotal = 0, removedCount = 0;
       for (const g of prev) {
-        if (titlesToDelete.has(g.title)) {
-          removedTotal += g.count;
-          removedCount += 1;
-        }
+        if (titlesToDelete.has(g.title)) { removedTotal += g.count; removedCount += 1; }
       }
       setTotalGalleryCount((count) => Math.max(0, count - removedTotal));
       setTotalMangaCount((count) => Math.max(0, count - removedCount));
       return prev.filter((g) => !titlesToDelete.has(g.title));
     });
+  };
+
+  const approveMangaReview = async (groupId: string, mangaTitle: string): Promise<number> => {
+    const { approveMangaReview: apiApprove } = await import("./approveMangaReview");
+    const result = await apiApprove(groupId, mangaTitle);
+    const count = result.approvedCount ?? 0;
+    const nowIso = new Date().toISOString();
+    setFinishedImages((prev) => prev.map((img) => (img.groupId === groupId || img.mangaTitle === mangaTitle ? { ...img, reviewStatus: "approved", reviewedAt: nowIso } : img)));
+    setMangaSummaries((prev) => prev.map((g) => (g.id === groupId || g.title === mangaTitle ? { ...g, needsReviewCount: 0 } : g)));
+    galleryPageCacheRef.current.clear();
+    setGalleryRevision((rev) => rev + 1);
+    await loadMangaSummaries();
+    return count;
   };
 
   return {
@@ -242,5 +222,6 @@ export const createGalleryMutationActions = ({
     reorderMangaPages,
     deleteMangaGroup,
     deleteMangaGroups,
+    approveMangaReview,
   };
 };

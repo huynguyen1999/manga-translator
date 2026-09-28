@@ -643,14 +643,32 @@ class PostgresStoreGroupsTest(unittest.IsolatedAsyncioTestCase):
         }])
         database.pool = pool
 
-        res = await database.list_groups(limit=25, offset=0, status="translated")
+        res = await database.list_groups(limit=25, offset=0, status="translated", min_pages=5, max_pages=30)
         self.assertEqual(res["totalGroups"], 10)
         self.assertEqual(res["totalImages"], 50)
         pool.fetchrow.assert_not_awaited()
-        # Verify effective_status is passed as $5 in the grouped page query.
+        # Verify status_list is passed as $5 in the grouped page query.
         fetch_args = pool.fetch.call_args[0]
-        self.assertEqual(fetch_args[5], "translated")
+        self.assertEqual(fetch_args[5], ["translated"])
+        self.assertEqual(fetch_args[6], 5)
+        self.assertEqual(fetch_args[7], 30)
         self.assertIn("tp.source_type = 'translated'", fetch_args[0])
+
+    async def test_list_groups_token_search(self):
+        database = PostgresStore("unused", "/tmp/results")
+        pool = AsyncMock()
+        pool.fetch = AsyncMock(return_value=[{
+            "group_id": None,
+            "total_groups": 1,
+            "total_images": 20,
+        }])
+        database.pool = pool
+
+        res = await database.list_groups(limit=25, offset=0, search="oyako gal")
+        self.assertEqual(res["totalGroups"], 1)
+        fetch_args = pool.fetch.call_args[0]
+        self.assertEqual(fetch_args[4], "oyako gal")
+        self.assertIn("regexp_split_to_array", fetch_args[0])
 
     async def test_resolve_group_id_with_manga_hash(self):
         database = PostgresStore("unused", "/tmp/results")

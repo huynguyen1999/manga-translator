@@ -24,7 +24,7 @@ const image = (id: string, folder: string, mangaTitle: string): FinishedImage =>
 });
 const state: State = {
   images: [image("page-1", "folder-1", "Title"), image("page-2", "folder-2", "Title")],
-  groups: [{ title: "Title", count: 2 }],
+  groups: [{ id: "group-1", title: "Title", count: 2 }],
   totalManga: 1,
   totalGallery: 2,
   isLoading: true,
@@ -103,6 +103,16 @@ try {
   assert.deepEqual(JSON.parse(orderRequest.body || "{}"), { pageIds: ["replacement"] });
   assert.equal(state.images[0].pageOrder, 9);
   assert.equal(summaryLoads, 2);
+
+  state.images[0].reviewStatus = "pending";
+  state.groups[0].needsReviewCount = 1;
+  const approvedCount = await actions.approveMangaReview("group-1", "New Title");
+  const approveRequest = requests[3];
+  assert.equal(new URL(approveRequest.url, "http://studio.test").pathname, "/manga/group-1/review/approve-all");
+  assert.equal(approveRequest.method, "POST");
+  assert.equal(state.images[0].reviewStatus, "approved");
+  assert.equal(state.groups[0].needsReviewCount, 0);
+  assert.equal(summaryLoads, 3);
 } finally {
   globalThis.fetch = originalFetch;
 }

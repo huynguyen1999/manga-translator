@@ -99,63 +99,54 @@ export function sortMangaGroups<T extends SortableMangaGroup>(groups: T[], sortM
   });
 }
 
+export function matchesSearchQuery(text: string, query: string): boolean {
+  const raw = query.trim().toLowerCase();
+  if (!raw) return true;
+  const tokens = raw.split(/\s+/).filter(Boolean);
+  return tokens.length === 0 || tokens.every((token) => text.toLowerCase().includes(token));
+}
+
 export function filterMangaGroupsByStatus<T extends {
-  coverImage?: FinishedImage | null;
-  cover?: FinishedImage | null;
-  images?: FinishedImage[];
-  hasSummary?: boolean;
-  needsReviewCount?: number;
-}>(groups: T[], filter: MangaStatusFilter): T[] {
-  if (filter === 'all') return groups;
-  if (filter === 'original') {
-    return groups.filter((g) => {
-      if (g.images && g.images.length > 0) {
-        return g.images.every((img) => img.sourceType === 'original');
-      }
-      const cover = g.coverImage || g.cover;
-      return cover?.sourceType === 'original';
-    });
-  }
-  if (filter === 'translated') {
-    return groups.filter((g) => {
-      if (g.images && g.images.length > 0) {
-        return g.images.some((img) => img.sourceType !== 'original');
-      }
-      const cover = g.coverImage || g.cover;
-      return cover ? cover.sourceType !== 'original' : false;
-    });
-  }
-  if (filter === 'summarized') {
-    return groups.filter((g) => Boolean(g.hasSummary));
-  }
-  if (filter === 'review') {
-    return groups.filter((g) => (g.needsReviewCount ?? 0) > 0);
-  }
-  return groups;
+  title?: string; coverImage?: FinishedImage | null; cover?: FinishedImage | null; images?: Array<Pick<FinishedImage, 'id' | 'sourceType'>> | FinishedImage[];
+  hasSummary?: boolean; needsReviewCount?: number; count?: number;
+}>(groups: T[], filter: MangaStatusFilter | string, minPages?: number, maxPages?: number): T[] {
+  const tokens = (filter && filter !== 'all') ? filter.split(',').map(s => s.trim()).filter(Boolean) : [];
+  if (tokens.length === 0 && minPages == null && maxPages == null) return groups;
+  return groups.filter((g) => {
+    const pageCount = typeof g.count === 'number' ? g.count : (g.images ? g.images.length : 0);
+    if (minPages != null && pageCount < minPages) return false;
+    if (maxPages != null && pageCount > maxPages) return false;
+    if (tokens.includes('original')) {
+      const isOriginal = (g.images && g.images.length > 0)
+        ? g.images.every((img) => img.sourceType === 'original')
+        : (g.coverImage || g.cover)?.sourceType === 'original';
+      if (!isOriginal) return false;
+    }
+    if (tokens.includes('translated')) {
+      const isTranslated = (g.images && g.images.length > 0)
+        ? g.images.some((img) => img.sourceType !== 'original')
+        : Boolean(g.coverImage || g.cover ? (g.coverImage || g.cover)?.sourceType !== 'original' : false);
+      if (!isTranslated) return false;
+    }
+    if (tokens.includes('summarized') && !Boolean(g.hasSummary)) return false;
+    if (tokens.includes('review') && (g.needsReviewCount ?? 0) <= 0) return false;
+    return true;
+  });
 }
 
 export function shouldShowEmptyLibraryState({
-  mangaGroupsLength,
-  totalImagesCount,
-  mangaSearchQuery,
-  statusFilter,
-  activeMangaFilter,
-  reviewOnly,
+  mangaGroupsLength, totalImagesCount, mangaSearchQuery, statusFilter,
+  minPages, maxPages, activeMangaFilter, reviewOnly,
 }: {
-  mangaGroupsLength: number;
-  totalImagesCount: number;
-  mangaSearchQuery?: string;
-  statusFilter?: string;
-  activeMangaFilter?: string;
-  reviewOnly?: boolean;
+  mangaGroupsLength: number; totalImagesCount: number; mangaSearchQuery?: string;
+  statusFilter?: string; minPages?: number; maxPages?: number;
+  activeMangaFilter?: string; reviewOnly?: boolean;
 }): boolean {
   return (
-    mangaGroupsLength === 0 &&
-    totalImagesCount === 0 &&
-    !(mangaSearchQuery || '').trim() &&
-    (!statusFilter || statusFilter === 'all') &&
-    (!activeMangaFilter || activeMangaFilter === 'all') &&
-    !reviewOnly
+    mangaGroupsLength === 0 && totalImagesCount === 0 &&
+    !(mangaSearchQuery || '').trim() && (!statusFilter || statusFilter === 'all') &&
+    minPages == null && maxPages == null &&
+    (!activeMangaFilter || activeMangaFilter === 'all') && !reviewOnly
   );
 }
 

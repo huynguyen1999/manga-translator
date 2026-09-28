@@ -303,7 +303,7 @@ def _free_text_fast_conflict_regions(
     plans: Dict[int, List[LayoutCandidate]],
     image_shape: Tuple[int, int],
 ) -> set[int]:
-    """Find pairs whose retained candidates all conflict and need smaller-size alternatives."""
+    """Rerun unavoidable conflicts, limiting mixed pairs to fast candidates."""
     active = [region for region in regions if plans.get(id(region))]
     data = {id(c): _candidate_data(c, image_shape)[:2] for r in active for c in plans[id(r)]}
     conflicts = set()
@@ -311,7 +311,9 @@ def _free_text_fast_conflict_regions(
         for second in active[index + 1:]:
             if all(rendered_masks_conflict(*data[id(a)], a.font_size, *data[id(b)], b.font_size)
                    for a in plans[id(first)] for b in plans[id(second)]):
-                conflicts.update((id(first), id(second)))
+                fast = [region for region in (first, second)
+                        if len(plans[id(region)]) == 1 and plans[id(region)][0].status == "free_text_ideal"]
+                conflicts.update(id(region) for region in (fast or (first, second)))
     return conflicts
 
 

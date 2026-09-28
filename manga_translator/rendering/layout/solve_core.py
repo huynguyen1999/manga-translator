@@ -91,12 +91,6 @@ def solve_layout(
         queue_idx += 1
         prof.fonts_tested += 1
 
-        # A smaller font may win on composition, but the font penalty grows
-        # monotonically below the target: prune once the font term alone can
-        # no longer beat the incumbent.
-        cutoff = sorted((candidate.penalty for candidate in candidates if candidate.valid))[:max(1, top_k)]
-        # Centering outranks font preference, so a font penalty cannot prune a smaller candidate.
-
         if not geom.has_safe_pixels(S, stroke_width, margin):
             continue
 
@@ -366,6 +360,7 @@ def solve_layout(
             cand.qa["zone_aspect"] = zone_profile.aspect_ratio
             cand.qa["zone_line_capacity"] = zone_profile.vertical_capacity
 
+    candidates.sort(key=centered_candidate_key)
     valid_candidates: List[LayoutCandidate] = []
     for candidate in candidates:
         if not candidate.valid:
@@ -393,10 +388,14 @@ def solve_layout(
                     y_end=ln.slot.y_end + geom.y_offset,
                 )
         valid_candidates.append(candidate)
+        if len(valid_candidates) >= max(1, top_k):
+            break
 
     if not valid_candidates and candidates:
         # Fallback to best candidate if none passed gap check, validating glyph pixels
         for candidate in candidates:
+            if candidate.status != "unexplained_gap":
+                continue
             t_val0 = perf_counter()
             prof.glyph_validations += 1
             valid, p5 = _validate_glyph_pixels(
@@ -419,7 +418,6 @@ def solve_layout(
                 valid_candidates.append(candidate)
                 break
 
-    valid_candidates.sort(key=centered_candidate_key)
     if top_k > 1:
         return valid_candidates[:top_k]
     return valid_candidates[0] if valid_candidates else None

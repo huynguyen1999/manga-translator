@@ -6,7 +6,6 @@ import { BatchCard } from "./TranslatingSection";
 import { apiUrl } from "@/utils/api";
 import { buildMangaDetailIdUrl, mangaIdForTitle } from "@/utils/routeState";
 import { summaryModelOptions } from "@/config";
-import { AppOverlayPortal } from "./AppOverlayPortal";
 import SummaryJobRow from "./SummaryJobRow";
 
 type AsyncAction = () => void | Promise<void>;
@@ -108,11 +107,9 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
 }) => {
   const closeRef = useRef<HTMLButtonElement>(null);
   const drawerRef = useRef<HTMLElement>(null);
-  const restoreFocusRef = useRef<HTMLElement | null>(null);
   const summaryCloseRef = useRef<HTMLButtonElement>(null);
   const attachCloseButton = useCallback((element: HTMLButtonElement | null) => {
     closeRef.current = element;
-    element?.focus();
   }, []);
   const [, setPendingActions] = useState<Record<string, string>>({});
   const pendingActionsRef = useRef<Record<string, string>>({});
@@ -140,31 +137,13 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
 
   useEffect(() => {
     if (!open) return;
-    restoreFocusRef.current = document.activeElement as HTMLElement | null;
-    closeRef.current?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        if (shouldCloseJobsDrawer(event.target, drawerRef.current)) onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusable = drawerRef.current?.querySelectorAll<HTMLElement>("button, a, input, select, textarea, [tabindex]:not([tabindex='-1'])");
-      if (!focusable?.length) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
+      if (event.key === "Escape" && shouldCloseJobsDrawer(event.target, drawerRef.current)) {
+        onClose();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      restoreFocusRef.current?.focus();
-    };
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, [open, onClose]);
 
   useEffect(() => {
@@ -246,17 +225,15 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
   const controlSummary = !controlBatch ? [...groups.active, ...groups.queued].find((job) => job.type === "summary" && ["generating", "paused"].includes((job.value as SummaryJob).status))?.value as SummaryJob | undefined : undefined;
 
   return (
-    <AppOverlayPortal>
-    <div data-app-overlay="jobs" className="fixed inset-0 z-50" role="presentation">
-      <button type="button" aria-label="Close jobs" onClick={onClose} className="absolute inset-0 bg-zinc-950/40" />
-      <aside ref={drawerRef} role="dialog" aria-modal="true" aria-labelledby="jobs-drawer-title" className="absolute inset-y-0 right-0 flex w-full max-w-xl flex-col border-l border-zinc-200 bg-zinc-50 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
-        <div className="flex items-start justify-between gap-4 border-b border-zinc-200 px-4 py-4 dark:border-zinc-800 sm:px-6">
+    <>
+      <aside ref={drawerRef} aria-labelledby="jobs-drawer-title" className="flex flex-col w-full lg:w-[420px] xl:w-[460px] 2xl:w-[480px] shrink-0 rounded-2xl border border-zinc-200 bg-white/80 dark:border-zinc-800 dark:bg-zinc-900/80 backdrop-blur-xs shadow-xs lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] overflow-hidden transition-colors">
+        <div className="flex items-start justify-between gap-4 border-b border-zinc-200 px-4 py-3.5 dark:border-zinc-800 sm:px-5">
           <div>
-            <h2 id="jobs-drawer-title" className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Jobs</h2>
-            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Translation, layout rerender, manga upload, and summary work</p>
+            <h2 id="jobs-drawer-title" className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Jobs</h2>
+            <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">Translation, layout rerender, manga upload, and summary work</p>
           </div>
-          <button ref={attachCloseButton} type="button" onClick={onClose} className="rounded-lg p-2 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-100" aria-label="Close jobs">
-            <Icon icon="carbon:close" className="h-5 w-5" />
+          <button ref={attachCloseButton} type="button" onClick={onClose} className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" aria-label="Hide jobs sidebar" title="Hide jobs sidebar">
+            <Icon icon="carbon:close" className="h-4.5 w-4.5" />
           </button>
         </div>
 
@@ -398,8 +375,9 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
           {!Object.values(groups).some((entries) => entries.length) && <div className="rounded-2xl border border-dashed border-zinc-200 px-4 py-12 text-center text-sm text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">No jobs yet.</div>}
         </div>
       </aside>
+
       {summaryModal && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/60 p-4 isolate" onClick={() => setSummaryModal(null)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 isolate" onClick={() => setSummaryModal(null)}>
           <div
             role="dialog"
             aria-modal="true"
@@ -474,7 +452,6 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
           </div>
         </div>
       )}
-    </div>
-    </AppOverlayPortal>
+    </>
   );
 };

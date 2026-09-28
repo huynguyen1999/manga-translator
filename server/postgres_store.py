@@ -273,9 +273,11 @@ class PostgresStore:
         sort: str = "alpha-asc",
         review: str | None = None,
         status: str | None = None,
+        min_pages: int | None = None,
+        max_pages: int | None = None,
     ) -> dict[str, Any]:
         return await self._manga_repository.list_groups(
-            limit, offset, manga_id, search, sort, review, status
+            limit, offset, manga_id, search, sort, review, status, min_pages, max_pages
         )
 
     def _series_member_item(self, row: Any) -> dict[str, Any]:

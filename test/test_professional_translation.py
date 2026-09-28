@@ -189,6 +189,59 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed_json_mode, [True])
         self.assertFalse(hasattr(translator, "_professional_json_mode"))
 
+    async def test_separate_draft_and_primary_editor_translators(self):
+        config = TranslatorConfig(
+            translator="chatgpt",
+            draft_translator="gemini",
+            target_lang="ENG",
+            translation_quality="professional",
+        )
+        engine = ProfessionalTranslator(config)
+        self.assertEqual(engine.draft_translator, Translator.gemini)
+        self.assertEqual(engine.primary, Translator.chatgpt)
+        self.assertEqual(engine._get_translator_for_stage("draft"), Translator.gemini)
+        self.assertEqual(engine._get_translator_for_stage("editing"), Translator.chatgpt)
+        self.assertEqual(engine._get_translator_for_stage("analysis"), Translator.gemini)
+
+        requested_keys = []
+
+        class MockTranslator:
+            def __init__(self, key):
+                self.key = key
+
+            def parse_args(self, _):
+                pass
+
+            async def _request_translation(self, _to_lang, _prompt):
+                requested_keys.append(self.key)
+                return '{"regions": []}'
+
+        with patch("manga_translator.professional_translation.get_translator", side_effect=lambda key: MockTranslator(key)):
+            await engine._json_request("draft", "draft prompt")
+            await engine._json_request("editing", "editing prompt")
+
+        self.assertEqual(requested_keys, [Translator.gemini, Translator.chatgpt])
+
+    def test_invalid_draft_translator_raises_error(self):
+        config = TranslatorConfig(
+            translator="deepseek",
+            draft_translator="sugoi",
+            target_lang="ENG",
+            translation_quality="professional",
+        )
+        with self.assertRaises(ValueError):
+            ProfessionalTranslator(config)
+
+    def test_draft_translator_fallback_to_primary(self):
+        config = TranslatorConfig(
+            translator="deepseek",
+            target_lang="ENG",
+            translation_quality="professional",
+        )
+        engine = ProfessionalTranslator(config)
+        self.assertEqual(engine.draft_translator, Translator.deepseek)
+        self.assertEqual(engine._get_translator_for_stage("editing"), Translator.deepseek)
+
 
 if __name__ == "__main__":
     unittest.main()

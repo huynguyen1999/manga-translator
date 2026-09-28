@@ -29,6 +29,8 @@ values.set("manga-translator-settings", JSON.stringify({
   summaryModel: "deepseek-flash",
   targetLanguage: "CHS",
   migratedDefaultTargetLang: false,
+  translationQuality: "professional",
+  draftTranslator: "gemini",
   customOcrProb: 0.25,
   ocrMinConfidence: 0.9,
   bubbleDetection: false,
@@ -59,6 +61,8 @@ try {
   assert.equal(current.letterCase, "uppercase");
   assert.equal(current.translator, "deepseek");
   assert.equal(current.targetLanguage, "ENG");
+  assert.equal(current.translationQuality, "professional");
+  assert.equal(current.draftTranslator, "gemini");
   assert.equal(current.customOcrProb, 0.25);
   assert.equal(current.bubbleDetection, true);
   assert.equal(current.upscaleRatio, 2.5);
@@ -69,6 +73,8 @@ try {
   const saved = JSON.parse(values.get("manga-translator-settings") || "{}") as Partial<TranslationSettings>;
   assert.equal(saved.rememberSettings, true);
   assert.equal(saved.translator, "deepseek");
+  assert.equal(saved.translationQuality, "professional");
+  assert.equal(saved.draftTranslator, "gemini");
   assert.equal(saved.targetLanguage, "ENG");
   assert.equal(saved.translationBatchSize, 100);
   assert.equal(saved.migratedDefaultBubbleDetection, true);

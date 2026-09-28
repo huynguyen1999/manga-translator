@@ -16,15 +16,14 @@ export const StepSettingsTab: React.FC<StepSettingsTabProps> = ({
   isTranslationDetailLoading,
 }) => (
 <div className="space-y-3">
-                          {/* Translation Details Card */}
-                          <section className="rounded-lg border border-indigo-400/20 bg-indigo-500/10 p-3" aria-label="Translation details">
+                          <section className="rounded-lg border border-white/10 bg-black/20 p-3" aria-label="Translation details">
                             <div className="mb-2.5 flex items-center justify-between gap-2">
-                              <h3 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-indigo-200">
-                                <Icon icon="carbon:machine-learning-model" className="h-4 w-4 text-indigo-300" />
+                              <h3 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-200">
+                                <Icon icon="carbon:machine-learning-model" className="h-4 w-4 text-zinc-400" />
                                 Translation details
                               </h3>
                               {isTranslationDetailLoading && (
-                                <Icon icon="carbon:renew" className="h-3.5 w-3.5 animate-spin text-indigo-300" aria-label="Loading model details" />
+                                <Icon icon="carbon:renew" className="h-3.5 w-3.5 animate-spin text-zinc-400" aria-label="Loading model details" />
                               )}
                             </div>
                             <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
@@ -34,7 +33,7 @@ export const StepSettingsTab: React.FC<StepSettingsTabProps> = ({
                               </div>
                               <div>
                                 <dt className="text-zinc-400">Model</dt>
-                                <dd className="mt-0.5 break-words font-mono font-medium text-indigo-100" title={model}>{model}</dd>
+                                <dd className="mt-0.5 break-words font-mono font-medium text-zinc-200" title={model}>{model}</dd>
                               </div>
                               {(stepSettings.translation.sourceLanguage || stepSettings.translation.targetLanguage) && (
                                 <div className="col-span-2">
@@ -88,7 +87,6 @@ export const StepSettingsTab: React.FC<StepSettingsTabProps> = ({
                               </dl>
                             </div>
 
-                            {/* Speech Bubble Detection Card */}
                             <div className="rounded-lg border border-white/10 bg-black/20 p-2.5">
                               <div className="mb-1.5 flex items-center justify-between font-semibold text-zinc-200">
                                 <span className="flex items-center gap-1.5">
@@ -125,7 +123,6 @@ export const StepSettingsTab: React.FC<StepSettingsTabProps> = ({
                               )}
                             </div>
 
-                            {/* Inpainting & Mask Card */}
                             <div className="rounded-lg border border-white/10 bg-black/20 p-2.5">
                               <div className="mb-2 flex items-center gap-1.5 font-semibold text-zinc-200">
                                 <Icon icon="carbon:erase" className="h-3.5 w-3.5 text-indigo-300" />
@@ -153,7 +150,6 @@ export const StepSettingsTab: React.FC<StepSettingsTabProps> = ({
                               </dl>
                             </div>
 
-                            {/* Rendering Card */}
                             <div className="rounded-lg border border-white/10 bg-black/20 p-2.5">
                               <div className="mb-2 flex items-center gap-1.5 font-semibold text-zinc-200">
                                 <Icon icon="carbon:text-font" className="h-3.5 w-3.5 text-indigo-300" />
@@ -183,7 +179,6 @@ export const StepSettingsTab: React.FC<StepSettingsTabProps> = ({
                               </dl>
                             </div>
 
-                            {/* Colorization & Upscaling Card */}
                             {(stepSettings.colorization?.enabled || stepSettings.upscaling?.enabled) ? (
                               <div className="rounded-lg border border-white/10 bg-black/20 p-2.5">
                                 <div className="mb-2 flex items-center gap-1.5 font-semibold text-zinc-200">

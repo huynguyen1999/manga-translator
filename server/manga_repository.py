@@ -105,16 +105,28 @@ class MangaRepository:
         sort: str = "alpha-asc",
         review: str | None = None,
         status: str | None = None,
+        min_pages: int | None = None,
+        max_pages: int | None = None,
     ) -> dict[str, Any]:
         if self.pool is None:
             raise RuntimeError("PostgreSQL store is not started")
         page_size = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
         clean_search = search.strip() if search and search.strip() else None
-        effective_status = "review" if review == "pending" or status == "review" else (status or None)
+        effective_statuses: set[str] = set()
+        if review == "pending":
+            effective_statuses.add("review")
+        if status:
+            for s in status.split(","):
+                token = s.strip()
+                if token and token != "all":
+                    effective_statuses.add(token)
+        status_list = list(effective_statuses) if effective_statuses else None
         clean_manga_id = manga_id.strip() if manga_id and manga_id.strip() else None
         target_group_id = await self.resolve_group_id(clean_manga_id) if clean_manga_id else None
         filter_manga = target_group_id or clean_manga_id
+        min_p = int(min_pages) if min_pages is not None and int(min_pages) > 0 else None
+        max_p = int(max_pages) if max_pages is not None and int(max_pages) > 0 else None
         order_by = {
             "alpha-asc": "lower(g.title), g.title",
             "alpha-desc": "lower(g.title) DESC, g.title DESC",
@@ -127,43 +139,50 @@ class MangaRepository:
                 SELECT id, title
                 FROM manga_groups
                 WHERE ($3::text IS NULL OR id=$3 OR title=$3)
-                  AND ($4::text IS NULL OR title ILIKE '%' || $4 || '%')
+                  AND ($4::text IS NULL OR NOT EXISTS (
+                      SELECT 1 FROM unnest(regexp_split_to_array(lower(trim($4)), '\\s+')) AS words(token)
+                      WHERE token <> '' AND position(token in lower(title)) = 0
+                  ))
                   AND (
-                      $5::text IS NULL OR $5 = 'all'
-                      OR ($5 = 'review' AND EXISTS (
-                          SELECT 1 FROM pages rp
-                          WHERE rp.active AND rp.manga_group_id = manga_groups.id
-                            AND (rp.metadata->>'reviewStatus'='pending'
-                                 OR rp.text_regions @> '[{{"review_required": true}}]'::jsonb)
-                      ))
-                      OR ($5 = 'translated' AND EXISTS (
-                          SELECT 1 FROM pages tp
-                          WHERE tp.active AND tp.manga_group_id = manga_groups.id
-                            AND tp.source_type = 'translated'
-                      ))
-                      OR ($5 = 'original' AND NOT EXISTS (
-                          SELECT 1 FROM pages tp
-                          WHERE tp.active AND tp.manga_group_id = manga_groups.id
-                            AND tp.source_type = 'translated'
-                      ))
-                      OR ($5 = 'summarized' AND EXISTS (
-                          SELECT 1 FROM manga_summaries ms
-                          WHERE ms.group_id = manga_groups.id
-                            AND NULLIF(ms.payload->>'summary', '') IS NOT NULL
-                      ))
+                      $5::text[] IS NULL
+                      OR (
+                          ('review' != ALL($5::text[]) OR EXISTS (
+                              SELECT 1 FROM pages rp
+                              WHERE rp.active AND rp.manga_group_id = manga_groups.id
+                                AND (rp.metadata->>'reviewStatus'='pending'
+                                     OR rp.text_regions @> '[{{"review_required": true}}]'::jsonb)
+                          ))
+                          AND ('translated' != ALL($5::text[]) OR EXISTS (
+                              SELECT 1 FROM pages tp
+                              WHERE tp.active AND tp.manga_group_id = manga_groups.id
+                                AND tp.source_type = 'translated'
+                          ))
+                          AND ('original' != ALL($5::text[]) OR NOT EXISTS (
+                              SELECT 1 FROM pages tp
+                              WHERE tp.active AND tp.manga_group_id = manga_groups.id
+                                AND tp.source_type = 'translated'
+                          ))
+                          AND ('summarized' != ALL($5::text[]) OR EXISTS (
+                              SELECT 1 FROM manga_summaries ms
+                              WHERE ms.group_id = manga_groups.id
+                                AND NULLIF(ms.payload->>'summary', '') IS NOT NULL
+                          ))
+                      )
                   )
             ), grouped AS (
                 SELECT mg.id AS group_id, mg.title AS manga_title,
                        count(*) AS page_count,
-                       count(*) FILTER (WHERE $5::text='review'
+                       count(*) FILTER (WHERE ($5::text[] IS NOT NULL AND 'review' = ANY($5::text[]))
                          OR p.metadata->>'reviewStatus'='pending'
                          OR p.text_regions @> '[{{"review_required": true}}]'::jsonb) AS review_count,
                        max(p.finished_at) AS latest_finished_at
                 FROM matched_groups mg
                 JOIN pages p ON p.active AND p.manga_group_id = mg.id
-                    AND ($5::text IS NULL OR $5::text != 'review' OR p.metadata->>'reviewStatus'='pending'
+                    AND ($5::text[] IS NULL OR 'review' != ALL($5::text[]) OR p.metadata->>'reviewStatus'='pending'
                          OR p.text_regions @> '[{{"review_required": true}}]'::jsonb)
                 GROUP BY mg.id, mg.title
+                HAVING ($6::int IS NULL OR count(*) >= $6)
+                   AND ($7::int IS NULL OR count(*) <= $7)
             ), page_rows AS (
                 SELECT cover.*, grouped.page_count, grouped.review_count, grouped.latest_finished_at,
                        g.id AS group_id, g.title AS manga_title, g.series_id, s.title AS series_title,
@@ -199,7 +218,9 @@ class MangaRepository:
             offset,
             filter_manga,
             clean_search,
-            effective_status,
+            status_list,
+            min_p,
+            max_p,
         )
         total_groups = int(rows[0]["total_groups"])
         total_images = int(rows[0]["total_images"])

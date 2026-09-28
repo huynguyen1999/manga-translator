@@ -210,6 +210,66 @@ def test_free_text_damage_scope_uses_geometry_calibrated_font_size(monkeypatch):
     assert shapes == [(radius * 2 + 1, radius * 2 + 1)]
 
 
+def test_free_text_scope_roi_dilation_matches_full_page_at_edges(monkeypatch):
+    shape = (75, 91)
+    sources = []
+    for bounds in ((0, 0, 5, 7), (86, 68, 91, 75), (38, 24, 51, 45)):
+        source = np.zeros(shape, dtype=bool)
+        x1, y1, x2, y2 = bounds
+        source[y1:y2, x1:x2] = True
+        sources.append(source)
+    sources.append(np.zeros(shape, dtype=bool))
+
+    region = _region(0, 0, "TEXT")
+    region.placement_mode = PlacementMode.FREE_TEXT
+    region.font_size = region.source_font_size = 12
+    radius = max(3, int(round(_effective_source_font_size(region, 12) * 1.5)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
+    for source in sources:
+        monkeypatch.setattr(layout_ownership, "_region_source_mask", lambda *_args, mask=source: mask)
+        actual = layout_ownership._extract_region_damage_masks(
+            [region], shape, inpaint_mask=np.ones(shape, dtype=np.uint8),
+        )[id(region)]
+        expected = cv2.dilate(source.astype(np.uint8), kernel)
+        assert np.array_equal(actual, expected)
+
+
+def test_free_text_ownership_reuses_source_distance_maps(monkeypatch):
+    shape = (90, 100)
+    regions = [_region(0, 0, "A", "a"), _region(0, 0, "B", "b")]
+    for region in regions:
+        region.placement_mode = PlacementMode.FREE_TEXT
+        region.source_font_size = 12
+    sources = {}
+    for region, bounds in zip(regions, ((10, 10, 20, 20), (70, 60, 80, 70))):
+        source = np.zeros(shape, dtype=bool)
+        x1, y1, x2, y2 = bounds
+        source[y1:y2, x1:x2] = True
+        sources[id(region)] = source
+    monkeypatch.setattr(
+        layout_ownership, "_region_source_mask",
+        lambda region, _shape: sources[id(region)],
+    )
+    original_distance_transform = cv2.distanceTransform
+    calls = 0
+
+    def count_distance_transforms(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_distance_transform(*args, **kwargs)
+
+    monkeypatch.setattr(cv2, "distanceTransform", count_distance_transforms)
+    empty = np.zeros(shape, dtype=np.uint8)
+    zones = build_free_text_ownership_zones(
+        regions, PageObstacleMap(empty, empty, empty, np.ones(shape, np.uint8)),
+        inpaint_mask=np.ones(shape, np.uint8),
+    )
+
+    assert set(zones) == {id(region) for region in regions}
+    assert calls == 4  # One source map and one damage map per region.
+    assert not np.any(zones[id(regions[0])].ownership_mask & zones[id(regions[1])].ownership_mask)
+
+
 def test_candidate_collisions_match_page_masks_using_only_overlapping_crops():
     def candidate(x):
         return LayoutCandidate(

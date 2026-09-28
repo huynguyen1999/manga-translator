@@ -19,19 +19,19 @@ def create_manga_group_router(
     @router.get("/api/results/groups", tags=["api"])
     @router.get("/api/manga", tags=["api"])
     async def list_result_groups(
-        limit: int = Query(12, ge=1, le=500),
-        offset: int = Query(0, ge=0),
+        limit: int = Query(12, ge=1, le=500), offset: int = Query(0, ge=0),
         manga_id: Optional[str] = Query(None, alias="mangaId"),
         search: Optional[str] = Query(None, max_length=200),
         sort: str = Query("alpha-asc", pattern="^(alpha-asc|alpha-desc|date-asc|date-desc)$"),
-        review: Optional[str] = Query(None, pattern="^pending$"),
-        status: Optional[str] = Query(None, pattern="^(all|original|translated|summarized|review)$"),
+        review: Optional[str] = Query(None, pattern="^pending$"), status: Optional[str] = Query(None),
+        min_pages: Optional[int] = Query(None, ge=1, alias="minPages"),
+        max_pages: Optional[int] = Query(None, ge=1, alias="maxPages"),
     ):
         """List a page of manga groups with counts and pagination metadata."""
         store = get_store()
         if store is not None:
             try:
-                return await store.list_groups(limit, offset, manga_id, search, sort, review, status)
+                return await store.list_groups(limit, offset, manga_id, search, sort, review, status, min_pages, max_pages)
             except Exception as error:
                 raise HTTPException(503, detail=f"PostgreSQL result store unavailable: {error}") from error
 
@@ -41,7 +41,7 @@ def create_manga_group_router(
 
         try:
             return await asyncio.to_thread(
-                scan_manga_groups, result_dir, limit, offset, manga_id, search, sort, review, status
+                scan_manga_groups, result_dir, limit, offset, manga_id, search, sort, review, status, min_pages, max_pages,
             )
         except Exception as error:
             raise HTTPException(500, detail=f"Error listing result groups: {str(error)}")
@@ -59,13 +59,9 @@ def create_manga_router(
     @router.get("/results/list", tags=["api"])
     @router.get("/api/results/list", tags=["api"])
     async def list_results(
-        sort: str = "alpha",
-        manga: Optional[str] = Query(None, max_length=MAX_MANGA_TITLE_LENGTH),
-        detail: Optional[str] = None,
-        limit: int = Query(100, ge=1, le=500),
-        offset: int = Query(0, ge=0),
-        groupId: Optional[str] = None,
-        review: Optional[str] = Query(None, pattern="^pending$"),
+        sort: str = "alpha", manga: Optional[str] = Query(None, max_length=MAX_MANGA_TITLE_LENGTH),
+        detail: Optional[str] = None, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+        groupId: Optional[str] = None, review: Optional[str] = Query(None, pattern="^pending$"),
     ):
         """List result directories with metadata, optionally filtered by manga title and slim reader detail mode"""
         store = get_store()

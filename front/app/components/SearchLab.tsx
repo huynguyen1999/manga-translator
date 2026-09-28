@@ -3,8 +3,8 @@ import { Link } from 'react-router';
 import { Icon } from '@iconify/react';
 import { apiUrl } from '@/utils/api';
 import {
-  finishedSearchItems, formatSimilarity, isActiveSearchJob, searchRequest,
-  type SearchJob, type SearchManga, type SearchMode, type SearchResponse, type SearchStatus,
+  finishedSearchItems, formatRankDelta, formatSimilarity, isActiveSearchJob, searchRequest,
+  type SearchJob, type SearchManga, type SearchResponse, type SearchStatus,
   type SearchStatusFilter,
 } from '@/utils/searchLab';
 
@@ -38,28 +38,15 @@ function JobProgress({ job, busy, onAction }: { job: SearchJob; busy: boolean; o
   </section>;
 }
 
-function MangaThumbnail({ coverUrl, title }: { coverUrl?: string | null; title: string }) {
+function MangaThumbnail({ coverUrl }: { coverUrl?: string | null; title: string }) {
   const [error, setError] = useState(false);
-  useEffect(() => {
-    setError(false);
-  }, [coverUrl]);
-
+  useEffect(() => { setError(false); }, [coverUrl]);
   if (!coverUrl || error) {
-    return (
-      <div className="flex h-14 w-10 shrink-0 items-center justify-center rounded-md border border-zinc-200/80 bg-zinc-100 text-zinc-400 dark:border-zinc-800 dark:bg-zinc-800" aria-hidden="true">
-        <Icon icon="carbon:book" className="h-4 w-4" />
-      </div>
-    );
+    return <div className="flex h-14 w-10 shrink-0 items-center justify-center rounded-md border border-zinc-200/80 bg-zinc-100 text-zinc-400 dark:border-zinc-800 dark:bg-zinc-800" aria-hidden="true">
+      <Icon icon="carbon:book" className="h-4 w-4" />
+    </div>;
   }
-  return (
-    <img
-      src={apiUrl(coverUrl)}
-      alt=""
-      loading="lazy"
-      onError={() => setError(true)}
-      className="h-14 w-10 shrink-0 rounded-md border border-zinc-200/80 bg-zinc-100 object-cover shadow-2xs dark:border-zinc-800 dark:bg-zinc-800"
-    />
-  );
+  return <img src={apiUrl(coverUrl)} alt="" loading="lazy" onError={() => setError(true)} className="h-14 w-10 shrink-0 rounded-md border border-zinc-200/80 bg-zinc-100 object-cover shadow-2xs dark:border-zinc-800 dark:bg-zinc-800" />;
 }
 
 export default function SearchLab() {
@@ -75,7 +62,7 @@ export default function SearchLab() {
   const [libraryError, setLibraryError] = useState('');
   const [refresh, setRefresh] = useState(0);
   const [query, setQuery] = useState('');
-  const [mode, setMode] = useState<SearchMode>('combined');
+  const [minScore, setMinScore] = useState('');
   const [scope, setScope] = useState('all');
   const [response, setResponse] = useState<SearchResponse | null>(null);
   const [searching, setSearching] = useState(false);
@@ -111,12 +98,7 @@ export default function SearchLab() {
     const controller = new AbortController();
     setLoadingManga(true);
     const timer = setTimeout(() => {
-      const params = new URLSearchParams({
-        search: filter,
-        status: statusFilter,
-        offset: String(offset),
-        limit: String(PAGE_SIZE),
-      });
+      const params = new URLSearchParams({ search: filter, status: statusFilter, offset: String(offset), limit: String(PAGE_SIZE) });
       void searchRequest<{ items: SearchManga[]; total: number }>(`/manga?${params.toString()}`, undefined, controller.signal)
         .then(value => { if (!controller.signal.aborted) { setManga(value.items); setTotal(value.total); setLibraryError(''); } })
         .catch(caught => { if (!controller.signal.aborted) setLibraryError(caught.message); })
@@ -141,25 +123,28 @@ export default function SearchLab() {
     finally { setBusy(false); }
   };
 
-  const removeIndex = async (item: SearchManga) => {
-    if (!window.confirm(`Remove all Search Lab embeddings for “${item.title}”? The manga and its pages will stay in Gallery.`)) return;
+  const removeIndex = async (item?: SearchManga) => {
+    if (!window.confirm(item ? `Remove all Search Lab embeddings for “${item.title}”? The manga and its pages will stay in Gallery.` : 'Remove all Search Lab embeddings for every manga? Manga, pages, summaries, and embedding job history will stay.')) return;
     setBusy(true); setError('');
     try {
-      await searchRequest(`/manga/${encodeURIComponent(item.id)}/index`, undefined, undefined, 'DELETE');
+      await searchRequest(item ? `/manga/${encodeURIComponent(item.id)}/index` : '/index', undefined, undefined, 'DELETE');
       setResponse(null);
-      setRefresh(value => value + 1);
-    } catch (caught) { setError((caught as Error).message); }
-    finally { setBusy(false); }
+      if (item) setRefresh(value => value + 1); else refreshStatus();
+    } catch (caught) { setError((caught as Error).message); } finally { setBusy(false); }
   };
 
-  const search = async (nextMode = mode) => {
+  const search = async () => {
     if (!query.trim()) return;
     queryAbort.current?.abort();
     const controller = new AbortController();
     queryAbort.current = controller;
     setSearching(true); setError(''); setResponse(null);
+    const parsedMin = minScore.trim() === '' ? null : Number(minScore);
     try {
-      const next = await searchRequest<SearchResponse>('/query', { query, mode: nextMode, groupIds: scope === 'selected' ? [...selected] : null }, controller.signal);
+      const next = await searchRequest<SearchResponse>('/query', {
+        query, groupIds: scope === 'selected' ? [...selected] : null,
+        minScore: parsedMin !== null && !Number.isNaN(parsedMin) ? parsedMin : null,
+      }, controller.signal);
       if (!controller.signal.aborted) setResponse(next);
     } catch (caught) { if (!controller.signal.aborted) setError((caught as Error).message); }
     finally { if (!controller.signal.aborted) setSearching(false); }
@@ -168,7 +153,7 @@ export default function SearchLab() {
   return <div className="space-y-6 text-zinc-900 dark:text-zinc-100">
     <header className="flex flex-wrap items-start justify-between gap-3">
       <div><h1 className="text-2xl font-bold tracking-tight">Search Lab</h1>
-        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Find manga by story or scene. Compare summary and original-page matches.</p></div>
+        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Find manga by story summary with two-stage embedding retrieval and cross-encoder reranking.</p></div>
       <button className={button} onClick={refreshStatus}>Refresh status</button>
     </header>
     {(serviceError || status?.error) && <div role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
@@ -182,12 +167,7 @@ export default function SearchLab() {
             <input type="search" className={`${field} mt-1.5`} value={filter} onChange={event => { setFilter(event.target.value); setOffset(0); }} placeholder="Search titles" />
           </label>
           <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400">Filter
-            <select
-              aria-label="Filter manga collection"
-              className={`${field} mt-1`}
-              value={statusFilter}
-              onChange={event => { setStatusFilter(event.target.value as SearchStatusFilter); setOffset(0); }}
-            >
+            <select aria-label="Filter manga collection" className={`${field} mt-1`} value={statusFilter} onChange={event => { setStatusFilter(event.target.value as SearchStatusFilter); setOffset(0); }}>
               <option value="all">All manga</option>
               <option value="indexed">Indexed</option>
               <option value="not-indexed">Not indexed</option>
@@ -209,12 +189,12 @@ export default function SearchLab() {
               <input type="checkbox" className="mt-1 h-4 w-4 shrink-0 accent-indigo-600" checked={selected.has(item.id)} onChange={event => { const checked = event.target.checked; setSelected(previous => { const next = new Set(previous); if (checked) next.add(item.id); else next.delete(item.id); return next; }); }} />
               <MangaThumbnail coverUrl={item.coverUrl} title={item.title} />
               <span className="min-w-0 flex-1"><span className="block break-words text-sm font-medium">{item.title}</span>
-                <span className="mt-1 block text-xs leading-5 text-zinc-600 dark:text-zinc-400"><span className="font-medium">{item.summaryIndexed || item.indexedPages ? 'Indexed' : 'Not indexed'}</span> · {item.indexedPages} / {item.pageCount} pages · {item.originalCount} originals<br />Summary: {item.summaryOutdated || item.summaryStale ? 'outdated' : item.summaryIndexed ? 'indexed' : item.summaryAvailable ? 'ready to embed' : 'missing'}</span>
-                {item.outdated && <span className="block text-xs text-amber-800 dark:text-amber-300">Refresh embeddings to use current content</span>}
+                <span className="mt-1 block text-xs leading-5 text-zinc-600 dark:text-zinc-400"><span className="font-medium">{item.summaryIndexed ? 'Indexed' : 'Not indexed'}</span> · {item.pageCount} pages<br />Summary: {item.summaryOutdated || item.summaryStale ? 'outdated' : item.summaryIndexed ? 'indexed' : item.summaryAvailable ? 'ready to embed' : 'missing'}</span>
+                {item.outdated && <span className="block text-xs text-amber-800 dark:text-amber-300">Refresh embeddings to use current summary</span>}
                 {(!item.summaryAvailable || item.summaryStale) && <Link className="mt-1.5 inline-block text-xs text-indigo-700 underline underline-offset-2 dark:text-indigo-300" onClick={event => event.stopPropagation()} to={`/gallery/manga/${encodeURIComponent(item.id)}`}>Generate summary in Gallery</Link>}
               </span>
             </label>
-            {(item.summaryIndexed || item.indexedPages > 0) && <button className="ml-20 mt-2 rounded-md px-2 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 disabled:opacity-50 dark:text-rose-300 dark:hover:bg-rose-950/40" aria-label={`Remove indexed data for ${item.title}`} title={activeJob ? 'Wait for embedding to finish' : undefined} disabled={busy || !!activeJob} onClick={() => void removeIndex(item)}>Remove indexed data</button>}
+            {item.summaryIndexed && <button className="ml-20 mt-2 rounded-md px-2 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 disabled:opacity-50 dark:text-rose-300 dark:hover:bg-rose-950/40" aria-label={`Remove indexed data for ${item.title}`} title={activeJob ? 'Wait for embedding to finish' : undefined} disabled={busy || !!activeJob} onClick={() => void removeIndex(item)}>Remove indexed data</button>}
           </div>)}
         </div>
         <div className="flex items-center justify-between gap-2 text-xs">
@@ -223,7 +203,8 @@ export default function SearchLab() {
           <button className={button} disabled={offset + PAGE_SIZE >= total || loadingManga} onClick={() => setOffset(value => value + PAGE_SIZE)}>Next</button>
         </div>
         <button className={`${primary} w-full`} disabled={!selected.size || busy || !!activeJob || !status?.available} onClick={() => void act('embed')}>{busy ? 'Saving job…' : `Embed selected (${selected.size})`}</button>
-        <p className="text-xs leading-5 text-zinc-600 dark:text-zinc-400">Original pages and fresh summaries only. Unchanged embeddings are reused; missing sources are skipped.</p>
+        <button className={`${button} mt-2 w-full border-rose-300 text-rose-700 hover:bg-rose-50 focus-visible:ring-rose-500 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/40`} disabled={busy || !!activeJob || !status?.available} title={activeJob ? 'Wait for embedding to finish' : undefined} onClick={() => void removeIndex()}>{busy ? 'Working…' : 'Remove all indexed data'}</button>
+        <p className="text-xs leading-5 text-zinc-600 dark:text-zinc-400">Fresh summaries only. Unchanged embeddings are reused; missing summaries are skipped.</p>
         {latestJob && <JobProgress job={latestJob} busy={busy || (!!activeJob && latestJob.id !== activeJob.id)} onAction={(action, id) => void act(action, id)} />}
         {(status?.jobs.length || 0) > 1 && <details><summary className="cursor-pointer text-sm">Earlier jobs</summary>{status?.jobs.filter(job => job.id !== latestJob?.id).map(job => <JobProgress key={job.id} job={job} busy={busy || !!activeJob} onAction={(action, id) => void act(action, id)} />)}</details>}
       </aside>
@@ -231,48 +212,55 @@ export default function SearchLab() {
         <form onSubmit={event => { event.preventDefault(); void search(); }} className="space-y-4">
           <label className="block text-sm font-semibold" htmlFor="semantic-query">Describe a story or scene</label>
           <textarea id="semantic-query" className={field} rows={3} value={query} onChange={event => setQuery(event.target.value)} placeholder="A lonely traveler finds an unexpected friend in a ruined city" aria-describedby="query-help" required maxLength={5000} />
-          <p id="query-help" className="text-xs text-zinc-600 dark:text-zinc-400">English queries. {mode === 'summary' ? 'Up to 512 model tokens, including the search instruction.' : 'Up to 64 model tokens; keep scene descriptions short.'} Tokens are checked when you search.</p>
-          <fieldset className="flex flex-wrap gap-2"><legend className="sr-only">Search mode</legend>
-            {(['summary', 'image', 'combined'] as const).map(value => <label key={value} className={`cursor-pointer rounded-lg border px-4 py-2 text-sm has-focus-visible:ring-2 has-focus-visible:ring-indigo-500 ${mode === value ? 'border-indigo-600 bg-indigo-50 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-200' : 'border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800'}`}>
-              <input className="sr-only" type="radio" name="search-mode" value={value} checked={mode === value} onChange={() => { setMode(value); if (response || searching) void search(value); }} />{value === 'image' ? 'Images' : value === 'summary' ? 'Summary' : 'Combined'}
-            </label>)}
-          </fieldset>
+          <p id="query-help" className="text-xs text-zinc-600 dark:text-zinc-400">English queries up to 512 model tokens. Stage 1 retrieves top summary candidates by cosine similarity; Stage 2 reranks them with mxbai-rerank-xsmall-v1.</p>
           <div className="flex flex-wrap items-end gap-3">
             <label className="min-w-0 flex-1 text-xs font-medium">Search within<select className={`${field} mt-1`} value={scope} onChange={event => { setScope(event.target.value); setResponse(null); }}><option value="all">All indexed manga</option><option value="selected">Selected manga only ({selected.size})</option></select></label>
+            <label className="w-44 text-xs font-medium">Min rerank score (0–1)<input type="number" min="0" max="1" step="0.05" placeholder="None (top 20)" className={`${field} mt-1`} value={minScore} onChange={event => setMinScore(event.target.value)} /></label>
             <button type="submit" className={primary} disabled={searching || !query.trim() || !status?.available || (scope === 'selected' && !selected.size)}>{searching ? 'Searching…' : 'Search manga'}</button>
           </div>
         </form>
         {error && <p role="alert" className="break-words rounded-lg border border-rose-300 p-3 text-sm text-rose-700 dark:border-rose-900 dark:text-rose-300">{error}</p>}
         <div aria-live="polite" aria-busy={searching}>
-          {searching && <p className="py-8 text-sm text-zinc-600 dark:text-zinc-400">Finding matches… The first search may download and load local models.</p>}
-          {!response && !searching && <div className="border-t border-zinc-200 py-10 dark:border-zinc-800"><h2 className="text-lg font-semibold">Build a small collection, then compare.</h2><p className="mt-2 max-w-prose text-sm leading-6 text-zinc-600 dark:text-zinc-400">Select a few manga and embed them first. Summary finds story matches; Images finds visual matches in original pages. Combined brings both rankings together.</p></div>}
-          {response && <>
-            <div className="border-b border-zinc-200 pb-3 dark:border-zinc-800"><h2 className="text-lg font-semibold">{response.results.length} manga found</h2><p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">{response.elapsedMs.toLocaleString()} ms · Similarities are cosine scores, not confidence percentages.{response.mode === 'combined' ? ' Combined uses rank fusion, not an average similarity.' : ''}</p>
-              <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-400">Scope coverage: {response.coverage.indexedSummaries} / {response.coverage.manga} summaries · {response.coverage.indexedPages.toLocaleString()} / {response.coverage.pages.toLocaleString()} pages indexed.</p>
-              {(response.indexing || response.partial || response.coverage.indexedPages < response.coverage.pages || response.coverage.indexedSummaries < response.coverage.manga) && <p className="mt-2 text-sm text-amber-800 dark:text-amber-300">Partial coverage: results use completed embeddings. Refresh your search as indexing progresses.</p>}
+          {searching && <p className="py-8 text-sm text-zinc-600 dark:text-zinc-400">Finding and reranking matches… The first search may download and load local models.</p>}
+          {!response && !searching && <div className="border-t border-zinc-200 py-10 dark:border-zinc-800"><h2 className="text-lg font-semibold">Embed summaries, then search and inspect both stages.</h2><p className="mt-2 max-w-prose text-sm leading-6 text-zinc-600 dark:text-zinc-400">Select summarized manga and embed them first. Queries retrieve up to 50 initial candidates by embedding similarity, then rerank them with mxbai-rerank-xsmall-v1.</p></div>}
+          {response && <div className="space-y-4">
+            <div className="border-b border-zinc-200 pb-3 dark:border-zinc-800">
+              <h2 className="text-lg font-semibold">{response.results.length} manga after reranking <span className="text-sm font-normal text-zinc-500 dark:text-zinc-400">({response.initialResults.length} Stage 1 candidates)</span></h2>
+              <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">{response.elapsedMs.toLocaleString()} ms total (Stage 1 embedding: {response.embeddingMs.toLocaleString()} ms · Stage 2 rerank: {response.rerankMs.toLocaleString()} ms){response.minScore !== null ? ` · Filtered by rerank score ≥ ${response.minScore}` : ''}</p>
+              <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-400">Scope coverage: {response.coverage.indexedSummaries} / {response.coverage.manga} summaries indexed.</p>
+              {(response.indexing || response.partial || response.coverage.indexedSummaries < response.coverage.manga) && <p className="mt-2 text-sm text-amber-800 dark:text-amber-300">Partial coverage: results use completed summary embeddings. Refresh your search as indexing progresses.</p>}
             </div>
-            {!response.results.length && <p className="py-8 text-sm text-zinc-600 dark:text-zinc-400">No indexed matches in this scope. Embed manga with an available source, or search all indexed manga.</p>}
+            {response.initialResults.length > 0 && <details className="rounded-lg border border-zinc-200 bg-zinc-50/70 p-3 text-xs dark:border-zinc-800 dark:bg-zinc-900/50">
+              <summary className="cursor-pointer font-semibold text-zinc-800 dark:text-zinc-200">Initial Embedding Results — Stage 1 Debug ({response.initialResults.length} candidates in embedding cosine order)</summary>
+              <ol className="mt-3 max-h-72 divide-y divide-zinc-200 overflow-y-auto pr-1 dark:divide-zinc-800">
+                {response.initialResults.map(item => <li key={item.groupId} className="py-2">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <Link to={item.readerUrl} className="font-medium text-zinc-900 underline-offset-2 hover:underline dark:text-zinc-100">#{item.rank}. {item.title}</Link>
+                    <span className="shrink-0 font-mono tabular-nums text-indigo-700 dark:text-indigo-300">cosine {formatSimilarity(item.summarySimilarity)}</span>
+                  </div>
+                  {item.excerpt && <p className="mt-1 line-clamp-2 text-zinc-600 dark:text-zinc-400">{item.excerpt}</p>}
+                </li>)}
+              </ol>
+            </details>}
+            {!response.results.length && <p className="py-8 text-sm text-zinc-600 dark:text-zinc-400">{response.initialResults.length ? 'No candidates met the minimum rerank score threshold. Lower or clear the min score filter.' : 'No indexed summary matches in this scope. Embed manga with a summary, or search all indexed manga.'}</p>}
             <ol className="divide-y divide-zinc-200 dark:divide-zinc-800">
               {response.results.map(result => <li key={result.groupId} className="py-6">
-                <div className="flex items-baseline gap-3"><span className="text-xl font-semibold tabular-nums text-zinc-500 dark:text-zinc-400" aria-label={`Rank ${result.rank}`}>{result.rank}.</span><Link to={result.readerUrl} className="min-w-0 break-words text-lg font-semibold underline-offset-4 hover:underline">{result.title}</Link></div>
+                <div className="flex flex-wrap items-baseline gap-3">
+                  <span className="text-xl font-semibold tabular-nums text-zinc-500 dark:text-zinc-400" aria-label={`Rank ${result.rank}`}>{result.rank}.</span>
+                  <Link to={result.readerUrl} className="min-w-0 break-words text-lg font-semibold underline-offset-4 hover:underline">{result.title}</Link>
+                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium tabular-nums ${result.rankDelta > 0 ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' : result.rankDelta < 0 ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300' : 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300'}`}>{formatRankDelta(result.rankDelta, result.initialRank)}</span>
+                </div>
                 <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-xs">
-                  {response.mode !== 'image' && <div><dt className="text-zinc-600 dark:text-zinc-400">Summary similarity</dt><dd className="mt-1 font-semibold tabular-nums">{formatSimilarity(result.summarySimilarity)}</dd></div>}
-                  {response.mode !== 'summary' && <div><dt className="text-zinc-600 dark:text-zinc-400">Image similarity</dt><dd className="mt-1 font-semibold tabular-nums">{formatSimilarity(result.imageSimilarity)}</dd></div>}
-                  {result.combinedScore !== null && <div><dt className="text-zinc-600 dark:text-zinc-400">Combined ranking score</dt><dd className="mt-1 font-semibold tabular-nums">{result.combinedScore.toFixed(6)}</dd></div>}
+                  <div><dt className="text-zinc-600 dark:text-zinc-400">Rerank score (sigmoid)</dt><dd className="mt-1 font-semibold tabular-nums">{result.rerankScore.toFixed(4)} <span className="font-normal text-zinc-500 dark:text-zinc-400">(logit {result.rerankLogit.toFixed(4)})</span></dd></div>
+                  <div><dt className="text-zinc-600 dark:text-zinc-400">Initial embedding cosine</dt><dd className="mt-1 font-semibold tabular-nums">{formatSimilarity(result.summarySimilarity)} <span className="font-normal text-zinc-500 dark:text-zinc-400">(Stage 1 #{result.initialRank})</span></dd></div>
                 </dl>
-                {result.coverage.outdated && <p className="mt-3 text-xs text-amber-800 dark:text-amber-300">Outdated embeddings · showing the indexed summary excerpt. Page previews show the current original.</p>}
-                {result.excerpt && <details className="mt-4"><summary className="cursor-pointer text-sm font-medium">Matching summary excerpt</summary><p className="mt-2 max-w-prose whitespace-pre-wrap text-sm leading-6 text-zinc-700 dark:text-zinc-300">{result.excerpt}</p></details>}
-                {result.pages.length > 0 && <div className="mt-4 grid grid-cols-3 gap-3">
-                  {result.pages.map(page => <Link key={page.pageId} to={page.readerUrl} className="group min-w-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">
-                    <img src={apiUrl(page.imageUrl)} alt={`${result.title}, original page ${page.pageNumber}`} loading="lazy" className="aspect-[3/4] w-full rounded-lg border border-zinc-200 bg-white object-contain group-hover:border-indigo-500 dark:border-zinc-700" />
-                    <span className="mt-2 block text-xs text-zinc-600 dark:text-zinc-400">Page {page.pageNumber} · {formatSimilarity(page.similarity)}</span>
-                  </Link>)}
-                </div>}
+                {result.coverage.outdated && <p className="mt-3 text-xs text-amber-800 dark:text-amber-300">Outdated summary embeddings · showing the indexed summary excerpt.</p>}
+                {result.excerpt && <details className="mt-4" open><summary className="cursor-pointer text-sm font-medium">Matching summary excerpt</summary><p className="mt-2 max-w-prose whitespace-pre-wrap text-sm leading-6 text-zinc-700 dark:text-zinc-300">{result.excerpt}</p></details>}
               </li>)}
             </ol>
-          </>}
+          </div>}
         </div>
-        {status && <details className="border-t border-zinc-200 pt-4 text-xs text-zinc-600 dark:border-zinc-800 dark:text-zinc-400"><summary className="cursor-pointer">Local model details</summary><p className="mt-2 break-words leading-6">{status.models.summary}<br />{status.models.image}<br />Device: {status.device}<br />This session: {status.metrics.embeddedItems} items embedded in {status.metrics.embeddingSeconds.toFixed(1)} seconds.</p></details>}
+        {status && <details className="border-t border-zinc-200 pt-4 text-xs text-zinc-600 dark:border-zinc-800 dark:text-zinc-400"><summary className="cursor-pointer">Local model details</summary><p className="mt-2 break-words leading-6">Embedding: {status.models.summary}<br />Reranker: {status.models.reranker}<br />Device: {status.device}<br />This session: {status.metrics.embeddedItems} items embedded in {status.metrics.embeddingSeconds.toFixed(1)} seconds.</p></details>}
       </section>
     </div>
   </div>;

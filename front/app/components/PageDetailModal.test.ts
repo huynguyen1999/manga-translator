@@ -13,6 +13,10 @@ import {
   resolveTranslatorModel,
   shouldLoadTranslationArtifacts,
 } from "@/components/PageDetailModal";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router";
+import { PageDetailHeader } from "@/features/page-detail/PageDetailHeader";
 import { resultFolderFromUrl } from "@/utils/resultPaths";
 
 // 1. Navigation index resolution
@@ -327,4 +331,75 @@ assert.equal(resolvedNested.translation.targetLanguage, "简体中文 (CHS)");
 assert.equal(resolvedNested.colorization?.enabled, false);
 assert.equal(resolvedNested.upscaling?.enabled, false);
 
+// 10. PageDetailHeader Edit button rendering
+const baseHeaderProps = {
+  titlePrefix: "Page Detail",
+  zoomLevel: 1,
+  setZoomLevel: () => {},
+  viewMode: "translated" as const,
+  setViewMode: () => {},
+  originalTextAvailable: true,
+  resolvedOriginalUrl: "/result/folder123/input.png",
+  resolvedResultUrl: "/result/folder123/final.png",
+  resolvedInpaintedUrl: "/result/folder123/inpainted.jpg",
+  resolvedBubbleMaskUrl: null,
+  setShowBubbleBoxes: () => {},
+  showBubbleBoxes: false,
+  bubbleCount: 2,
+  setShowOriginalRegions: () => {},
+  showOriginalRegions: false,
+  originalRegionCount: 2,
+  setIsHoldingOriginal: () => {},
+  handleRetry: async () => {},
+  isRetrying: false,
+  retryStatus: null,
+  handleRerender: async () => {},
+  isRerendering: false,
+  rerenderStatus: null,
+  handleCopyLink: async () => {},
+  copyLinkStatus: null,
+  handleDownload: () => {},
+  attachCloseButton: () => {},
+  onClose: () => {},
+};
+
+const renderHeader = (image: FinishedImage, onEdit?: (img: FinishedImage) => void) => {
+  return renderToStaticMarkup(
+    React.createElement(MemoryRouter, null,
+      React.createElement(PageDetailHeader, {
+        ...baseHeaderProps,
+        image,
+        isOriginal: image.sourceType === "original",
+        onEdit,
+      }),
+    ),
+  );
+};
+
+// Completed translated image with onEdit -> Edit button rendered
+const completedTranslatedImage: FinishedImage = {
+  ...mockImg,
+  sourceType: "translated",
+  hasTextRegions: true,
+  folder: "folder123",
+};
+const completedMarkup = renderHeader(completedTranslatedImage, () => {});
+assert.match(completedMarkup, /Edit \/ Typeset/);
+assert.match(completedMarkup, /title="Interactive Typesetter &amp; Visual Editor"/);
+
+// Original image -> No edit button
+const originalImage: FinishedImage = {
+  ...mockImg,
+  sourceType: "original",
+  hasTextRegions: false,
+  folder: "folder123",
+};
+const originalMarkup = renderHeader(originalImage, () => {});
+assert.doesNotMatch(originalMarkup, /Edit \/ Typeset/);
+
+// Completed translated image without onEdit -> No edit button
+const noEditCallbackMarkup = renderHeader(completedTranslatedImage, undefined);
+assert.doesNotMatch(noEditCallbackMarkup, /Edit \/ Typeset/);
+
 console.log("PageDetailModal unit tests passed successfully!");
+

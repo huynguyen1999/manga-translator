@@ -16,6 +16,7 @@ def _extract_region_damage_masks(
     regions: List[Any],
     shape: Tuple[int, int],
     inpaint_mask: Optional[np.ndarray] = None,
+    source_masks: Optional[List[np.ndarray]] = None, owner: Optional[np.ndarray] = None,
 ) -> Dict[int, np.ndarray]:
     """Assign captured inpaint/text-removal mask pixels to individual text regions."""
     h, w = shape[:2]
@@ -26,7 +27,12 @@ def _extract_region_damage_masks(
     if not free_regions:
         return {}
 
-    source_masks = [_region_source_mask(r, (h, w)) > 0 for r in free_regions]
+    source_masks = source_masks or [_region_source_mask(r, (h, w)) > 0 for r in free_regions]
+    if owner is None:
+        owner = np.argmin(np.stack([
+            cv2.distanceTransform((~source).astype(np.uint8), cv2.DIST_L2, 5)
+            for source in source_masks
+        ]), axis=0)
     if inpaint_mask is not None and np.any(inpaint_mask):
         raw_mask = (inpaint_mask > 0).astype(np.uint8)
         if raw_mask.shape[:2] != (h, w):
@@ -34,27 +40,29 @@ def _extract_region_damage_masks(
     else:
         raw_mask = np.zeros((h, w), dtype=np.uint8)
 
-    # Scope the shared mask around each source region before assigning ownership.
-    # Otherwise one free-text region would claim every unrelated erased pixel on the page.
+    # Restrict shared inpaint pixels to each source's local scope.
     scopes = []
-    distances = []
     for region, source in zip(free_regions, source_masks):
         profile = getattr(region, "_source_profile", None)
         reported_font = profile.font_size if profile is not None else getattr(region, "source_font_size", None) or getattr(region, "font_size", 12)
         font_s = max(8.0, float(_effective_source_font_size(region, reported_font)))
         radius = max(3, int(round(font_s * 1.5)))
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
-        scopes.append(cv2.dilate(source.astype(np.uint8), kernel) > 0)
-        distances.append(cv2.distanceTransform((~source).astype(np.uint8), cv2.DIST_L2, 5))
+        ys, xs = np.nonzero(source)
+        if len(xs):
+            x1, x2 = max(0, int(xs.min()) - radius), min(w, int(xs.max()) + radius + 1)
+            y1, y2 = max(0, int(ys.min()) - radius), min(h, int(ys.max()) + radius + 1)
+            scope = np.zeros((h, w), dtype=bool)
+            scope[y1:y2, x1:x2] = cv2.dilate(source[y1:y2, x1:x2].astype(np.uint8), kernel) > 0
+        else:
+            scope = np.zeros((h, w), dtype=bool)
+        scopes.append(scope)
     scope_union = np.any(np.stack(scopes, axis=0), axis=0)
-    owner = np.argmin(np.stack(distances, axis=0), axis=0)
     active_damage = (raw_mask > 0) & scope_union
-
     region_damages: Dict[int, np.ndarray] = {}
     for idx, r in enumerate(free_regions):
         claimed = (owner == idx) & active_damage & scopes[idx]
-        # Keep the exact pixels sent to inpainting. Source geometry is only a fallback
-        # for legacy captures that did not persist a mask.
+        # Preserve captured inpaint pixels; use source geometry for legacy pages.
         claimed |= source_masks[idx] if not np.any(raw_mask) else False
         region_damages[id(r)] = claimed.astype(np.uint8)
 
@@ -95,7 +103,7 @@ def build_free_text_ownership_zones(
         for seed in seeds
     ]
     owner = np.argmin(np.stack(distances, axis=0), axis=0)
-    damage_dict = _extract_region_damage_masks(free_regions, shape, inpaint_mask=inpaint_mask)
+    damage_dict = _extract_region_damage_masks(free_regions, shape, inpaint_mask, seeds, owner)
 
     zones: Dict[int, FreeTextZone] = {}
     for index, region in enumerate(free_regions):
@@ -105,8 +113,6 @@ def build_free_text_ownership_zones(
         damage_mask = raw_damage & (owner == index)  # Don't let regions fight over damage
         if not np.any(damage_mask):
             damage_mask = seeds[index].copy()
-
-        # Build distance transform & weight map over damage
         damage_dt = cv2.distanceTransform(damage_mask.astype(np.uint8), cv2.DIST_L2, 5)
         max_dt = float(damage_dt.max())
         if max_dt > 0.0:
@@ -117,12 +123,9 @@ def build_free_text_ownership_zones(
             weight_map = np.where(damage_mask, 1.0, 0.0)
             core_mask = damage_mask.copy()
 
-        # Other text obstacles (all other sources)
         other_text_mask = obstacles.text_mask.astype(bool) & ~seeds[index]
         obstacle_mask = forbidden_global | other_text_mask | ~ownership
         coverable_damage = damage_mask & ownership & ~forbidden_global & ~other_text_mask
-
-        # Precompute total weights for instant local cropped coverage checks
         core_m = core_mask > 0
         core_coverable = core_m & coverable_damage
         core_total = int(np.sum(core_coverable))
@@ -131,14 +134,11 @@ def build_free_text_ownership_zones(
             total_w = float(np.sum(coverable_damage))
         if total_w <= 0.0:
             total_w = 1.0
-
-        # Derive source bounding box
         ys, xs = np.nonzero(seeds[index])
         if len(xs):
             s_bbox = (int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1))
         else:
             s_bbox = (0, 0, w, h)
-
         damage_centroid, _ = _mask_moments(damage_mask)
         source_centroid, _ = _mask_moments(seeds[index])
         dys, dxs = np.nonzero(damage_mask)

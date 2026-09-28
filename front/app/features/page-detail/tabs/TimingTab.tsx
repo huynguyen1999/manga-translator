@@ -19,7 +19,6 @@ interface TimingTabProps {
   sidebar: PipelineDetailsSidebarState;
   onQueueRetryFromStage: (stageId: string) => Promise<void>;
 }
-
 export const TimingTab: React.FC<TimingTabProps> = ({
   timing,
   pipelineManifest,
@@ -29,18 +28,14 @@ export const TimingTab: React.FC<TimingTabProps> = ({
   sidebar,
   onQueueRetryFromStage,
 }) => {
-  const selectedRetryStageData = pipelineManifest?.stages.find(
-    (stage) => stage.id === sidebar.selectedRetryStage,
-  );
+  const selectedRetryStageData = pipelineManifest?.stages.find((stage) => stage.id === sidebar.selectedRetryStage);
   const stagesToRetry = sidebar.selectedRetryStage
     ? resolveStagesToRetry(pipelineManifest?.stages, sidebar.selectedRetryStage)
     : [];
-
   return (
     <>
       {sidebar.tab === "timing" && (
         <div className="space-y-3">
-          {/* Start / End / Duration */}
           <section
             className="rounded-lg border border-indigo-400/20 bg-indigo-500/10 p-2.5"
             aria-label="Translation timing"
@@ -106,7 +101,6 @@ export const TimingTab: React.FC<TimingTabProps> = ({
             </dl>
           </section>
 
-          {/* Per-stage breakdown */}
           <div>
             <div className="mb-1.5 flex items-center justify-between gap-3">
               <div>

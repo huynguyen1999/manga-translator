@@ -241,6 +241,7 @@ export interface TranslationSettings {
   geminiModel?: string;
   targetLanguage: string;
   translationQuality?: "fast" | "professional";
+  draftTranslator?: TranslatorKey;
   storyPlan?: StoryPlan;
   storyPageRanges?: string;
   inpaintingSize: string;
@@ -364,9 +365,8 @@ export interface MangaSummary {
   jobStagePassedCount?: number | null;
   jobPageCount?: number | null;
   jobPagesWithText?: number | null;
-  jobExtractionRequired?: boolean;
-  pageCount: number;
-  textPageCount: number;
+  jobExtractionRequired?: boolean; jobDismissed?: boolean;
+  pageCount: number; textPageCount: number;
   missingPages?: string[];
   skippedPages?: string[];
   ocrErrors?: Record<string, string>;

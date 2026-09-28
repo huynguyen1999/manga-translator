@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import os
 import sys
@@ -10,20 +9,13 @@ import time
 from urllib.parse import quote
 
 from server.search_embeddings import (
-    COLLECTION, DIMENSIONS, IMAGE_MODEL, IMAGE_REVISION, PROFILE, TEXT_MODEL,
-    TEXT_REVISION, VECTOR_NAMES, SearchEncoders, fingerprint, point_id, rank_results,
+    CANDIDATE_LIMIT, COLLECTION, DIMENSIONS, PROFILE, RERANK_MODEL,
+    RERANK_REVISION, TEXT_MODEL, TEXT_REVISION, VECTOR_NAMES, SearchEncoders,
+    fingerprint, point_id, rank_results, rerank_candidates,
 )
 from server.search_store import SearchStore, decoded
 
 logger = logging.getLogger("manga-translator.search")
-
-
-def hash_file(path):
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 class SearchService:
@@ -83,19 +75,18 @@ class SearchService:
                 return operation(*args, **kwargs)
             return await self.executor.run(run)
 
-    async def ensure_collection(self):
-        if self.schema_ready:
+    async def ensure_collection(self, reset=False):
+        if self.schema_ready and not reset:
             return
         async with self.collection_lock:
-            if self.schema_ready:
+            if self.schema_ready and not reset:
                 return
             from qdrant_client import models
             client = self.qdrant()
+            self.schema_ready = False
+            if reset and await client.collection_exists(COLLECTION): await client.delete_collection(COLLECTION)
             if not await client.collection_exists(COLLECTION):
-                await client.create_collection(COLLECTION, vectors_config={
-                    VECTOR_NAMES[modality]: models.VectorParams(size=size, distance=models.Distance.COSINE, on_disk=True)
-                    for modality, size in DIMENSIONS.items()
-                })
+                await client.create_collection(COLLECTION, vectors_config={VECTOR_NAMES[modality]: models.VectorParams(size=size, distance=models.Distance.COSINE, on_disk=True) for modality, size in DIMENSIONS.items()})
             for field in ("groupId", "sourceKey", "profile"):
                 await client.create_payload_index(COLLECTION, field, models.PayloadSchemaType.KEYWORD, wait=True)
             # Interrupted staging is never visible; discard it before accepting new work.
@@ -120,9 +111,9 @@ class SearchService:
         return {
             "available": error is None, "error": error,
             "device": self.encoders.device or "Not loaded (CUDA preferred, then MPS, CPU fallback)",
-            "profile": PROFILE, "models": {"summary": TEXT_MODEL, "image": IMAGE_MODEL},
-            "revisions": {"summary": TEXT_REVISION, "image": IMAGE_REVISION},
-            "queryLimits": {"summary": 512, "image": 64, "combined": 64},
+            "profile": PROFILE, "models": {"summary": TEXT_MODEL, "reranker": RERANK_MODEL},
+            "revisions": {"summary": TEXT_REVISION, "reranker": RERANK_REVISION},
+            "queryLimits": {"summary": 512},
             "jobs": await self.db.jobs(), "metrics": self.metrics,
             "memory": memory,
         }
@@ -145,15 +136,15 @@ class SearchService:
         if result == "UPDATE 0":
             raise ValueError("No active embedding job with that ID")
 
-    async def remove_group(self, group_id):
+    async def remove_group(self, group_id=None):
         async with self.submit_lock:
-            if self.task and not self.task.done():
-                raise ValueError("Wait for embedding to finish before removing indexed data")
-            from qdrant_client import models
+            if self.task and not self.task.done(): raise ValueError("Wait for embedding to finish before removing indexed data")
             async with self.write_lock:
-                await self.ensure_collection()
+                await self.ensure_collection(reset=group_id is None)
+                if group_id is None: return await self.db.delete_sources()
+                from qdrant_client import models
                 await self.qdrant().delete(COLLECTION, models.FilterSelector(filter=models.Filter(must=[
-                    models.FieldCondition(key="groupId", match=models.MatchValue(value=group_id)),
+                    models.FieldCondition(key="groupId", match=models.MatchValue(value=group_id))
                 ])), wait=True)
                 return await self.db.delete_sources(group_id)
 
@@ -182,21 +173,13 @@ class SearchService:
             await self.db.job_state(job_id, "error", f"{type(exc).__name__}: {exc}. Fix the service or model issue, then Resume.")
 
     async def index_item(self, item):
-        modality, key = item["modality"], item["source_key"]
-        if modality == "summary":
-            status = await self.db.store.summary_status(item["group_id"])
-            if not status or not (status.get("summary") or "").strip() or status.get("stale"):
-                return "skipped", "Generate a fresh manga summary in Gallery, then resume."
-            text = status["summary"]
-            version = fingerprint(text)
-            metadata = {}
-        else:
-            source = await self.db.image_source(item["page_id"])
-            if not source or not source["path"]:
-                return "skipped", "Original image is missing; translated images are never substituted."
-            item["group_id"] = source["manga_group_id"]
-            version = await asyncio.to_thread(hash_file, source["path"])
-            metadata = {"signature": source["signature"]}
+        key = item["source_key"]
+        status = await self.db.store.summary_status(item["group_id"])
+        if not status or not (status.get("summary") or "").strip() or status.get("stale"):
+            return "skipped", "Generate a fresh manga summary in Gallery, then resume."
+        text = status["summary"]
+        version = fingerprint(text)
+        metadata = {}
         previous = await self.db.source(key)
         if previous and previous["fingerprint"] == version and previous["profile"] == PROFILE:
             points = await self.qdrant().retrieve(COLLECTION, previous["point_ids"], with_payload=True)
@@ -205,10 +188,7 @@ class SearchService:
                     await self._activate(item, version, previous["point_ids"], metadata)
                 return "unchanged", None
         started = time.monotonic()
-        if modality == "summary":
-            chunks = await self.infer(self.encoders.chunks, text, background=True)
-        else:
-            chunks = [{"text": None}]
+        chunks = await self.infer(self.encoders.chunks, text, background=True)
         from qdrant_client import models
         ids = [point_id(key, version, i) for i in range(len(chunks))]
         # ponytail: batches of four fit the M2 baseline; tune only after measuring peak memory.
@@ -216,10 +196,10 @@ class SearchService:
             if await self.db.pool.fetchval("SELECT cancel_requested FROM search_jobs WHERE id=$1", item["job_id"]):
                 return "pending", None
             batch = chunks[offset:offset + 4]
-            values = [chunk["text"] for chunk in batch] if modality == "summary" else [source["path"]]
-            vectors = await self.infer(self.encoders.encode, modality, values, background=True)
-            points = [models.PointStruct(id=ids[offset + i], vector={VECTOR_NAMES[modality]: vector}, payload={
-                "sourceKey": key, "groupId": item["group_id"], "pageId": item["page_id"],
+            values = [chunk["text"] for chunk in batch]
+            vectors = await self.infer(self.encoders.encode, "summary", values, background=True)
+            points = [models.PointStruct(id=ids[offset + i], vector={VECTOR_NAMES["summary"]: vector}, payload={
+                "sourceKey": key, "groupId": item["group_id"], "pageId": None,
                 "profile": PROFILE, "fingerprint": version, "published": False,
                 "excerpt": chunk.get("text"), "start": chunk.get("start"), "end": chunk.get("end"),
             }) for i, (chunk, vector) in enumerate(zip(batch, vectors))]
@@ -227,12 +207,8 @@ class SearchService:
         if await self.db.pool.fetchval("SELECT cancel_requested FROM search_jobs WHERE id=$1", item["job_id"]):
             return "pending", None
         # Do not publish a mixed snapshot if content changed while the model was running.
-        if modality == "summary":
-            latest = await self.db.store.summary_status(item["group_id"])
-            stable = bool(latest and not latest.get("stale") and fingerprint(latest.get("summary") or "") == version)
-        else:
-            latest = await self.db.image_source(item["page_id"])
-            stable = bool(latest and latest["signature"] == metadata["signature"] and latest["manga_group_id"] == item["group_id"])
+        latest = await self.db.store.summary_status(item["group_id"])
+        stable = bool(latest and not latest.get("stale") and fingerprint(latest.get("summary") or "") == version)
         if not stable:
             await self.qdrant().delete(COLLECTION, models.PointIdsList(points=ids), wait=True)
             return "error", "Source changed during embedding. Resume to index its current version."
@@ -253,23 +229,20 @@ class SearchService:
         )), wait=True)
 
     async def reconcile(self):
-        """Remove deleted records; repair page ownership without recomputing vectors."""
+        """Remove deleted records and any legacy non-summary sources."""
         from qdrant_client import models
+        await self.db.pool.execute("DELETE FROM search_job_items WHERE modality<>'summary'")
         rows = await self.db.pool.fetch("""
-            SELECT s.*, p.manga_group_id AS current_group FROM search_sources s
-            LEFT JOIN manga_groups g ON g.id=s.group_id LEFT JOIN pages p ON p.id=s.page_id AND p.active
-            WHERE g.id IS NULL OR (s.modality='image' AND (p.id IS NULL OR p.manga_group_id<>s.group_id))
+            SELECT s.* FROM search_sources s
+            LEFT JOIN manga_groups g ON g.id=s.group_id
+            WHERE g.id IS NULL OR s.modality<>'summary'
             """)
         for row in rows:
             selector = models.FilterSelector(filter=models.Filter(must=[models.FieldCondition(key="sourceKey", match=models.MatchValue(value=row["source_key"]))]))
-            if row["modality"] == "image" and row["current_group"]:
-                await self.qdrant().set_payload(COLLECTION, {"groupId": row["current_group"]}, points=selector, wait=True)
-                await self.db.pool.execute("UPDATE search_sources SET group_id=$2 WHERE source_key=$1", row["source_key"], row["current_group"])
-            else:
-                await self.qdrant().delete(COLLECTION, selector, wait=True)
-                await self.db.pool.execute("DELETE FROM search_sources WHERE source_key=$1", row["source_key"])
+            await self.qdrant().delete(COLLECTION, selector, wait=True)
+            await self.db.pool.execute("DELETE FROM search_sources WHERE source_key=$1", row["source_key"])
 
-    async def grouped(self, modality, vector, group_ids=None, limit=100):
+    async def grouped(self, vector, group_ids=None, limit=CANDIDATE_LIMIT):
         from qdrant_client import models
         conditions = [models.FieldCondition(key="published", match=models.MatchValue(value=True)),
                       models.FieldCondition(key="profile", match=models.MatchValue(value=PROFILE))]
@@ -279,15 +252,14 @@ class SearchService:
             conditions.append(models.FieldCondition(key="groupId", match=models.MatchAny(any=group_ids)))
         # Refetch after removing uncommitted/orphan hits so they cannot crowd out valid manga.
         while True:
-            found = await self.qdrant().query_points_groups(COLLECTION, query=vector, using=VECTOR_NAMES[modality],
+            found = await self.qdrant().query_points_groups(COLLECTION, query=vector, using=VECTOR_NAMES["summary"],
                 query_filter=models.Filter(must=conditions), group_by="groupId", limit=limit,
-                group_size=3 if modality == "image" else 1, with_payload=True)
+                group_size=1, with_payload=True)
             hits = [hit for group in found.groups for hit in group.hits]
             keys = list({hit.payload["sourceKey"] for hit in hits})
             rows = await self.db.pool.fetch("""
                 SELECT s.* FROM search_sources s JOIN manga_groups g ON g.id=s.group_id
-                LEFT JOIN pages p ON p.id=s.page_id AND p.active
-                WHERE s.source_key=ANY($1::text[]) AND (s.modality='summary' OR p.manga_group_id=s.group_id)
+                WHERE s.source_key=ANY($1::text[]) AND s.modality='summary'
                 """, keys)
             sources = {row["source_key"]: row for row in rows}
             invalid = []
@@ -302,12 +274,12 @@ class SearchService:
                     else:
                         valid.append({**payload, "score": float(hit.score)})
                 if valid:
-                    result[str(group.id)] = sorted(valid, key=lambda hit: (-hit["score"], hit.get("pageId") or ""))
+                    result[str(group.id)] = sorted(valid, key=lambda hit: -hit["score"])
             if not invalid:
                 return result
             await self.qdrant().delete(COLLECTION, models.PointIdsList(points=invalid), wait=True)
 
-    async def query(self, query, mode, group_ids=None, limit=20):
+    async def query(self, query, group_ids=None, limit=20, min_score=None):
         started = time.monotonic()
         self.searches += 1
         self.searches_done.clear()
@@ -317,45 +289,40 @@ class SearchService:
                 if known != len(set(group_ids)):
                     raise ValueError("Some selected manga no longer exist. Refresh the collection and selection.")
             await self.ensure_collection()
-            modalities = ["summary", "image"] if mode == "combined" else [mode]
-            vectors = {modality: (await self.infer(self.encoders.encode, modality, [query], query=True))[0] for modality in modalities}
+            embed_started = time.monotonic()
+            vector = (await self.infer(self.encoders.encode, "summary", [query], query=True))[0]
             async with self.write_lock:
                 await self.reconcile()
-                groups = {modality: await self.grouped(modality, vector, group_ids) for modality, vector in vectors.items()}
-                ranked = rank_results(groups.get("summary", {}), groups.get("image", {}), mode, limit)
-                ids = [group_id for group_id, _ in ranked]
-                if mode == "combined" and ids:
-                    for modality in modalities:
-                        missing = [group_id for group_id in ids if group_id not in groups[modality]]
-                        if missing:
-                            groups[modality].update(await self.grouped(modality, vectors[modality], missing, len(missing)))
-            coverage = (await self.db.manga(group_ids=ids, limit=50))["items"] if ids else []
+                summary_groups = await self.grouped(vector, group_ids, limit=CANDIDATE_LIMIT)
+                ranked_initial = rank_results(summary_groups, limit=CANDIDATE_LIMIT)
+                ids = [group_id for group_id, _ in ranked_initial]
+            coverage = (await self.db.manga(group_ids=ids, limit=max(50, len(ids))))["items"] if ids else []
             by_id = {item["id"]: item for item in coverage}
-            results = []
-            for group_id, score in ranked:
+            initial_results = []
+            for group_id, score in ranked_initial:
                 if group_id not in by_id:
                     continue
-                summary = groups.get("summary", {}).get(group_id, [])
-                images = groups.get("image", {}).get(group_id, [])
-                pages = []
-                for hit in images:
-                    source = await self.db.image_source(hit["pageId"])
-                    if source and source["path"] and source["manga_group_id"] == group_id:
-                        pages.append({"pageId": hit["pageId"], "pageNumber": source["page_order"], "similarity": hit["score"],
-                            "imageUrl": f"/result/{quote(source['id'], safe='')}/{quote(source['path'].name, safe='')}",
-                            "readerUrl": f"/gallery/pages/{quote(source['id'], safe='')}"})
-                results.append({"rank": len(results) + 1, "groupId": group_id, "title": by_id[group_id]["title"],
-                    "summarySimilarity": summary[0]["score"] if summary else None,
-                    "imageSimilarity": images[0]["score"] if images else None,
-                    "combinedScore": score if mode == "combined" else None,
-                    "excerpt": summary[0].get("excerpt") if summary else None,
-                    "pages": pages, "coverage": by_id[group_id],
-                    "readerUrl": f"/read?manga={quote(group_id, safe='')}"})
+                summary = summary_groups.get(group_id, [])
+                initial_results.append({
+                    "rank": len(initial_results) + 1, "groupId": group_id, "title": by_id[group_id]["title"],
+                    "summarySimilarity": float(score), "excerpt": summary[0].get("excerpt") if summary else None,
+                    "coverage": by_id[group_id], "readerUrl": f"/read?manga={quote(group_id, safe='')}",
+                })
+            embedding_ms = round((time.monotonic() - embed_started) * 1000)
+            rerank_started = time.monotonic()
+            if initial_results:
+                rerank_scores = await self.infer(self.encoders.rerank, query, [item["excerpt"] or "" for item in initial_results])
+                results = rerank_candidates(initial_results, rerank_scores, limit=limit, min_score=min_score)
+            else:
+                results = []
+            rerank_ms = round((time.monotonic() - rerank_started) * 1000)
             scope_coverage = await self.db.coverage(group_ids)
-            return {"results": results, "mode": mode, "query": query, "elapsedMs": round((time.monotonic() - started) * 1000),
-                    "partial": any(result["coverage"]["partial"] for result in results),
-                    "indexing": bool(self.task and not self.task.done()), "profile": PROFILE,
-                    "coverage": scope_coverage}
+            return {
+                "results": results, "initialResults": initial_results, "query": query, "minScore": min_score,
+                "elapsedMs": round((time.monotonic() - started) * 1000), "embeddingMs": embedding_ms, "rerankMs": rerank_ms,
+                "partial": any(result["coverage"]["partial"] for result in initial_results),
+                "indexing": bool(self.task and not self.task.done()), "profile": PROFILE, "coverage": scope_coverage,
+            }
         finally:
             self.searches -= 1
             if not self.searches:

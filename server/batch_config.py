@@ -52,6 +52,7 @@ def config_for(batch: dict, item: dict) -> Config:
                     "translator": "none" if settings.get("colorizeOnly") else settings.get("translator", "deepseek"),
                     "target_lang": settings.get("targetLanguage", "ENG"),
                     "translation_quality": settings.get("translationQuality", "fast"),
+                    "draft_translator": settings.get("draftTranslator") or None,
                     "translation_batch_size": settings.get("translationBatchSize", 20),
                     "story_page_ranges": settings.get("storyPageRanges") or None,
                     "story_plan": settings.get("storyPlan"),

@@ -10,6 +10,7 @@ interface HeaderProps {
   galleryCount?: number;
   jobCount?: number;
   jobAttentionCount?: number;
+  isJobsOpen?: boolean;
   onOpenJobs?: () => void;
 }
 
@@ -21,6 +22,7 @@ export const Header: React.FC<HeaderProps> = ({
   galleryCount = 0,
   jobCount = 0,
   jobAttentionCount = 0,
+  isJobsOpen = false,
   onOpenJobs,
 }) => {
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -37,7 +39,7 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <>
       <header className="sticky top-0 z-40 w-full border-b border-zinc-200 dark:border-zinc-800 bg-white/80 dark:bg-zinc-900/80 backdrop-blur-md transition-colors">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+        <div className="mx-auto max-w-[1720px] px-4 sm:px-6 lg:px-8">
           <div className="flex flex-wrap items-center justify-between gap-2 py-2 sm:h-16 sm:flex-nowrap sm:gap-4 sm:py-0">
             {/* Logo & Title */}
             <Link
@@ -109,17 +111,22 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 type="button"
                 onClick={onOpenJobs}
-                className="flex items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-xs font-semibold text-indigo-700 transition-colors hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:border-indigo-800/80 dark:bg-indigo-950/60 dark:text-indigo-300 dark:hover:bg-indigo-950 sm:px-3"
-                aria-label={`Open jobs${jobCount ? `, ${jobCount} jobs` : ""}`}
+                aria-expanded={isJobsOpen}
+                className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 sm:px-3 ${
+                  isJobsOpen
+                    ? "border-indigo-600 bg-indigo-600 text-white shadow-xs dark:border-indigo-500 dark:bg-indigo-600 dark:text-white"
+                    : "border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:border-indigo-800/80 dark:bg-indigo-950/60 dark:text-indigo-300 dark:hover:bg-indigo-950"
+                }`}
+                aria-label={`${isJobsOpen ? "Hide" : "Show"} jobs sidebar${jobCount ? `, ${jobCount} jobs` : ""}`}
               >
-                <span className={`relative flex h-2 w-2 ${jobCount ? "" : "opacity-60"}`}>
+                <span className={`relative flex h-2 w-2 ${jobCount ? "" : isJobsOpen ? "opacity-90" : "opacity-60"}`}>
                   {jobCount > 0 && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-75" />}
-                  <span className="relative inline-flex h-2 w-2 rounded-full bg-indigo-500" />
+                  <span className={`relative inline-flex h-2 w-2 rounded-full ${isJobsOpen ? "bg-white" : "bg-indigo-500"}`} />
                 </span>
                 <span>Jobs</span>
                 {jobCount > 0 && <span className="tabular-nums">({jobCount})</span>}
                 {jobAttentionCount > 0 && (
-                  <span className="rounded-full bg-rose-500 px-1.5 py-0.5 text-xs leading-none text-white" aria-label={`${jobAttentionCount} jobs need attention`}>
+                  <span className={`rounded-full px-1.5 py-0.5 text-xs leading-none ${isJobsOpen ? "bg-white text-rose-600 font-bold" : "bg-rose-500 text-white"}`} aria-label={`${jobAttentionCount} jobs need attention`}>
                     {jobAttentionCount}
                   </span>
                 )}
@@ -180,30 +187,18 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
 
             <div className="space-y-3 text-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-600 dark:text-zinc-300">Paste screenshot</span>
-                <kbd className="rounded border border-zinc-300 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs font-mono text-zinc-700 dark:text-zinc-300">
-                  ⌘V / Ctrl+V
-                </kbd>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-600 dark:text-zinc-300">Hold to compare original</span>
-                <kbd className="rounded border border-zinc-300 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs font-mono text-zinc-700 dark:text-zinc-300">
-                  Space / O
-                </kbd>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-600 dark:text-zinc-300">Navigate in Lightbox</span>
-                <kbd className="rounded border border-zinc-300 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs font-mono text-zinc-700 dark:text-zinc-300">
-                  ← / →
-                </kbd>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-600 dark:text-zinc-300">Close viewer / dialog</span>
-                <kbd className="rounded border border-zinc-300 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs font-mono text-zinc-700 dark:text-zinc-300">
-                  Esc
-                </kbd>
-              </div>
+              {[
+                ["Paste screenshot", "⌘V / Ctrl+V"],
+                ["Hold to compare original", "Space / O"],
+                ["Switch section", "⌘← / ⌘→"],
+                ["Navigate in Lightbox", "← / →"],
+                ["Close viewer / dialog", "Esc"],
+              ].map(([action, key]) => (
+                <div key={action} className="flex items-center justify-between">
+                  <span className="text-zinc-600 dark:text-zinc-300">{action}</span>
+                  <kbd className="rounded border border-zinc-300 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs font-mono text-zinc-700 dark:text-zinc-300">{key}</kbd>
+                </div>
+              ))}
             </div>
 
             <div className="pt-2 text-right">

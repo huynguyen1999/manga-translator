@@ -102,17 +102,11 @@ export const PageDetailHeader: React.FC<PageDetailHeaderProps> = ({
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-xs text-zinc-400">
             {isDistinctMangaTitle && mangaLink ? (
-              <Link
-                to={mangaLink}
-                className="font-medium text-zinc-300 hover:text-indigo-400 truncate max-w-[200px] transition-colors"
-                title={`Open manga "${image.mangaTitle}"`}
-              >
+              <Link to={mangaLink} className="font-medium text-zinc-300 hover:text-indigo-400 truncate max-w-[200px] transition-colors" title={`Open manga "${image.mangaTitle}"`}>
                 {image.mangaTitle}
               </Link>
             ) : isDistinctMangaTitle ? (
-              <span className="font-medium text-zinc-300 truncate max-w-[200px]">
-                {image.mangaTitle}
-              </span>
+              <span className="font-medium text-zinc-300 truncate max-w-[200px]">{image.mangaTitle}</span>
             ) : null}
             {isDistinctMangaTitle && <span className="text-zinc-600">/</span>}
             <span className="text-[11px] text-zinc-400 font-medium">
@@ -126,7 +120,6 @@ export const PageDetailHeader: React.FC<PageDetailHeaderProps> = ({
       </div>
 
       <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-1.5">
-            {/* Zoom Controls */}
             <div className="flex shrink-0 items-center rounded-md bg-white/10 p-0.5" aria-label="Zoom controls">
                 <button
                   type="button"
@@ -160,7 +153,6 @@ export const PageDetailHeader: React.FC<PageDetailHeaderProps> = ({
                 </button>
             </div>
 
-            {/* View Mode and Inspection Controls */}
           {(isOriginal ? originalTextAvailable : true) && (
           <div className="flex min-w-0 flex-wrap items-center rounded-md border border-white/10 bg-white/5 p-0.5" role="tablist">
             {!isOriginal && (
@@ -325,8 +317,7 @@ export const PageDetailHeader: React.FC<PageDetailHeaderProps> = ({
           )}
 
             <div className="flex basis-full flex-wrap items-center justify-end gap-1.5 border-t border-white/10 pt-1.5">
-            {/* Edit / Typeset Button */}
-            {onEdit && image.hasTextRegions && image.sourceType !== "original" && (
+            {onEdit && (image.hasTextRegions ?? Boolean(image.folder)) && image.sourceType !== "original" && (
               <button
                 type="button"
                 onClick={() => onEdit(image)}

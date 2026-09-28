@@ -1,31 +1,14 @@
 """Search checkpoints in the application's existing PostgreSQL database."""
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
-from pathlib import Path
 
-from manga_translator.utils.image_storage import find_asset
 from server.search_embeddings import PROFILE, fingerprint
 
 
 def decoded(value, default=None):
     return json.loads(value) if isinstance(value, str) else value if value is not None else default
-
-
-def original_info(root: Path, folder: str):
-    directory = (root / folder).resolve()
-    if directory.parent != root.resolve():
-        raise ValueError("Invalid page location")
-    path = find_asset(directory, "input")
-    if path is None:
-        return None, None
-    path = path.resolve()
-    if path.parent != directory:
-        raise ValueError("Original image must be inside its page directory")
-    stat = path.stat()
-    return path, f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}"
 
 
 class SearchStore:
@@ -47,9 +30,7 @@ class SearchStore:
             await connection.execute("INSERT INTO search_jobs(id,group_ids) VALUES($1,$2::jsonb)", job_id, json.dumps(group_ids))
             await connection.execute("""
                 INSERT INTO search_job_items(job_id,source_key,group_id,page_id,modality)
-                SELECT $1, 'image:'||id, manga_group_id, id, 'image' FROM pages
-                WHERE active AND manga_group_id=ANY($2::text[])
-                UNION ALL SELECT $1, 'summary:'||id, id, NULL, 'summary' FROM manga_groups
+                SELECT $1, 'summary:'||id, id, NULL, 'summary' FROM manga_groups
                 WHERE id=ANY($2::text[])
                 """, job_id, group_ids)
         return job_id
@@ -95,7 +76,7 @@ class SearchStore:
             await connection.execute("UPDATE search_job_items SET status='pending',error=NULL WHERE job_id=$1 AND status IN ('error','skipped')", job_id)
 
     async def pending(self, job_id):
-        return await self.pool.fetchrow("SELECT * FROM search_job_items WHERE job_id=$1 AND status='pending' ORDER BY modality DESC,source_key LIMIT 1", job_id)
+        return await self.pool.fetchrow("SELECT * FROM search_job_items WHERE job_id=$1 AND status='pending' AND modality='summary' ORDER BY source_key LIMIT 1", job_id)
 
     async def finish_item(self, job_id, key, status, error=None):
         await self.pool.execute("UPDATE search_job_items SET status=$3,error=$4,updated_at=now() WHERE job_id=$1 AND source_key=$2", job_id, key, status, error)
@@ -118,33 +99,23 @@ class SearchStore:
               metadata=EXCLUDED.metadata,indexed_at=now()
             """, item["source_key"], item["group_id"], item["page_id"], item["modality"], version, PROFILE, json.dumps(ids), json.dumps(metadata))
 
-    async def delete_sources(self, group_id):
-        async with self.pool.acquire() as connection, connection.transaction():
-            rows = await connection.fetch("SELECT modality FROM search_sources WHERE group_id=$1", group_id)
-            await connection.execute("DELETE FROM search_sources WHERE group_id=$1", group_id)
-        return {"summary": sum(row["modality"] == "summary" for row in rows),
-                "images": sum(row["modality"] == "image" for row in rows)}
-
-    async def image_source(self, page_id):
-        row = await self.pool.fetchrow("SELECT id,folder,manga_group_id,page_order FROM pages WHERE id=$1 AND active", page_id)
-        if not row:
-            return None
-        path, signature = await asyncio.to_thread(original_info, self.root, row["folder"])
-        return {**dict(row), "path": path, "signature": signature}
+    async def delete_sources(self, group_id=None):
+        return dict(await self.pool.fetchrow(
+            "WITH deleted AS (DELETE FROM search_sources WHERE ($1::text IS NULL OR group_id=$1) RETURNING modality) "
+            "SELECT count(*) FILTER (WHERE modality='summary')::int AS summary FROM deleted",
+            group_id,
+        ))
 
     async def coverage(self, group_ids=None):
         row = await self.pool.fetchrow("""
             SELECT count(DISTINCT g.id)::int AS manga,
-              count(p.id)::int AS pages,
-              count(p.id) FILTER (WHERE s.source_key IS NOT NULL)::int AS indexed_pages,
               count(DISTINCT t.group_id)::int AS indexed_summaries
-            FROM manga_groups g LEFT JOIN pages p ON p.manga_group_id=g.id AND p.active
-            LEFT JOIN search_sources s ON s.page_id=p.id AND s.profile=$2
-            LEFT JOIN search_sources t ON t.source_key='summary:'||g.id AND t.profile=$2
+            FROM manga_groups g
+            LEFT JOIN search_sources t ON t.source_key='summary:'||g.id AND t.profile=$2 AND t.modality='summary'
             WHERE ($1::text[] IS NULL OR g.id=ANY($1))
               AND EXISTS (SELECT 1 FROM pages active_page WHERE active_page.active AND active_page.manga_group_id=g.id)
             """, group_ids, PROFILE)
-        return {"manga": row["manga"], "pages": row["pages"], "indexedPages": row["indexed_pages"], "indexedSummaries": row["indexed_summaries"]}
+        return {"manga": row["manga"], "indexedSummaries": row["indexed_summaries"]}
 
     async def manga(self, search="", offset=0, limit=25, group_ids=None, status="all"):
         rows = await self.pool.fetch("""
@@ -162,16 +133,10 @@ class SearchStore:
                       WHERE ms.group_id=g.id AND NULLIF(ms.payload->>'summary', '') IS NOT NULL
                   ))
                   OR ($5 = 'indexed' AND EXISTS (
-                      SELECT 1 FROM search_sources s WHERE s.group_id=g.id AND s.profile=$6
-                        AND (s.modality='summary' OR EXISTS (
-                            SELECT 1 FROM pages p WHERE p.id=s.page_id AND p.active AND p.manga_group_id=g.id
-                        ))
+                      SELECT 1 FROM search_sources s WHERE s.group_id=g.id AND s.profile=$6 AND s.modality='summary'
                   ))
                   OR ($5 = 'not-indexed' AND NOT EXISTS (
-                      SELECT 1 FROM search_sources s WHERE s.group_id=g.id AND s.profile=$6
-                        AND (s.modality='summary' OR EXISTS (
-                            SELECT 1 FROM pages p WHERE p.id=s.page_id AND p.active AND p.manga_group_id=g.id
-                        ))
+                      SELECT 1 FROM search_sources s WHERE s.group_id=g.id AND s.profile=$6 AND s.modality='summary'
                   ))
               )
             ORDER BY lower(g.title),g.id LIMIT $3 OFFSET $4
@@ -179,38 +144,21 @@ class SearchStore:
         result = []
         for row in rows:
             group_id = row["id"]
-            pages = await self.pool.fetch("SELECT id,folder FROM pages WHERE manga_group_id=$1 AND active ORDER BY page_order, folder", group_id)
-            sources = {s["source_key"]: dict(s) for s in await self.pool.fetch("SELECT * FROM search_sources WHERE group_id=$1 AND profile=$2", group_id, PROFILE)}
-            summary_info = await self.store.summary_status(group_id)
-            summary_info = summary_info or {}
+            pages = await self.pool.fetch("SELECT id FROM pages WHERE manga_group_id=$1 AND active ORDER BY page_order, folder", group_id)
+            indexed_summary = await self.pool.fetchrow(
+                "SELECT * FROM search_sources WHERE source_key=$1 AND profile=$2 AND modality='summary'",
+                "summary:" + group_id, PROFILE,
+            )
+            summary_info = await self.store.summary_status(group_id) or {}
             summary = summary_info.get("summary") or ""
-            indexed_summary = sources.get("summary:" + group_id)
-            original_count = indexed_count = outdated = 0
-            def inspect_pages():
-                inspections = []
-                for page in pages:
-                    try:
-                        inspections.append((page, original_info(self.root, page["folder"])[1]))
-                    except (OSError, ValueError):
-                        inspections.append((page, None))
-                return inspections
-            for page, signature in await asyncio.to_thread(inspect_pages):
-                original_count += signature is not None
-                source = sources.get("image:" + page["id"])
-                if source:
-                    indexed_count += 1
-                    outdated += decoded(source["metadata"], {}).get("signature") != signature
             summary_outdated = bool(indexed_summary and (summary_info.get("stale") or indexed_summary["fingerprint"] != fingerprint(summary)))
             first_page = pages[0] if pages else None
             cover_url = f"/result/{first_page['id']}/thumbnail.webp" if first_page else None
             result.append({
                 "id": group_id, "title": row["title"], "pageCount": len(pages),
-                "originalCount": original_count, "indexedPages": indexed_count,
-                "outdatedPages": outdated, "summaryAvailable": bool(summary),
-                "summaryStale": bool(summary_info.get("stale")), "summaryIndexed": bool(indexed_summary),
-                "summaryOutdated": summary_outdated,
-                "outdated": bool(outdated or summary_outdated),
-                "partial": indexed_count < len(pages) or original_count < len(pages) or not indexed_summary,
+                "summaryAvailable": bool(summary), "summaryStale": bool(summary_info.get("stale")),
+                "summaryIndexed": bool(indexed_summary), "summaryOutdated": summary_outdated,
+                "outdated": summary_outdated, "partial": not bool(indexed_summary),
                 "coverUrl": cover_url,
             })
         return {"items": result, "total": rows[0]["total"] if rows else 0}

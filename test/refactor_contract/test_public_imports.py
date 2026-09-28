@@ -97,6 +97,7 @@ def test_server_main_keeps_extracted_schema_imports_compatible():
         "_write_original_import",
         "batch_events",
         "clear_results",
+        "approve_all_manga_review",
         "create_series",
         "create_cbz_stream",
         "create_manga_summary",

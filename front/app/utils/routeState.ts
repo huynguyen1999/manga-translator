@@ -7,20 +7,11 @@ export const DEFAULT_GALLERY_PAGE_SIZE = 25;
 export const GALLERY_PAGE_SIZE_OPTIONS = [25, 50, 75, 100] as const;
 
 export interface ParsedRoute {
-  view: AppView;
-  overlay: OverlayType;
-  folder?: string;
-  mangaId?: string;
-  mangaTitle?: string;
-  seriesId?: string;
-  gallerySection?: GallerySection;
-  galleryPage?: number;
-  galleryPageSize?: number;
-  gallerySearch?: string;
-  gallerySort?: GallerySort;
-  galleryStatus?: MangaStatusFilter;
-  reviewOnly?: boolean;
-  rawPath: string;
+  view: AppView; overlay: OverlayType;
+  folder?: string; mangaId?: string; mangaTitle?: string; seriesId?: string;
+  gallerySection?: GallerySection; galleryPage?: number; galleryPageSize?: number;
+  gallerySearch?: string; gallerySort?: GallerySort; galleryStatus?: MangaStatusFilter | string;
+  galleryMinPages?: number; galleryMaxPages?: number; reviewOnly?: boolean; rawPath: string;
 }
 
 export function mangaIdForTitle(mangaTitle: string): string {
@@ -126,30 +117,31 @@ export function parseAppPath(pathname: string, search = ''): ParsedRoute {
     const pageSize = Number(query.get('pageSize'));
     const gallerySearch = query.get('search')?.trim();
     const sort = query.get('sort');
-    const gallerySort: GallerySort = sort === 'alpha-asc' || sort === 'alpha-desc' || sort === 'date-asc' || sort === 'date-desc'
-      ? sort
-      : 'date-desc';
+    const gallerySort: GallerySort = sort === 'alpha-asc' || sort === 'alpha-desc' || sort === 'date-asc' || sort === 'date-desc' ? sort : 'date-desc';
+    const validTokens = new Set(['original', 'translated', 'summarized', 'review']);
     const statusParam = query.get('status')?.trim();
-    const validStatus: MangaStatusFilter | undefined = (
-      statusParam === 'all' || statusParam === 'original' || statusParam === 'translated' || statusParam === 'summarized' || statusParam === 'review'
-    ) ? statusParam : undefined;
-    const reviewOnly = query.get('review') === 'pending' || validStatus === 'review';
-    const galleryStatus: MangaStatusFilter | undefined = reviewOnly ? 'review' : (validStatus && validStatus !== 'all' ? validStatus : undefined);
+    const parsedStatusTokens: string[] = [];
+    if (statusParam && statusParam !== 'all') {
+      for (const raw of statusParam.split(',')) {
+        const t = raw.trim();
+        if (validTokens.has(t) && !parsedStatusTokens.includes(t)) parsedStatusTokens.push(t);
+      }
+    }
+    const reviewOnly = query.get('review') === 'pending' || parsedStatusTokens.includes('review') || statusParam === 'review';
+    if (reviewOnly && !parsedStatusTokens.includes('review')) parsedStatusTokens.push('review');
+    const galleryStatus: MangaStatusFilter | string | undefined = parsedStatusTokens.length > 0
+      ? (parsedStatusTokens.length === 1 ? (parsedStatusTokens[0] as MangaStatusFilter) : parsedStatusTokens.join(','))
+      : undefined;
+    const minPagesRaw = Number(query.get('minPages') || query.get('min_pages'));
+    const galleryMinPages = Number.isInteger(minPagesRaw) && minPagesRaw > 0 ? minPagesRaw : undefined;
+    const maxPagesRaw = Number(query.get('maxPages') || query.get('max_pages'));
+    const galleryMaxPages = Number.isInteger(maxPagesRaw) && maxPagesRaw > 0 ? maxPagesRaw : undefined;
     const gallerySection: GallerySection = query.get('view') === 'series' ? 'series' : 'manga';
     return {
-      view: 'gallery',
-      overlay: 'none',
-      gallerySection,
-      mangaTitle: mangaTitle || undefined,
+      view: 'gallery', overlay: 'none', gallerySection, mangaTitle: mangaTitle || undefined,
       galleryPage: Number.isInteger(page) && page > 0 ? page : 1,
-      galleryPageSize: Number.isInteger(pageSize) && pageSize > 0 && pageSize <= 500
-        ? pageSize
-        : DEFAULT_GALLERY_PAGE_SIZE,
-      gallerySearch: gallerySearch || undefined,
-      gallerySort,
-      galleryStatus,
-      reviewOnly,
-      rawPath: cleanPath,
+      galleryPageSize: Number.isInteger(pageSize) && pageSize > 0 && pageSize <= 500 ? pageSize : DEFAULT_GALLERY_PAGE_SIZE,
+      gallerySearch: gallerySearch || undefined, gallerySort, galleryStatus, galleryMinPages, galleryMaxPages, reviewOnly, rawPath: cleanPath,
     };
   }
 
@@ -263,13 +255,9 @@ export function buildSeriesDetailUrl(seriesId: string): string {
 }
 
 export function buildGalleryPageUrl(
-  page: number,
-  pageSize = DEFAULT_GALLERY_PAGE_SIZE,
-  search = '',
-  section: GallerySection = 'manga',
-  sort: GallerySort = 'date-desc',
-  reviewOnly = false,
-  status?: MangaStatusFilter,
+  page: number, pageSize = DEFAULT_GALLERY_PAGE_SIZE, search = '', section: GallerySection = 'manga',
+  sort: GallerySort = 'date-desc', reviewOnly = false, status?: MangaStatusFilter | string,
+  minPages?: number, maxPages?: number,
 ): string {
   const params = new URLSearchParams();
   if (section === 'series') params.set('view', 'series');
@@ -277,13 +265,15 @@ export function buildGalleryPageUrl(
   if (pageSize !== DEFAULT_GALLERY_PAGE_SIZE) params.set('pageSize', String(pageSize));
   if (search.trim()) params.set('search', search.trim());
   if (sort !== 'date-desc') params.set('sort', sort);
-  const effectiveStatus = reviewOnly ? 'review' : (status && status !== 'all' ? status : undefined);
+  const statusTokens = (status && status !== 'all') ? status.split(',').map(s => s.trim()).filter(Boolean) : [];
+  if (reviewOnly && !statusTokens.includes('review')) statusTokens.push('review');
+  const effectiveStatus = statusTokens.length > 0 ? statusTokens.join(',') : undefined;
   if (effectiveStatus) {
     params.set('status', effectiveStatus);
-    if (effectiveStatus === 'review') {
-      params.set('review', 'pending');
-    }
+    if (statusTokens.includes('review')) params.set('review', 'pending');
   }
+  if (minPages && minPages > 0) params.set('minPages', String(minPages));
+  if (maxPages && maxPages > 0) params.set('maxPages', String(maxPages));
   const query = params.toString();
   return query ? `/gallery?${query}` : '/gallery';
 }

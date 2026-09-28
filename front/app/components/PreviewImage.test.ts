@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { countOriginalTextRegions, parseBubbleDetections, parseDetectionRegions, parseTextRegions } from "@/utils/textRegions";
-import { getConfidenceStyle } from "@/components/PreviewImage";
+import { getConfidenceStyle, getDetectionPaintOrder } from "@/components/PreviewImage";
 
 // Helper functions that mirror PreviewImage calculation logic
 export function calculateBubblePercentages(
@@ -147,3 +147,8 @@ assert.equal(getConfidenceStyle(0.45).stroke, "#ef4444");
 assert.equal(getConfidenceStyle(null).tier, "detected");
 assert.equal(getConfidenceStyle(undefined).tier, "detected");
 console.log("getConfidenceStyle tests passed successfully!");
+
+assert.deepEqual(getDetectionPaintOrder([
+  { points: [[20, 20], [40, 20], [40, 40], [20, 40]] },
+  { points: [[0, 0], [100, 0], [100, 100], [0, 100]] },
+]), [1, 0], "Enclosing detections must paint before inner detections so the inner ones receive clicks");

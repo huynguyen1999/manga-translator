@@ -2,6 +2,49 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-28 — PostgreSQL manga search did not reliably match split query words
+
+- Symptom: Gallery manga search could return no result for words present in a title when the query used independent terms.
+- Root cause: The PostgreSQL `unnest(...)` table function used `word` only as a table alias, while the filter treated it as the scalar token column.
+- Fix: Name the function output column explicitly with `AS words(token)` and use `token` in the per-word match.
+- Prevention: When querying a set-returning SQL function, name its output column separately from its table alias.
+
+## 2026-09-28 — Translation job page detail modal omitted the visual editor button
+
+- Symptom: Opening page detail for a completed translation job in the Studio or Jobs drawer did not show the "Edit / Typeset" button in the header.
+- Root cause: `PageDetailModal` in `App.tsx` omitted the `onEdit` callback prop, causing `PageDetailHeader` to suppress the editor button even when the completed page had text regions and a result folder.
+- Fix: Passed `onEdit` callback in `App.tsx` to close the lightbox modal and navigate to the visual editor via `handleOpenPageEdit(image.folder)`, ensured `PageDetailHeader` checks `(image.hasTextRegions ?? Boolean(image.folder)) && image.sourceType !== "original"`, and explicitly set `sourceType: "translated"` for completed queue items.
+- Prevention: Added unit test assertions in `PageDetailModal.test.ts` verifying that `PageDetailHeader` renders the edit button on completed translated pages with `onEdit` provided and omits it for original images or missing callbacks.
+
+## 2026-09-28 — Free-text layout repeated page-scale preparation
+
+- Symptom: Reported p98 layout pages spent several seconds preparing free-text ownership zones and typography candidates.
+- Root cause: Source distance transforms were repeated when assigning inpaint damage, local damage scopes were dilated across the full page, and each typography candidate's ink was rasterized separately for scoring and diagnostics.
+- Fix: Reuse source masks and nearest-owner maps, dilate only the exact padded influence region, and pass the existing ink metrics into the scorer.
+- Prevention: Compare scope masks at page edges and assert distance-map reuse and one ink measurement per candidate.
+
+## 2026-09-28 — Shadow layout probes changed exhaustive diagnostics
+
+- Symptom: Shadow comparison could change rejection and profiling counters in the returned exhaustive layout.
+- Root cause: The fast probe shared mutable profile, rejection, raster-cache, and offset-result state with exhaustive search.
+- Fix: Run the ideal probe with disposable state, then start exhaustive search with clean caches and keep comparison metrics separate.
+- Prevention: Deep-compare returned exhaustive QA and workload counters with and without shadow mode.
+- Follow-up: Compute shadow rendered-mask IoU and area deltas from the validated compositor footprints, including warp and stroke, rather than raw line glyph masks.
+
+## 2026-09-28 — Conflict-only reruns suppressed existing exhaustive layouts
+
+- Symptom: Two corpus pages gained `no_joint_layout` when conflict reruns were limited to fast candidates.
+- Root cause: Exhaustive candidates with an unavoidable pairwise conflict also relied on a deeper `force_exhaustive` rerun.
+- Fix: Retain the existing rerun for exhaustive-only conflicts; rerun only the fast participant in mixed conflicts.
+- Prevention: Check both mixed and exhaustive-only conflict pairs and compare corpus render output with the baseline.
+
+## 2026-09-27 — Enclosing detector polygons intercepted inner-region clicks
+
+- Symptom: Clicking a smaller detected text region inside an overlapping parent often selected the parent instead.
+- Root cause: Original detector polygons were painted in detector order, with later enclosing polygons hit-tested above the smaller inner polygons.
+- Fix: Paint detector polygons largest-first while retaining each region's original selection index, leaving the smallest overlapping polygon clickable on top.
+- Prevention: Keep a nested-polygon paint-order regression and check that parent/child regions remain individually selectable.
+
 ## 2026-09-27 — Summary job extraction steps did not show incremental per-step page progress
 
 - Symptom: During summary generation with batched OCR extraction, each step (`Detection`, `OCR`, `Merge text lines`) jumped all at once only after the entire stage finished, remained stuck showing `Detection 38/38 pages done` while the first `OCR` sub-batch ran, and hid `X/Y pages done` on completed and pending steps in `SummaryJobRow`.
@@ -1460,3 +1503,10 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 - Root cause: The validation path read optional layout metadata as a required attribute.
 - Fix: Read suppression state with `getattr(..., False)` so direct and partially populated blocks remain valid.
 - Prevention: Keep inpainting preflight covered with standalone `TextBlock` fixtures.
+
+## 2026-09-28 — Gallery search from manga detail lost its query
+
+- Symptom: Searching from a manga detail returned to an unfiltered gallery.
+- Root cause: Search navigation to `/gallery?search=...` was followed by detail-close navigation using the prior route state.
+- Fix: Let route-backed search own the transition; close the detail locally only when no route search callback exists.
+- Prevention: Keep route navigation and the local detail-close fallback mutually exclusive on search submission.

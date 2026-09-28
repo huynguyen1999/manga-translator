@@ -169,14 +169,10 @@ def _scan_results(
     }
 
 def _scan_manga_groups(
-    result_dir: Path,
-    limit: Optional[int] = None,
-    offset: int = 0,
-    manga_id: Optional[str] = None,
-    search: Optional[str] = None,
-    sort: str = "alpha-asc",
-    review: Optional[str] = None,
-    status: Optional[str] = None,
+    result_dir: Path, limit: Optional[int] = None, offset: int = 0,
+    manga_id: Optional[str] = None, search: Optional[str] = None, sort: str = "alpha-asc",
+    review: Optional[str] = None, status: Optional[str] = None,
+    min_pages: Optional[int] = None, max_pages: Optional[int] = None,
 ):
     import datetime
     from pathlib import Path
@@ -187,21 +183,23 @@ def _scan_manga_groups(
         if d.is_dir() and not (d / ".ai-case").is_file() and final_file(d) is not None
     ]
 
-    effective_status = "review" if review == "pending" or status == "review" else (status or "all")
+    status_tokens = {s.strip() for s in status.split(",") if s.strip() and s.strip() != "all"} if status else set()
+    if review == "pending":
+        status_tokens.add("review")
     groups_map = {}
-    query = search.strip().casefold() if search and search.strip() else ""
+    search_tokens = [t.casefold() for t in search.split()] if search and search.strip() else []
 
     for item_path in valid_dirs:
         folder_name = item_path.name
         meta = _get_cached_meta(item_path)
         review_status = _review_status(meta, item_path)
-        if effective_status == "review" and review_status != "pending":
+        if "review" in status_tokens and review_status != "pending":
             continue
 
         manga_title = (meta.get("mangaTitle") or "Ungrouped").strip() or "Ungrouped"
         if manga_id and manga_id not in {_manga_id(manga_title), manga_title}:
             continue
-        if query and query not in manga_title.casefold():
+        if search_tokens and not all(t in manga_title.casefold() for t in search_tokens):
             continue
 
         source_type = _source_type(meta)
@@ -281,24 +279,21 @@ def _scan_manga_groups(
         saved = load_summary(result_dir, title)
         has_summary = bool(saved and saved.get("summary"))
 
-        if effective_status == "translated" and group["translatedCount"] == 0:
-            continue
-        if effective_status == "original" and (group["originalCount"] == 0 or group["translatedCount"] > 0):
-            continue
-        if effective_status == "summarized" and not has_summary:
-            continue
-        if effective_status == "review" and group["needsReviewCount"] == 0:
+        if (
+            ("translated" in status_tokens and group["translatedCount"] == 0)
+            or ("original" in status_tokens and (group["originalCount"] == 0 or group["translatedCount"] > 0))
+            or ("summarized" in status_tokens and not has_summary)
+            or ("review" in status_tokens and group["needsReviewCount"] == 0)
+            or (min_pages is not None and group["count"] < min_pages)
+            or (max_pages is not None and group["count"] > max_pages)
+        ):
             continue
 
         total_images += group["count"]
         groups.append({
-            "id": group["id"],
-            "title": title,
-            "count": group["count"],
-            "needsReviewCount": group["needsReviewCount"],
-            "cover": group["coverCandidate"],
-            "latestFinishedAt": group["latestFinishedAt"],
-            "hasSummary": has_summary,
+            "id": group["id"], "title": title, "count": group["count"],
+            "needsReviewCount": group["needsReviewCount"], "cover": group["coverCandidate"],
+            "latestFinishedAt": group["latestFinishedAt"], "hasSummary": has_summary,
         })
 
     others = [group for group in groups if group["title"] != "Ungrouped"]

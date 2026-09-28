@@ -1,13 +1,13 @@
 # Agent routing
 
-- The root session uses the current Sol model (`gpt-5.6-sol`) for planning, architecture, delegation, integration, and final decisions.
+- The root session uses the current Sol model (`gpt-6-sol`) for planning, architecture, hard debugging, delegation, integration, and final decisions.
 - Never create, spawn, delegate to, or configure a Sol subagent, including temporary or dynamically named agents. Sol is reserved for the root orchestrator.
-- The default subagent model is `gpt-5.6-luna`, configured under `[agents]` in the user `config.toml`.
+- The default subagent model is `gpt-6-luna`, configured under `[agents]` in the user `config.toml`.
 - Use the named roles first: `researcher` and `browser_debugger` for bounded read-only investigation, `coder` for implementation and tests, and `reviewer` for read-only diff review.
 - Every delegation must pass an explicit named `agent_type` and use fresh context. With Multi-Agent V1, pass `fork_context=false`; with the current agent tool, pass `fork_turns="none"`. Prompts must be self-contained and bounded, with exact write scope and proof required. Keep concurrent write sets disjoint.
-- Installed Codex CLI 0.156.1 has no global `fork_turns` config setting; enforce fresh context at dispatch and do not invent a TOML key.
+- Installed Codex CLI 0.157.1 has no global `fork_turns` config setting; enforce fresh context at dispatch with `fork_turns="none"` and do not invent a TOML key.
 - `browser_debugger` is read-only and uses Chrome DevTools MCP at `http://localhost:3000/mcp` with a 20-second startup timeout.
-- Pinned roles: `researcher` and `browser_debugger` use `gpt-5.6-luna`; `coder` uses `gpt-5.6-luna`; `reviewer` uses `gpt-5.6-terra`.
+- Pinned roles: `researcher`, `browser_debugger`, and `coder` use `gpt-6-luna`; `reviewer` remains on `gpt-5.6-terra`.
 - Dispatch only with an explicit named `agent_type` and fresh context; never use an unspecified, inherited, temporary, dynamic, or `executor_sol` worker. `executor_sol` is a legacy alias and must not be spawned.
 - Keep the root lead responsible for decomposition, architecture, synthesis, integration, and final verification; close completed delegated work promptly.
 

@@ -77,7 +77,7 @@ try {
   assert.equal(state.totalGroups, 4);
   assert.equal(state.totalImages, 12);
   assert.deepEqual(loadingChanges, [true, false]);
-  assert.deepEqual(cache.get("2:50:One Piece:alpha-desc:translated"), {
+  assert.deepEqual(cache.get("2:50:One Piece:alpha-desc:translated::"), {
     groups: responseGroups,
     totalGroups: 4,
     totalImages: 12,

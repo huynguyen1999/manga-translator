@@ -278,11 +278,8 @@ class PostgresBatchStore(BatchStore):
         )
         return [
             {
-                "id": row["id"],
-                "title": row["title"],
-                "mangaTitle": row["title"],
-                "mangaGroupId": row["manga_group_id"],
-                "kind": row["kind"], "rerunMode": row["rerun_mode"],
+                "id": row["id"], "title": row["title"], "mangaTitle": row["title"], "mangaGroupId": row["manga_group_id"],
+                "kind": row["kind"], "rerunMode": row.get("rerun_mode") if isinstance(row, dict) else row["rerun_mode"],
                 "status": row["status"],
                 "dismissed": bool(row["dismissed"]),
                 "addedAt": row["added_at"],

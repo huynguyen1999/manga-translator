@@ -38,6 +38,29 @@ class TestConfig(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config.model_validate({"translator": {"translation_quality": "best"}})
 
+    def test_professional_draft_translator_validation(self):
+        config = Config.model_validate({
+            "translator": {
+                "translation_quality": "professional",
+                "draft_translator": "gemini",
+            }
+        })
+        self.assertEqual(config.translator.draft_translator, Translator.gemini)
+
+        config_empty = Config.model_validate({
+            "translator": {
+                "draft_translator": "",
+            }
+        })
+        self.assertIsNone(config_empty.translator.draft_translator)
+
+        config_none = Config.model_validate({
+            "translator": {
+                "draft_translator": "none",
+            }
+        })
+        self.assertIsNone(config_none.translator.draft_translator)
+
     def test_story_plan_is_preserved(self):
         plan = {"enabled": True, "autoDetect": True, "mergeAllPages": False, "archives": [], "segments": []}
         config = Config.model_validate({"translator": {"story_plan": plan}})

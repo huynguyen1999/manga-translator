@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { getStoredMangaReadProgress, mergeGalleryImages } from "@/utils/resultGallery";
+import { getStoredMangaReadProgress, mergeGalleryImages, matchesSearchQuery } from "@/utils/resultGallery";
 import {
   buildGalleryMangaGroups,
   getSuggestedSeriesTitle,
@@ -664,6 +664,25 @@ assert.deepEqual(filterMangaGroupsByStatus(testGroups, "original").map(g => g.ti
 assert.deepEqual(filterMangaGroupsByStatus(testGroups, "translated").map(g => g.title), ["Translated Manga", "Summarized Manga", "Review Manga"], "translated filter should return translated groups");
 assert.deepEqual(filterMangaGroupsByStatus(testGroups, "summarized").map(g => g.title), ["Summarized Manga"], "summarized filter should return only groups with summaries");
 assert.deepEqual(filterMangaGroupsByStatus(testGroups, "review").map(g => g.title), ["Review Manga"], "review filter should return only groups needing review");
+assert.deepEqual(filterMangaGroupsByStatus(testGroups, "translated,summarized").map(g => g.title), ["Summarized Manga"], "combined translated,summarized should match translated groups that have a summary");
+assert.deepEqual(filterMangaGroupsByStatus(testGroups, "translated,review").map(g => g.title), ["Review Manga"], "combined translated,review should match translated groups that need review");
+
+// Page range filtering test
+const pageRangeGroups = [
+  { title: "Short Manga", count: 3 },
+  { title: "Medium Manga", count: 15 },
+  { title: "Long Manga", count: 45 },
+];
+assert.deepEqual(filterMangaGroupsByStatus(pageRangeGroups, "all", 5, 20).map(g => g.title), ["Medium Manga"], "minPages=5 and maxPages=20 should match Medium Manga");
+assert.deepEqual(filterMangaGroupsByStatus(pageRangeGroups, "all", 20).map(g => g.title), ["Long Manga"], "minPages=20 should match Long Manga");
+assert.deepEqual(filterMangaGroupsByStatus(pageRangeGroups, "all", undefined, 10).map(g => g.title), ["Short Manga"], "maxPages=10 should match Short Manga");
+
+// Multi-token out-of-order keyword search tests
+const sampleTitle = "[Armadillo (Renji, Daiji)] Gal Oyako no Egui Kasegikata - Gyaru mother-daughter family busine";
+assert.equal(matchesSearchQuery(sampleTitle, "oyako gal"), true, "Searching out-of-order tokens 'oyako gal' should match title");
+assert.equal(matchesSearchQuery(sampleTitle, "mother oyako armadillo"), true, "Searching multiple tokens 'mother oyako armadillo' should match title");
+assert.equal(matchesSearchQuery(sampleTitle, "GAL OYAKO"), true, "Searching uppercase tokens should match case-insensitively");
+assert.equal(matchesSearchQuery(sampleTitle, "oyako naruto"), false, "Searching with a non-existent token should return false");
 
 // Search, status, pagination, and review counts remain coordinated in the view model.
 const viewGroups = testGroups.map((group, index) => ({
@@ -941,6 +960,34 @@ assert.equal(
   }),
   false,
   "Should not show initial empty library state when reviewOnly is true",
+);
+
+assert.equal(
+  shouldShowEmptyLibraryState({
+    mangaGroupsLength: 0,
+    totalImagesCount: 0,
+    mangaSearchQuery: "",
+    statusFilter: "all",
+    activeMangaFilter: "all",
+    reviewOnly: false,
+    minPages: 10,
+  }),
+  false,
+  "Should not show initial empty library state when minPages is active",
+);
+
+assert.equal(
+  shouldShowEmptyLibraryState({
+    mangaGroupsLength: 0,
+    totalImagesCount: 0,
+    mangaSearchQuery: "",
+    statusFilter: "all",
+    activeMangaFilter: "all",
+    reviewOnly: false,
+    maxPages: 50,
+  }),
+  false,
+  "Should not show initial empty library state when maxPages is active",
 );
 
 assert.equal(

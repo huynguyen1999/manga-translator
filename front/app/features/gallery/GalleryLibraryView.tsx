@@ -21,7 +21,7 @@ interface GalleryLibraryViewProps {
   filteredGroups: GalleryMangaGroup[];
   visibleGroups: GalleryMangaGroup[];
   searchQuery: string;
-  statusFilter: MangaStatusFilter;
+  statusFilter: MangaStatusFilter | string;
   onResetFilters: () => void;
   bulkSelection: BulkSelection | null;
   getCardProps: (group: GalleryMangaGroup, index: number) => MangaCardProps;

@@ -15,6 +15,8 @@ import {
   type MangaStatusFilter,
 } from "@/utils/routeState";
 
+import { useShortcutNavigation } from "./useShortcutNavigation";
+
 export const useAppNavigation = () => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -31,6 +33,8 @@ export const useAppNavigation = () => {
     [location.pathname, location.search]
   );
   const activeView = parsedRoute.view;
+
+  useShortcutNavigation(parsedRoute, navigate);
 
   const handleOpenPageView = useCallback(
     (folder: string) => {
@@ -71,89 +75,30 @@ export const useAppNavigation = () => {
     [location.pathname, location.search, location.state, navigate]
   );
 
-  const handleGalleryPageChange = useCallback(
-    (page: number) => {
-      navigate(buildGalleryPageUrl(
-        page,
-        parsedRoute.galleryPageSize,
-        parsedRoute.gallerySearch,
-        parsedRoute.gallerySection,
-        parsedRoute.gallerySort,
-        parsedRoute.reviewOnly,
-        parsedRoute.galleryStatus,
-      ));
-    },
-    [navigate, parsedRoute.galleryPageSize, parsedRoute.gallerySearch, parsedRoute.gallerySection, parsedRoute.gallerySort, parsedRoute.reviewOnly, parsedRoute.galleryStatus]
-  );
-
-  const handleGalleryPageSizeChange = useCallback(
-    (pageSize: number) => {
-      navigate(buildGalleryPageUrl(
-        1,
-        pageSize,
-        parsedRoute.gallerySearch,
-        parsedRoute.gallerySection,
-        parsedRoute.gallerySort,
-        parsedRoute.reviewOnly,
-        parsedRoute.galleryStatus,
-      ));
-    },
-    [navigate, parsedRoute.gallerySearch, parsedRoute.gallerySection, parsedRoute.gallerySort, parsedRoute.reviewOnly, parsedRoute.galleryStatus]
-  );
-
-  const handleGallerySearchChange = useCallback(
-    (search: string) => {
-      navigate(buildGalleryPageUrl(
-        1,
-        parsedRoute.galleryPageSize,
-        search,
-        parsedRoute.gallerySection,
-        parsedRoute.gallerySort,
-        parsedRoute.reviewOnly,
-        parsedRoute.galleryStatus,
-      ), { replace: true });
-    },
-    [navigate, parsedRoute.galleryPageSize, parsedRoute.gallerySection, parsedRoute.gallerySort, parsedRoute.reviewOnly, parsedRoute.galleryStatus]
-  );
-
-  const handleGallerySortChange = useCallback(
-    (sort: GallerySort) => {
-      navigate(buildGalleryPageUrl(
-        1,
-        parsedRoute.galleryPageSize,
-        parsedRoute.gallerySearch,
-        parsedRoute.gallerySection,
-        sort,
-        parsedRoute.reviewOnly,
-        parsedRoute.galleryStatus,
-      ));
-    },
-    [navigate, parsedRoute.galleryPageSize, parsedRoute.gallerySearch, parsedRoute.gallerySection, parsedRoute.reviewOnly, parsedRoute.galleryStatus]
-  );
-
-  const handleGalleryReviewChange = useCallback((pending: boolean) => {
+  const updateGalleryUrl = useCallback((overrides: {
+    page?: number; pageSize?: number; search?: string; sort?: GallerySort;
+    reviewOnly?: boolean; status?: string; minPages?: number; maxPages?: number; replace?: boolean;
+  }) => {
     navigate(buildGalleryPageUrl(
-      1,
-      parsedRoute.galleryPageSize,
-      parsedRoute.gallerySearch,
+      overrides.page ?? 1,
+      overrides.pageSize ?? parsedRoute.galleryPageSize,
+      overrides.search ?? parsedRoute.gallerySearch,
       parsedRoute.gallerySection,
-      parsedRoute.gallerySort,
-      pending,
-      pending ? 'review' : 'all',
-    ));
-  }, [navigate, parsedRoute.galleryPageSize, parsedRoute.gallerySearch, parsedRoute.gallerySection, parsedRoute.gallerySort]);
+      overrides.sort ?? parsedRoute.gallerySort,
+      overrides.reviewOnly ?? parsedRoute.reviewOnly,
+      overrides.status !== undefined ? overrides.status : parsedRoute.galleryStatus,
+      overrides.minPages !== undefined ? overrides.minPages : parsedRoute.galleryMinPages,
+      overrides.maxPages !== undefined ? overrides.maxPages : parsedRoute.galleryMaxPages,
+    ), overrides.replace ? { replace: true } : undefined);
+  }, [navigate, parsedRoute]);
 
-  const handleGalleryStatusChange = useCallback((status: MangaStatusFilter) => {
-    navigate(buildGalleryPageUrl(
-      1,
-      parsedRoute.galleryPageSize,
-      parsedRoute.gallerySearch,
-      parsedRoute.gallerySection,
-      parsedRoute.gallerySort,
-      status === 'review',
-      status,
-    ));
-  }, [navigate, parsedRoute.galleryPageSize, parsedRoute.gallerySearch, parsedRoute.gallerySection, parsedRoute.gallerySort]);
+  const handleGalleryPageChange = useCallback((page: number) => updateGalleryUrl({ page }), [updateGalleryUrl]);
+  const handleGalleryPageSizeChange = useCallback((pageSize: number) => updateGalleryUrl({ pageSize }), [updateGalleryUrl]);
+  const handleGallerySearchChange = useCallback((search: string) => updateGalleryUrl({ search, replace: true }), [updateGalleryUrl]);
+  const handleGallerySortChange = useCallback((sort: GallerySort) => updateGalleryUrl({ sort }), [updateGalleryUrl]);
+  const handleGalleryReviewChange = useCallback((pending: boolean) => updateGalleryUrl({ reviewOnly: pending, status: pending ? 'review' : 'all' }), [updateGalleryUrl]);
+  const handleGalleryStatusChange = useCallback((status: string) => updateGalleryUrl({ status, reviewOnly: status === 'review' || status.split(',').includes('review') }), [updateGalleryUrl]);
+  const handleGalleryPageRangeChange = useCallback((minPages?: number, maxPages?: number) => updateGalleryUrl({ minPages, maxPages }), [updateGalleryUrl]);
 
   const handleCloseMangaDetail = useCallback(() => {
     if (location.state?.from) {
@@ -191,6 +136,7 @@ export const useAppNavigation = () => {
     handleGallerySortChange,
     handleGalleryReviewChange,
     handleGalleryStatusChange,
+    handleGalleryPageRangeChange,
     handleCloseMangaDetail,
     handleCloseOverlay,
     handleOpenSeriesDetail,

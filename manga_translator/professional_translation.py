@@ -163,22 +163,31 @@ class ProfessionalTranslator:
         self.primary = config.translator
         if self.primary not in GPT_TRANSLATORS:
             raise ValueError("Professional translation requires an AI translator")
+        self.draft_translator = config.draft_translator if (config.draft_translator and config.draft_translator != Translator.none) else self.primary
+        if self.draft_translator not in GPT_TRANSLATORS:
+            raise ValueError(f"Draft translator '{self.draft_translator}' is not a valid AI translator for professional mode")
         self.provenance: list[dict[str, str]] = []
         self._last_model: str | None = None
         self._progress = progress
+
+    def _get_translator_for_stage(self, stage: str) -> Translator:
+        if stage == "editing":
+            return self.primary
+        return self.draft_translator
 
     async def _report(self, state: str) -> None:
         if self._progress is not None:
             await self._progress(state)
 
     async def _request(self, stage: str, prompt: str) -> tuple[str, str]:
+        target = self._get_translator_for_stage(stage)
         try:
-            raw = await self._request_with(self.primary, prompt, stage)
+            raw = await self._request_with(target, prompt, stage)
             if _is_refusal(raw):
                 raise PermissionError(raw)
-            return raw, _provider_name(self.primary)
+            return raw, _provider_name(target)
         except Exception as exc:
-            if not _is_refusal(exc) or self.primary == Translator.deepseek:
+            if not _is_refusal(exc) or target == Translator.deepseek:
                 raise
             raw = await self._request_with(Translator.deepseek, prompt, stage)
             if _is_refusal(raw):
@@ -223,6 +232,7 @@ class ProfessionalTranslator:
                 translator._canUseCache = original_cache_flag
 
     async def _json_request(self, stage: str, prompt: str) -> tuple[dict[str, Any], str]:
+        target = self._get_translator_for_stage(stage)
         last_error: Exception | None = None
         for _ in range(2):
             try:
@@ -238,9 +248,9 @@ class ProfessionalTranslator:
             except Exception as exc:
                 last_error = exc
 
-        # If primary failed to return a valid JSON object after attempts and primary is not deepseek,
+        # If target failed to return a valid JSON object after attempts and target is not deepseek,
         # try falling back to DeepSeek before failing the stage.
-        if self.primary != Translator.deepseek:
+        if target != Translator.deepseek:
             try:
                 raw = await self._request_with(Translator.deepseek, prompt, stage)
                 if not _is_refusal(raw):
@@ -427,7 +437,7 @@ STORY GUIDE: {guide}
 FINALIZED EARLIER ENGLISH: {previous[-8000:]}
 CURRENT PAGES: {json.dumps(payload, ensure_ascii=False)}"""
             values: dict[str, dict[str, Any]] = {}
-            provider = _provider_name(self.primary)
+            provider = _provider_name(self.draft_translator)
             draft_failed = False
             try:
                 data, provider = await self._json_request("draft", prompt)

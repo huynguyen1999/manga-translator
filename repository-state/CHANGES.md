@@ -2,6 +2,81 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-28 — Web Studio Options Panel compact hierarchy & structured redesign
+
+- Redesigned the Web Studio `OptionsPanel` (`front/app/components/OptionsPanel.tsx`) into a high-density, 4-tier structured layout to resolve clutter, reduce cognitive load, and eliminate grid shifting when toggling quality modes or pipeline add-ons.
+- Tier 1 provides a minimal action header with live status pill, remember-settings toggle, and reset action.
+- Tier 2 organizes core controls into a responsive 2-card layout: Translation & AI Intelligence (Target Language, Translation Engine, Quality Mode with seamless in-place First Draft Engine integration, and AI Batch Size stepper) and Typography & Lettering (Font Type, Text Direction, and Lettering Case).
+- Tier 3 provides a unified Visual Enhancements strip for Colorization (MC2 model, colorize-only toggle, and contextual inline size/tolerance/sigma controls) and Upscaling (ESRGAN/UltraSharp/Waifu2x model, ratio, and original-size reversion).
+- Tier 4 provides a collapsible Advanced Neural Pipeline accordion with live parameter summary badge and dedicated sub-cards for Text Detection & OCR, Inpainting & Bubble Geometry, and Manga Synopsis Model.
+- Extracted sub-components into `front/app/features/studio/options/` (`OptionsTypes.ts`, `OptionsEnhancements.tsx`, `OptionsAdvancedPipeline.tsx`), respecting line-count limits while preserving all existing props, defaults, and contracts.
+
+## 2026-09-28 — Enable visual editor button on completed translation job page details
+
+- Added `onEdit` handler to `PageDetailModal` in `App.tsx` wired to `handleOpenPageEdit`, enabling the interactive visual typesetter and editor button on page detail previews opened from manga translation jobs (Jobs sidebar, batch cards, and queue items).
+- Updated `PageDetailHeader` to derive editor availability when either `hasTextRegions` or `folder` is present on completed translated images.
+- Set explicit `"translated"` `sourceType` for finished items in `QueueItemRow` and added characterization tests covering header edit button rendering across translated, original, and callback states.
+
+## 2026-09-28 — Bulk review approval for manga pages
+
+- Added an "Accept all" action button to the manga detail review banner (`MangaDetailReviewBanner.tsx` and `MangaDetailHeader.tsx`) when pages in the manga need review (`needsReviewCount > 0`), allowing users to approve all pending review pages in the current manga in a single action.
+- Added backend endpoint `POST /api/manga/{manga_id}/review/approve-all` (and alias `/manga/{manga_id}/review/approve-all`) powered by `MangaReviewMutationService` (`server/services/manga_review_mutation.py`), clearing `review_required` and `review_reason` from saved text regions, marking page `review_status` as `"approved"`, recording `reviewedAt` timestamps, and synchronizing batch review state across both PostgreSQL database and file-backed storage modes.
+- Added frontend API helper `approveMangaReview` (`front/app/features/gallery/approveMangaReview.ts`) and action integration in `galleryMutations.ts` / `ResultGallery.tsx` / `App.tsx` with optimistic review status/count updates, page cache invalidation, and summary reloading.
+
+## 2026-09-28 — Multi-token manga search, page count range filter, and composable gallery filter controls
+
+- Replaced exact contiguous substring matching in manga gallery search with whitespace-separated out-of-order token matching across both PostgreSQL database queries (`regexp_split_to_array` with `bool_and(lower(title) LIKE '%' || token || '%')`) and disk/filesystem scanning/client-side view filtering (`tokens.every(token => title.toLowerCase().includes(token))`), allowing queries like `"oyako gal"` to match `"[Armadillo (Renji, Daiji)] Gal Oyako no Egui Kasegikata..."`.
+- Added `minPages` and `maxPages` page-range filtering across the backend (`/results/groups` query parameters, SQL `HAVING count(*) BETWEEN $6 AND $7`, and filesystem scan counters), URL query parameters, and frontend state.
+- Extracted and separated the monolithic gallery status dropdown into `GalleryFilterControls.tsx` with independent, composable filter controls:
+  - Source selector: `All`, `Translated`, `Original`.
+  - Composable toggle chips: `Summarized`, `Needs Review`.
+  - Min / Max page range number inputs.
+  - Search input, Sort selector (`Recent`, `Title`, `Pages`, `Oldest`), and a Reset Filters button.
+- Updated route query parsing and synchronization to support multiple combinable status tokens (e.g. `status=translated,summarized`) and page bounds (`minPages=10&maxPages=50`).
+
+## 2026-09-28 — In-page Jobs sidebar shown by default
+
+- Converted `JobsDrawer` from an overlay modal rendered in a portal with a dark backdrop and app-root inert focus lock into an in-page, sticky sidebar rendered alongside the main workspace (Studio, Gallery, Search Lab).
+- Defaulted `isJobsOpen` state to `true` so the Jobs panel is shown by default on page load.
+- Updated `Header` with toggle state styling, `aria-expanded` attributes, and responsive layout width (`max-w-[1720px]`).
+- Preserved synopsis detail preview as a standalone modal dialog, and kept existing batch and summary actions, section collapsing, and dismiss handlers.
+
+## 2026-09-28 — Separate First Draft Engine in professional mode
+
+- Added `draft_translator` configuration to `TranslatorConfig`, `batch_config`, and `batch_store` to allow using a distinct AI translation model for the first draft translation pass while using the main `translator` (Translation Engine) for the subsequent editor refinement pass in Professional localization mode.
+- Added First Draft Engine select option in the Web Studio Options panel (`front/app/components/OptionsPanel.tsx`), with state hydration, persistence, and contract tests across settings, translation submission, and batch initialization.
+- Updated `ProfessionalTranslator` (`manga_translator/professional_translation.py`) to dispatch story analysis and draft requests to `draft_translator` (defaulting to primary `translator` if unset) and editor pass requests to the primary `translator`.
+
+## 2026-09-28 — Global Command+Arrow section navigation across Studio, Gallery, Series, and Search Lab
+
+- Added `useShortcutNavigation` hook (`front/app/features/navigation/useShortcutNavigation.ts`) integrated with `useAppNavigation` to enable global `⌘← / ⌘→` (or `Ctrl+Arrow`) shortcut cycling across top-level views: Studio (`/studio`), Gallery (`/gallery`), Series (`/gallery?view=series`), and Search Lab (`/search-lab`).
+- Excluded gallery review routes (`?status=review` / `?review=pending`) from the shortcut cycle so navigation only visits the four primary section pages, and preserved native text editing key navigation when input/textarea/select/editable elements are focused.
+- Listed the section switching shortcut in the Header Keyboard Shortcuts modal (`front/app/components/Header.tsx`).
+
+## 2026-09-28 — Integrate mxbai-rerank-xsmall-v1 cross-encoder and scope Search Lab to summaries only
+
+- Integrated `mixedbread-ai/mxbai-rerank-xsmall-v1` (~70.8M params, pinned revision `b5c6e9da73abc3711f593f705371cdbe9e0fe422`) as Stage 2 cross-encoder reranker over the top 50 Stage 1 summary candidates in both the Web Search Lab (`/search-lab`) and `devscripts/semantic_search_lab.py` to filter and re-order candidates by fine-grained query-passage relevance, with optional `minScore` filtering.
+- Removed all page-image embedding logic (`google/siglip-base-patch16-256`, `image`/`combined` modes, and page thumbnails) so Search Lab indexes and queries manga summaries exclusively, automatically cleaning up legacy `image` sources during reconciliation.
+- Exposed Stage 1 `initialResults` (ordered by embedding cosine similarity), per-stage latency (`embeddingMs`, `rerankMs`), and rank-delta badges (`initialRank`, `rankDelta`, `rerankScore`, `rerankLogit`) in the API, CLI, and a collapsible Stage 1 debug panel in the UI.
+
+## 2026-09-28 — Switch Search Lab text embedding to BGE-base-en-v1.5
+
+- Upgraded default text embedding model from `BAAI/bge-small-en-v1.5` (384d) to `BAAI/bge-base-en-v1.5` (768d, revision `a5beb1e3e68b9ab74eb54cfd186867f64f240e1a`) and updated `PROFILE` to `bge-base-siglip-base-v1`.
+
+## 2026-09-28 — Remove Qwen3 and GTE text embedding logic from Search Lab
+
+- Removed `Qwen/Qwen3-Embedding-0.6B` and `thenlper/gte-base` options and branching logic from `server/search_embeddings.py` and `devscripts/semantic_search_lab.py`, standardizing text embedding on the pinned `BAAI/bge-small-en-v1.5` encoder.
+
+## 2026-09-28 — Avoid redundant layout validation safely
+
+- Accept an ideal free-text placement early only after its existing safety gate and final compositor validation; rerun conflicting fast placements and keep shadow comparison isolated so exhaustive output stays unchanged.
+- Validate bubble glyphs in final rank order only until `top_k` valid candidates are found, retaining the existing unexplained-gap fallback. This reduces unnecessary glyph work without changing layout scoring or font exploration.
+- On the verified 19-page corpus, the ideal gate accepted no candidates and free-text p50/p95 did not improve materially; leave typography generation unchanged pending a separate profiling-driven change.
+
+## 2026-09-27 — Clear all Search Lab index data
+
+- Add a confirmed collection-wide purge for Search Lab vectors and source records, blocked during embedding while preserving Gallery content and job history.
+
 ## 2026-09-27 — Lock text-merge and layout behavior
 
 - Added a durable compatibility contract for OCR pair grouping, nested and adjacent free-text ownership, layout hard constraints, and final validation. Added boundary and rejection-precedence characterization tests so later changes must make behavior changes explicit.
@@ -1288,3 +1363,6 @@ Record new features and large changes here. Keep implementation detail in code, 
 
 - Legacy bubble fitting now respects calibrated source sizes. Free-text mask growth no longer clips unassociated text to a neighboring bubble, and final validation prevents drawable text from crossing source text that will be restored.
 - Final readability validation now suppresses and restores translations below 85% of their calibrated source font instead of only flagging them.
+## 2026-09-28 — Reduce repeated free-text layout preparation
+
+- Reused source ownership maps for damage assignment, limited scope dilation to its padded source region, and shared ink measurements between scoring and candidate diagnostics. The measured maps and masks preserve their existing ownership and placement semantics.

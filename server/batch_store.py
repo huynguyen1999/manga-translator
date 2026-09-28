@@ -241,6 +241,11 @@ class BatchStore:
         if translation_quality not in {"fast", "professional"}:
             raise InvalidBatch("translationQuality must be fast or professional")
         settings["translationQuality"] = translation_quality
+        draft_translator = settings.get("draftTranslator")
+        if draft_translator is not None:
+            if not isinstance(draft_translator, str):
+                raise InvalidBatch("draftTranslator must be a string")
+            settings["draftTranslator"] = draft_translator.strip()
         story_page_ranges = settings.get("storyPageRanges", "")
         if not isinstance(story_page_ranges, str):
             raise InvalidBatch("storyPageRanges must be a string")

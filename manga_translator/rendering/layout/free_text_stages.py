@@ -221,12 +221,13 @@ def _free_text_typography_candidates(
                 continue
             if max_height is not None and candidate_height > max_height:
                 continue
+            ink = _free_text_candidate_ink_metrics(candidate)
             candidate.penalty = _free_text_typography_score(
                 candidate, profile, target,
                 target_width_override=preferred_width,
                 target_height_override=target_height_value,
+                ink_metrics=ink,
             )
-            ink = _free_text_candidate_ink_metrics(candidate)
             candidate.qa = {
                 "font_size": candidate.font_size,
                 "line_spacing": candidate.line_spacing,

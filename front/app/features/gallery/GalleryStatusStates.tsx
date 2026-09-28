@@ -3,21 +3,15 @@ import { Icon } from "@iconify/react";
 import type { MangaStatusFilter } from "@/utils/routeState";
 
 export function GalleryNoResultsState({
-  searchQuery,
-  statusFilter,
-  onResetFilters,
+  searchQuery, statusFilter, onResetFilters,
 }: {
-  searchQuery: string;
-  statusFilter: MangaStatusFilter;
-  onResetFilters: () => void;
+  searchQuery: string; statusFilter: MangaStatusFilter | string; onResetFilters: () => void;
 }) {
-  const statusLabel = statusFilter === "original"
-    ? "original (raw)"
-    : statusFilter === "translated"
-      ? "translated"
-      : statusFilter === "summarized"
-        ? "summarized"
-        : "needs review";
+  const tokens = statusFilter !== "all" ? statusFilter.split(",").map(s => s.trim()).filter(Boolean) : [];
+  const statusLabel = tokens.includes("original") ? "original (raw)"
+    : tokens.includes("translated") ? (tokens.includes("summarized") ? "summarized translated" : "translated")
+    : tokens.includes("summarized") ? "summarized"
+    : tokens.includes("review") ? "needs review" : statusFilter;
 
   return (
     <div className="text-center py-16 rounded-2xl border border-dashed border-zinc-200 dark:border-zinc-800 text-zinc-400">

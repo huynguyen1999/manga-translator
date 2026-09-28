@@ -1,14 +1,16 @@
 import { useMemo } from 'react';
 import type { MangaGroupSummary } from '@/types';
 import type { GalleryMangaGroup, MangaStatusFilter } from '@/utils/resultGallery';
-import { filterMangaGroupsByStatus } from '@/utils/resultGallery';
+import { filterMangaGroupsByStatus, matchesSearchQuery } from '@/utils/resultGallery';
 
 interface GalleryGroupViewOptions {
   mangaGroups: GalleryMangaGroup[];
   mangaSearchQuery: string;
   moveMangaSearch: string;
   activeMangaFilter: string;
-  statusFilter: MangaStatusFilter;
+  statusFilter: MangaStatusFilter | string;
+  minPages?: number;
+  maxPages?: number;
   onGallerySearchChange?: (search: string) => void;
   totalMangaCount: number;
   requestedGalleryPageSize: number;
@@ -23,6 +25,8 @@ export function useGalleryGroupViews({
   moveMangaSearch,
   activeMangaFilter,
   statusFilter,
+  minPages,
+  maxPages,
   onGallerySearchChange,
   totalMangaCount,
   requestedGalleryPageSize,
@@ -31,32 +35,26 @@ export function useGalleryGroupViews({
   activeSummaries,
 }: GalleryGroupViewOptions) {
   const searchedMangaGroups = useMemo(() => {
-    const q = mangaSearchQuery.trim().toLowerCase();
-    if (!q) return mangaGroups;
-    return mangaGroups.filter((g) => g.title.toLowerCase().includes(q));
+    if (!mangaSearchQuery.trim()) return mangaGroups;
+    return mangaGroups.filter((g) => matchesSearchQuery(g.title, mangaSearchQuery));
   }, [mangaGroups, mangaSearchQuery]);
 
   const moveMangaGroups = useMemo(() => {
-    const q = moveMangaSearch.trim().toLowerCase();
-    if (!q) return mangaGroups;
-    return mangaGroups.filter((g) => g.title.toLowerCase().includes(q));
+    if (!moveMangaSearch.trim()) return mangaGroups;
+    return mangaGroups.filter((g) => matchesSearchQuery(g.title, moveMangaSearch));
   }, [mangaGroups, moveMangaSearch]);
 
   const filteredGroups = useMemo(() => {
     const base = mangaSearchQuery.trim() && !onGallerySearchChange ? searchedMangaGroups : mangaGroups;
-    const statusFiltered = statusFilter !== 'all'
-      ? filterMangaGroupsByStatus(base, statusFilter)
-      : base;
+    const isFiltered = (statusFilter && statusFilter !== 'all') || minPages != null || maxPages != null;
+    const statusFiltered = isFiltered ? filterMangaGroupsByStatus(base, statusFilter, minPages, maxPages) : base;
     return activeMangaFilter === 'all'
       ? statusFiltered
       : statusFiltered.filter((g) => g.title === activeMangaFilter);
-  }, [mangaGroups, searchedMangaGroups, activeMangaFilter, mangaSearchQuery, statusFilter, onGallerySearchChange]);
+  }, [mangaGroups, searchedMangaGroups, activeMangaFilter, mangaSearchQuery, statusFilter, minPages, maxPages, onGallerySearchChange]);
 
-  const galleryMangaCount = totalMangaCount > 0
-    ? totalMangaCount
-    : (activeMangaFilter !== 'all' || mangaSearchQuery.trim() || statusFilter !== 'all'
-        ? filteredGroups.length
-        : mangaGroups.length);
+  const hasFilters = activeMangaFilter !== 'all' || mangaSearchQuery.trim() || (statusFilter && statusFilter !== 'all') || minPages != null || maxPages != null;
+  const galleryMangaCount = totalMangaCount > 0 ? totalMangaCount : (hasFilters ? filteredGroups.length : mangaGroups.length);
   const galleryPageCount = Math.max(1, Math.ceil(galleryMangaCount / requestedGalleryPageSize));
   const reviewCount = reviewOnly
     ? totalImagesCount

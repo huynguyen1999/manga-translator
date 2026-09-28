@@ -50,7 +50,8 @@ export const useMangaSummaries = ({
     const statusParam = (parsedRoute.galleryStatus && parsedRoute.galleryStatus !== "all")
       ? `&status=${encodeURIComponent(parsedRoute.galleryStatus)}`
       : (parsedRoute.reviewOnly ? "&review=pending" : "");
-    const cacheKey = `${page}:${pageSize}:${parsedRoute.gallerySearch || ""}:${parsedRoute.gallerySort || "date-desc"}:${parsedRoute.galleryStatus || (parsedRoute.reviewOnly ? "review" : "all")}`;
+    const pageRangeQuery = `${parsedRoute.galleryMinPages ? `&minPages=${parsedRoute.galleryMinPages}` : ""}${parsedRoute.galleryMaxPages ? `&maxPages=${parsedRoute.galleryMaxPages}` : ""}`;
+    const cacheKey = `${page}:${pageSize}:${parsedRoute.gallerySearch || ""}:${parsedRoute.gallerySort || "date-desc"}:${parsedRoute.galleryStatus || (parsedRoute.reviewOnly ? "review" : "all")}:${parsedRoute.galleryMinPages || ""}:${parsedRoute.galleryMaxPages || ""}`;
     const cached = mangaFilter ? undefined : galleryPageCacheRef.current.get(cacheKey);
     if (cached) {
       setMangaSummaries(cached.groups);
@@ -66,7 +67,7 @@ export const useMangaSummaries = ({
     }
     try {
       const response = await fetch(
-        apiUrl(`/api/results/groups?limit=${pageSize}&offset=${offset}${mangaQuery}${searchQuery}${sortQuery}${statusParam}`),
+        apiUrl(`/api/results/groups?limit=${pageSize}&offset=${offset}${mangaQuery}${searchQuery}${sortQuery}${statusParam}${pageRangeQuery}`),
         { signal },
       );
       if (response.ok) {
@@ -95,13 +96,8 @@ export const useMangaSummaries = ({
       }
     }
   }, [
-    effectiveMangaFilter,
-    parsedRoute.galleryPage,
-    parsedRoute.galleryPageSize,
-    parsedRoute.gallerySearch,
-    parsedRoute.gallerySort,
-    parsedRoute.galleryStatus,
-    parsedRoute.overlay,
-    parsedRoute.reviewOnly,
+    effectiveMangaFilter, parsedRoute.galleryPage, parsedRoute.galleryPageSize,
+    parsedRoute.gallerySearch, parsedRoute.gallerySort, parsedRoute.galleryStatus,
+    parsedRoute.galleryMinPages, parsedRoute.galleryMaxPages, parsedRoute.overlay, parsedRoute.reviewOnly,
   ]);
 };

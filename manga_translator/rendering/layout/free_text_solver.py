@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import math
 import os
 from time import perf_counter
@@ -35,15 +34,16 @@ from .models import (
     PlacementMode,
     SearchResult,
 )
-from .profiling import _render_text, get_solver_profile
+from .profiling import _SOLVER_PROFILE, SolverProfileStats, _render_text, get_solver_profile
 from .raster import (
-    _candidate_global_glyph_mask,
     _candidate_raster_at_offset,
     rasterize_candidate,
 )
 from .source_profile import build_original_layout_profile
-
-logger = logging.getLogger("layout.solver")
+from .candidate_footprint import (
+    free_text_fast_gate as _free_text_fast_gate,
+    log_free_text_shadow_comparison as _log_free_text_shadow_comparison,
+)
 
 def _source_height_candidates(candidates, profile, target, panel):
     minimum = max(1, int(math.ceil(profile.block_height)))
@@ -130,67 +130,23 @@ def _materialize_free_text_search_result(
     stats.full_qa_candidates += 1
     return candidate
 
-def _log_free_text_shadow_comparison(
-    fast: Optional[LayoutCandidate],
-    exhaustive: Optional[LayoutCandidate],
-    image_shape: Tuple[int, int],
-) -> None:
-    if exhaustive is None:
-        logger.info("layout shadow fast_accepted=%s exhaustive=none", fast is not None)
-        return
-    if fast is None:
-        logger.info("layout shadow fast_accepted=false exhaustive_score=%.4f", exhaustive.penalty)
-        return
-
-    fast_center = fast.qa.get("ink_centroid", (0.0, 0.0))
-    full_center = exhaustive.qa.get("ink_centroid", (0.0, 0.0))
-    fast_mask = _candidate_global_glyph_mask(fast, image_shape)
-    full_mask = _candidate_global_glyph_mask(exhaustive, image_shape)
-    union = int(np.count_nonzero(fast_mask | full_mask))
-    iou = float(np.count_nonzero(fast_mask & full_mask)) / union if union else 1.0
-    fast_bbox = fast.qa.get("ink_bbox", (0, 0, 0, 0))
-    full_bbox = exhaustive.qa.get("ink_bbox", (0, 0, 0, 0))
-    fast_area = max(0, fast_bbox[2] - fast_bbox[0]) * max(0, fast_bbox[3] - fast_bbox[1])
-    full_area = max(0, full_bbox[2] - full_bbox[0]) * max(0, full_bbox[3] - full_bbox[1])
-    logger.info(
-        "layout shadow fast_accepted=true exhaustive_score=%.4f font_delta=%+d line_count_delta=%+d "
-        "centroid_delta_px=%.2f damage_coverage_delta=%+.4f core_coverage_delta=%+.4f "
-        "footprint_area_delta=%+d overflow_delta=%+.4f rendered_mask_iou=%.4f",
-        exhaustive.penalty,
-        fast.font_size - exhaustive.font_size,
-        len(fast.lines) - len(exhaustive.lines),
-        math.hypot(float(fast_center[0]) - float(full_center[0]), float(fast_center[1]) - float(full_center[1])),
-        float(fast.qa.get("damage_coverage", 0.0)) - float(exhaustive.qa.get("damage_coverage", 0.0)),
-        float(fast.qa.get("core_damage_coverage", 0.0)) - float(exhaustive.qa.get("core_damage_coverage", 0.0)),
-        fast_area - full_area,
-        float(fast.qa.get("ink_overflow", 0.0)) - float(exhaustive.qa.get("ink_overflow", 0.0)),
-        iou,
+def _validate_fast_result(
+    result, region, profile, target, damage_centroid, obstacles, other_text,
+    status, overflow, domain_mask, config, image_shape, zone, isolate_rejections=False,
+):
+    candidate = _materialize_free_text_search_result(
+        result, profile, target, damage_centroid, obstacles, other_text,
+        status=status, overflow=overflow, placement_domain_mask=domain_mask,
     )
-
-def _free_text_fast_gate(
-    result: SearchResult,
-    image_shape: Tuple[int, int],
-    obstacles: PageObstacleMap,
-    other_text: np.ndarray,
-    placement_domain_mask: Optional[np.ndarray] = None,
-) -> Tuple[bool, float]:
-    candidate_bbox = _candidate_bbox(result.typography_candidate)
-    candidate_bbox = tuple(value + delta for value, delta in zip(candidate_bbox, (result.dx, result.dy, result.dx, result.dy)))
-    h, w = image_shape[:2]
-    if not (0 <= candidate_bbox[0] <= candidate_bbox[2] <= w and 0 <= candidate_bbox[1] <= candidate_bbox[3] <= h):
-        return False, 1.0
-    if math.hypot(result.center_dx, result.center_dy) > max(2.0, 0.10 * result.typography_candidate.font_size):
-        return False, 1.0
-    if result.coverage["c_core"] < 0.90:
-        return False, 1.0
-    overflow = _free_text_ink_overflow_from_raster(
-        result.raster,
-        tuple(value + delta for value, delta in zip(result.raster.crop_box, (result.dx, result.dy, result.dx, result.dy))),
-        obstacles,
-        other_text,
-        placement_domain_mask=placement_domain_mask,
-    )
-    return overflow == 0.0, overflow
+    domain_qa = getattr(region, "_free_text_domain_qa", None)
+    if domain_qa:
+        candidate.qa.update(domain_qa)
+    rejections = dict(getattr(zone, "rejections", {}))
+    from .candidate_footprint import filter_renderable_candidates
+    accepted = filter_renderable_candidates(region, [candidate], config, image_shape, zone, obstacles, other_text)
+    if isolate_rejections or not accepted:
+        zone.rejections = rejections
+    return accepted[0] if accepted else None
 
 def _layout_env_enabled(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
@@ -313,71 +269,125 @@ def _solve_free_text_region_once(
     fast_requested = shadow_compare or (
         allow_early_accept and not force_exhaustive and not _layout_env_disabled("LAYOUT_FAST_FREE_TEXT")
     )
-    try_local_stage = shadow_compare or (
-        not force_exhaustive and _layout_env_enabled("LAYOUT_LAZY_CANDIDATES")
-    )
+    try_local_stage = not shadow_compare and not force_exhaustive and _layout_env_enabled("LAYOUT_LAZY_CANDIDATES")
     fast_result: Optional[SearchResult] = None
     fast_overflow: Optional[float] = None
     fast_status = "free_text_ideal"
-    if (fast_requested or try_local_stage) and eval_candidates:
-        first = first_stage_candidates[0]
-        prepared = prepare_candidate(first) if fast_requested else None
-        if prepared is not None:
-            raster, base_box, ink_crop, visual_crop, block_crop, base_centroid, base_ink_bbox, ideal_dx, ideal_dy, _ = prepared
-            prof.free_text_ideal_attempts += 1
-            result = _free_text_search_result(
-                first, raster, base_box, ink_crop, visual_crop, block_crop,
-                base_centroid, base_ink_bbox, ideal_dx, ideal_dy, 0, 0,
-                profile, damage_centroid, target_width, target_height, zone,
-                obstacles, other_text,
-            )
-            if result is not None:
-                fast_results_by_offset[(id(first), 0, 0)] = result
-                accepted, fast_overflow = _free_text_fast_gate(
-                    result, image_shape, obstacles, other_text, domain_for_overflow,
-                )
-                if accepted:
-                    fast_result = result
-                    prof.free_text_ideal_successes += 1
-
-        if fast_result is None and try_local_stage:
-            prof.free_text_local_search_runs += 1
-            local_offsets = (
-                (0, 0), (4, 0), (-4, 0), (0, 4), (0, -4),
-                (4, 4), (4, -4), (-4, 4), (-4, -4),
-                (8, 0), (-8, 0), (0, 8), (0, -8),
-            )
-            for candidate_index, typography_candidate in enumerate(first_stage_candidates[:3]):
-                prepared = prepare_candidate(typography_candidate)
-                if prepared is None:
-                    continue
+    shadow_candidate = None
+    shadow_profile = SolverProfileStats() if shadow_compare else None
+    shadow_started = perf_counter() if shadow_compare else 0.0
+    shadow_rejections = dict(getattr(zone, "rejections", {})) if shadow_compare else None
+    shadow_token = _SOLVER_PROFILE.set(shadow_profile) if shadow_compare else None
+    if shadow_compare:
+        prof = shadow_profile
+    try:
+        ideal_fast_gate_accepted = False
+        if (fast_requested or try_local_stage) and eval_candidates:
+            first = first_stage_candidates[0]
+            prepared = prepare_candidate(first) if fast_requested else None
+            if prepared is not None:
                 raster, base_box, ink_crop, visual_crop, block_crop, base_centroid, base_ink_bbox, ideal_dx, ideal_dy, _ = prepared
-                for rel_dx, rel_dy in local_offsets:
-                    if candidate_index == 0 and (rel_dx, rel_dy) == (0, 0):
-                        continue
-                    prof.free_text_local_search_attempts += 1
-                    result = _free_text_search_result(
-                        typography_candidate, raster, base_box, ink_crop, visual_crop, block_crop,
-                        base_centroid, base_ink_bbox, ideal_dx, ideal_dy, rel_dx, rel_dy,
-                        profile, damage_centroid, target_width, target_height, zone,
-                        obstacles, other_text,
-                    )
-                    if result is None:
-                        continue
-                    fast_results_by_offset[(id(typography_candidate), rel_dx, rel_dy)] = result
-                    accepted, overflow = _free_text_fast_gate(
+                prof.free_text_ideal_attempts += 1
+                result = _free_text_search_result(
+                    first, raster, base_box, ink_crop, visual_crop, block_crop,
+                    base_centroid, base_ink_bbox, ideal_dx, ideal_dy, 0, 0,
+                    profile, damage_centroid, target_width, target_height, zone,
+                    obstacles, other_text,
+                )
+                if result is not None:
+                    fast_results_by_offset[(id(first), 0, 0)] = result
+                    accepted, fast_overflow = _free_text_fast_gate(
                         result, image_shape, obstacles, other_text, domain_for_overflow,
                     )
-                    if not accepted:
-                        continue
-                    fast_result, fast_overflow, fast_status = result, overflow, "free_text_local"
-                    prof.free_text_local_search_successes += 1
-                    break
-                if fast_result is not None:
-                    break
+                    if accepted:
+                        fast_result = result
+                        ideal_fast_gate_accepted = True
 
-        if fast_result is None and (fast_requested or try_local_stage):
-            prof.free_text_full_search_fallbacks += 1
+            if fast_requested and not ideal_fast_gate_accepted:
+                prof.free_text_full_search_fallbacks += 1
+
+            if fast_result is None and try_local_stage:
+                prof.free_text_local_search_runs += 1
+                local_offsets = (
+                    (0, 0), (4, 0), (-4, 0), (0, 4), (0, -4),
+                    (4, 4), (4, -4), (-4, 4), (-4, -4),
+                    (8, 0), (-8, 0), (0, 8), (0, -8),
+                )
+                for candidate_index, typography_candidate in enumerate(first_stage_candidates[:3]):
+                    prepared = prepare_candidate(typography_candidate)
+                    if prepared is None:
+                        continue
+                    raster, base_box, ink_crop, visual_crop, block_crop, base_centroid, base_ink_bbox, ideal_dx, ideal_dy, _ = prepared
+                    for rel_dx, rel_dy in local_offsets:
+                        if candidate_index == 0 and (rel_dx, rel_dy) == (0, 0):
+                            continue
+                        prof.free_text_local_search_attempts += 1
+                        result = _free_text_search_result(
+                            typography_candidate, raster, base_box, ink_crop, visual_crop, block_crop,
+                            base_centroid, base_ink_bbox, ideal_dx, ideal_dy, rel_dx, rel_dy,
+                            profile, damage_centroid, target_width, target_height, zone,
+                            obstacles, other_text,
+                        )
+                        if result is None:
+                            continue
+                        fast_results_by_offset[(id(typography_candidate), rel_dx, rel_dy)] = result
+                        accepted, overflow = _free_text_fast_gate(
+                            result, image_shape, obstacles, other_text, domain_for_overflow,
+                        )
+                        if not accepted:
+                            continue
+                        fast_result, fast_overflow, fast_status = result, overflow, "free_text_local"
+                        prof.free_text_local_search_successes += 1
+                        break
+                    if fast_result is not None:
+                        break
+
+        if shadow_compare and fast_result is not None:
+            shadow_candidate = _validate_fast_result(
+                fast_result, region, profile, target, damage_centroid, obstacles, other_text,
+                fast_status, fast_overflow, domain_for_overflow, config, image_shape, zone,
+                isolate_rejections=True,
+            )
+            if shadow_candidate is not None:
+                prof.free_text_ideal_successes += fast_status == "free_text_ideal"
+            elif fast_status == "free_text_ideal":
+                prof.free_text_full_search_fallbacks += 1
+    finally:
+        if shadow_compare:
+            zone.rejections = shadow_rejections
+            _SOLVER_PROFILE.reset(shadow_token)
+            prof = get_solver_profile()
+            candidate_rasters.clear()
+            prepared_candidates.clear()
+            fast_results_by_offset.clear()
+            metrics = shadow_profile.to_dict()
+            region._free_text_shadow_metrics = {
+                "elapsed_ms": (perf_counter() - shadow_started) * 1000.0,
+                "workload": metrics["workload"], "timings_ms": metrics["timings_ms"],
+            }
+
+    if fast_result is not None and fast_status == "free_text_ideal" and allow_early_accept and not force_exhaustive and not shadow_compare:
+        fast_candidate = _validate_fast_result(
+            fast_result, region, profile, target, damage_centroid, obstacles, other_text,
+            fast_status, fast_overflow, domain_for_overflow, config, image_shape, zone,
+        )
+        if fast_candidate is not None:
+            prof.free_text_ideal_successes += 1
+            fast_candidate.qa["candidate_alternatives"] = [{
+                "font_size": fast_candidate.font_size,
+                "lines": len(fast_candidate.lines),
+                "text": [line.text for line in fast_candidate.lines],
+                "damage_coverage": fast_candidate.qa.get("damage_coverage", 0.0),
+                "core_coverage": fast_candidate.qa.get("core_damage_coverage", 0.0),
+                "expansion_ratio": fast_candidate.qa.get("expansion_ratio", 1.0),
+                "center_error_px": fast_candidate.qa.get("center_error_px", 0.0),
+                "center_drift": fast_candidate.qa.get("center_error_px", 0.0),
+                "penalty": fast_candidate.penalty,
+            }]
+            region._free_text_candidate_pool = [fast_candidate]
+            return fast_candidate, profile, fast_candidate.qa
+        prof.free_text_full_search_fallbacks += 1
+        fast_results_by_offset.clear()
 
     prof.free_text_full_search_runs += 1
     from .candidate_footprint import stage_render_validator
@@ -430,22 +440,16 @@ def _solve_free_text_region_once(
     evaluated = filter_renderable_candidates(region, evaluated, config, image_shape, zone, obstacles, other_text)
     if not evaluated:
         if shadow_compare:
-            fast_candidate = _materialize_free_text_search_result(
-                fast_result, profile, target, damage_centroid, obstacles, other_text,
-                status=fast_status, overflow=fast_overflow,
-                placement_domain_mask=domain_for_overflow,
-            ) if fast_result is not None else None
-            _log_free_text_shadow_comparison(fast_candidate, None, image_shape)
+            region._free_text_shadow_metrics["comparison"] = _log_free_text_shadow_comparison(
+                shadow_candidate, None, image_shape,
+            )
         return None
 
     evaluated.sort(key=lambda candidate: candidate.penalty)
     if shadow_compare:
-        fast_candidate = _materialize_free_text_search_result(
-            fast_result, profile, target, damage_centroid, obstacles, other_text,
-            status=fast_status, overflow=fast_overflow,
-            placement_domain_mask=domain_for_overflow,
-        ) if fast_result is not None else None
-        _log_free_text_shadow_comparison(fast_candidate, evaluated[0], image_shape)
+        region._free_text_shadow_metrics["comparison"] = _log_free_text_shadow_comparison(
+            shadow_candidate, evaluated[0], image_shape,
+        )
     unique: List[LayoutCandidate] = []
     seen = set()
     for candidate in evaluated:
