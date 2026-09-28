@@ -1,11 +1,13 @@
 """Bubble and panel detection stage calls used by MangaTranslator."""
 import asyncio
+import json
 import time
 import uuid
 import numpy as np
 
 from .config import Config
-from .detection.bubble import BubbleDetection
+from .detection.bubble import BubbleDetection, serialize_bubble_detections
+from .detection.panel import serialize_panel_detections
 from .utils import Context
 
 
@@ -59,11 +61,30 @@ async def run_bubble_detection(owner, config: Config, ctx: Context, report_progr
             for region in ctx.text_regions:
                 if not getattr(region, 'region_id', None):
                     region.region_id = uuid.uuid4().hex
+        bubble_documents = serialize_bubble_detections(getattr(ctx, 'bubble_detections', None) or [])
+        panel_documents = serialize_panel_detections(getattr(ctx, 'panel_detections', None) or [], ctx.img_rgb.shape[:2] if ctx.img_rgb is not None else None)
+        if getattr(ctx, 'result_documents', None) is not None:
+            ctx.result_documents['bubble_detections.json'] = bubble_documents
+            ctx.result_documents['panel_detections.json'] = panel_documents
+
         if ctx.bubble_detections and (getattr(owner, 'verbose', False) or owner._pipeline_run is not None):
             mask = np.zeros(ctx.img_rgb.shape[:2], np.uint8)
             for d in ctx.bubble_detections:
                 mask = np.maximum(mask, np.asarray(d.mask, dtype=np.uint8))
             await owner._async_imwrite(owner._result_path('bubble_mask.png'), mask)
+
+        if owner._pipeline_run is not None:
+            owner._pipeline_run.write_json('bubble_detections.json', bubble_documents)
+            owner._pipeline_run.write_json('panel_detections.json', panel_documents)
+            owner._pipeline_run.refresh()
+        elif hasattr(owner, '_result_path') and getattr(owner, '_current_image_context', None):
+            for name, payload in (('bubble_detections.json', bubble_documents), ('panel_detections.json', panel_documents)):
+                try:
+                    with open(owner._result_path(name), 'w', encoding='utf-8') as f:
+                        json.dump(payload, f, indent=2)
+                except Exception:
+                    pass
+
         logger.info('Detected %d speech bubbles, %d panels; matched %d text regions',
                     len(ctx.bubble_detections), len(ctx.panel_detections or []),
                     sum(1 for r in (ctx.text_regions or []) if getattr(r, '_bubble_mask', None) is not None))

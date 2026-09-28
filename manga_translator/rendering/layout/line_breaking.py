@@ -273,11 +273,7 @@ def _word_core(word: str) -> str:
 
 
 def _phrase_break_penalty(prev_word: str, next_word: str) -> float:
-    """Penalty for breaking the line between ``prev_word`` and ``next_word``.
-
-    Keeps strongly connected pairs (LET ME / MAY HAVE / LOOK AT / ARE YOU)
-    together when geometry allows, without any LLM in the loop.
-    """
+    """Penalty for breaking the line between ``prev_word`` and ``next_word``."""
     penalty = 0.0
     if _word_core(next_word) in _FUNCTION_WORDS:
         penalty += 15.0
@@ -295,18 +291,12 @@ def _line_break_cost(
     zone_profile: Optional[ZoneShapeProfile] = None,
     row_y: Optional[int] = None,
 ) -> float:
-    """Soft cost of placing words[wi:end] on one row interval.
-
-    Geometry only asks "is this line allowed here?" — slot-fill pressure is
-    deliberately weak so the DP follows language, not bubble contours.
-    """
+    """Soft cost of placing words[wi:end] on one row interval."""
     fill = run_w / max(1, slot_w)
     cost = (1.0 - fill) ** 2 * 2.0
-
     n_words = end - wi
     is_final = end >= len(words) or (end < len(words) and words[end] == HARD_LINE_BREAK)
 
-    # Check if this row is in a narrow section of the bubble
     is_narrow_row = False
     if zone_profile is not None and row_y is not None and zone_profile.bbox and zone_profile.width_by_y:
         y_base = zone_profile.bbox[1]
@@ -316,34 +306,19 @@ def _line_break_cost(
             if avail_w <= zone_profile.width * 0.65 or slot_w <= zone_profile.width * 0.65:
                 is_narrow_row = True
 
-    # Punctuation-only line penalty (e.g. "?!", "...", "!")
-    is_punct_only = all(not w.strip(_PUNCT_STRIP) for w in words[wi:end])
-    if is_punct_only:
+    if all(not w.strip(_PUNCT_STRIP) for w in words[wi:end]):
         cost += 50.0
 
-    # Orphans: a short isolated word stranded on its own line.
     if n_words == 1 and not is_final:
         word_core = _word_core(words[wi])
         if len(word_core) <= 3:
-            # If the single word line occurs in a narrow row and fits nicely, allow it with minimal penalty
-            if is_narrow_row and fill >= 0.35:
-                cost += 3.0
-            else:
-                cost += 25.0
+            cost += 3.0 if (is_narrow_row and fill >= 0.35) else 25.0
         elif len(words[wi]) <= 2:
-            if is_narrow_row and fill >= 0.35:
-                cost += 2.0
-            else:
-                cost += 15.0
+            cost += 2.0 if (is_narrow_row and fill >= 0.35) else 15.0
 
-    # A line consisting of a single function word is typographically poor unless justified by narrow geometry.
     if n_words == 1 and not is_final and _word_core(words[wi]) in _FUNCTION_WORDS:
-        if is_narrow_row and fill >= 0.35:
-            cost += 4.0
-        else:
-            cost += 20.0
+        cost += 4.0 if (is_narrow_row and fill >= 0.35) else 20.0
 
-    # Linguistic break quality between this line and the next.
     if not is_final:
         cost += _phrase_break_penalty(words[end - 1], words[end])
 
@@ -360,36 +335,22 @@ def _transition_cost(
     """Calculate transition penalty between consecutive placed lines."""
     if prev_slot is None or prev_center_x is None:
         return 0.0
-
-    # 1. Normalized center displacement d_x = |C_i - C_{i-1}| / S
     dx = abs(curr_center_x - prev_center_x)
     dx_norm = dx / max(1.0, float(font_size))
-    # Quadratic penalty for normalized displacement
     p_xjump = (dx_norm ** 2) * _WEIGHT_TRANS_XJUMP
-
-    # 2. Interval overlap ratio r = |I_prev ∩ I_curr| / min(|I_prev|, |I_curr|)
     overlap_left = max(prev_slot.left, curr_slot.left)
     overlap_right = min(prev_slot.right, curr_slot.right)
     overlap_w = max(0, overlap_right - overlap_left)
     min_w = max(1, min(prev_slot.width, curr_slot.width))
     overlap_ratio = overlap_w / float(min_w)
-
     p_overlap = ((1.0 - overlap_ratio) ** 2) * _WEIGHT_TRANS_OVERLAP
-
-    # 3. Branch switch penalty: zero overlap and non-trivial center jump
-    p_branch = 0.0
-    if overlap_ratio == 0.0 and dx_norm > 0.5:
-        p_branch = _WEIGHT_TRANS_BRANCH
-
+    p_branch = _WEIGHT_TRANS_BRANCH if (overlap_ratio == 0.0 and dx_norm > 0.5) else 0.0
     return p_xjump + p_overlap + p_branch
 
 
 def _row_can_fit_word(row: RowGeometry, word_w: int) -> bool:
     """Check if any interval in the row is wide enough to hold at least word_w."""
-    for slot in row.intervals:
-        if slot.width >= word_w:
-            return True
-    return False
+    return any(slot.width >= word_w for slot in row.intervals)
 
 
 def _dp_word_break_rows(
@@ -419,8 +380,29 @@ def _dp_word_break_rows(
 
     # Trailing whitespace needs no state: once all words are placed, the
     # paragraph ends and remaining rows are free.
-    # Result per state: Dict[int, List[Tuple[float, List[PlacedLine]]]] (line_count -> top candidates)
+    # Result per state: line count -> (cost, candidate lines) pairs.
     memo: Dict[Tuple[Any, ...], Dict[int, List[Tuple[float, List[PlacedLine]]]]] = {}
+    prof = get_solver_profile()
+
+    # These bounds are necessary conditions, so they only reject states that
+    # cannot place every remaining word in any remaining row.
+    remaining_word_max = [0] * (nw + 1)
+    next_break_indices = [nw] * nw
+    next_break = nw
+    for wi in range(nw - 1, -1, -1):
+        remaining_word_max[wi] = max(remaining_word_max[wi + 1], word_widths[wi])
+        if words[wi] == HARD_LINE_BREAK:
+            next_break = wi
+        next_break_indices[wi] = next_break
+
+    row_max_widths = [max((slot.width for slot in row.intervals), default=0) for row in rows]
+    remaining_row_max = [0] * (nr + 1)
+    for ri in range(nr - 1, -1, -1):
+        remaining_row_max[ri] = max(remaining_row_max[ri + 1], row_max_widths[ri])
+
+    # Options depend on row geometry and the next word, but not on the
+    # previous placement in the DP state. Reuse their exact original order.
+    placement_options: Dict[Tuple[int, int], List[Tuple[int, int, BandSlot, int, int, float, float, str]]] = {}
 
     BEFORE_TEXT = 0
     IN_TEXT = 1
@@ -435,7 +417,6 @@ def _dp_word_break_rows(
             dest[cand_lines_cnt] = [(cand_cost, cand_lines)]
         else:
             bucket = dest[cand_lines_cnt]
-            # Avoid identical line text structures
             if any(len(b[1]) == len(cand_lines) and all(l1.text == l2.text and l1.y == l2.y for l1, l2 in zip(b[1], cand_lines)) for b in bucket):
                 return
             bucket.append((cand_cost, cand_lines))
@@ -451,7 +432,6 @@ def _dp_word_break_rows(
         prev_line_y: Optional[int],
         text_state: int,
     ) -> Dict[int, List[Tuple[float, List[PlacedLine]]]]:
-        prof = get_solver_profile()
         prof.dp_invocations += 1
         if wi == nw:
             return {0: [(0.0, [])]}
@@ -472,9 +452,26 @@ def _dp_word_break_rows(
         ):
             return memo[key]
 
+        if remaining_word_max[wi] > remaining_row_max[ri]:
+            prof.dp_states_pruned += 1
+            memo[key] = {}
+            return memo[key]
+
         prof.dp_states_created += 1
         row = rows[ri]
         results_by_lines: Dict[int, List[Tuple[float, List[PlacedLine]]]] = {}
+
+        row_can_fit_next = row_max_widths[ri] >= word_widths[wi]
+        if text_state == IN_TEXT and not row_can_fit_next:
+            next_ri = ri + 1
+            while next_ri < nr and row_max_widths[next_ri] < word_widths[wi]:
+                next_ri += 1
+            result = dp(
+                wi, next_ri, prev_slot_left, prev_slot_right, prev_center_x,
+                prev_line_y, text_state,
+            )
+            memo[key] = result
+            return result
 
         prev_slot = (
             BandSlot(left=prev_slot_left, right=prev_slot_right, y_start=0, y_end=0)
@@ -482,69 +479,71 @@ def _dp_word_break_rows(
             else None
         )
 
-        # Option 1: place a run of words on one of this row's intervals.
-        break_index = next_break_index(words, wi, nw)
-        for slot in row.intervals:
-            slot_w = slot.width
-            for end in range(wi + 1, break_index + 1):
-                if forced_break_after is not None and wi <= forced_break_after < end - 1:
-                    break
-                run_w = word_width_prefix[end] - word_width_prefix[wi] + space_w * (end - wi - 1)
-                if run_w > slot_w:
-                    break
+        option_key = (ri, wi)
+        options = placement_options.get(option_key)
+        if options is None:
+            options = []
+            break_index = next_break_indices[wi]
+            for slot in row.intervals:
+                slot_w = slot.width
+                for end in range(wi + 1, break_index + 1):
+                    if forced_break_after is not None and wi <= forced_break_after < end - 1:
+                        break
+                    run_w = word_width_prefix[end] - word_width_prefix[wi] + space_w * (end - wi - 1)
+                    if run_w > slot_w:
+                        break
 
-                ideal_x = int(round(slot.center - run_w / 2.0))
-                x = max(slot.left, min(slot.right - run_w, ideal_x))
-                curr_center_x = x + run_w / 2.0
+                    ideal_x = int(round(slot.center - run_w / 2.0))
+                    x = max(slot.left, min(slot.right - run_w, ideal_x))
+                    curr_center_x = x + run_w / 2.0
+                    next_wi = end + 1 if end == break_index and break_index < nw else end
+                    line_cost = _line_break_cost(
+                        words, wi, end, slot_w, run_w,
+                        zone_profile=zone_profile, row_y=row.y,
+                    )
+                    options.append((end, next_wi, slot, x, run_w, curr_center_x, line_cost, " ".join(words[wi:end])))
+            placement_options[option_key] = options
 
-                line_cost = _line_break_cost(
-                    words, wi, end, slot_w, run_w,
-                    zone_profile=zone_profile, row_y=row.y,
-                )
-                trans_cost = (
-                    _transition_cost(prev_slot, prev_center_x, slot, curr_center_x, font_size)
-                    if text_state == IN_TEXT else 0.0
-                )
-                spacing_cost = 0.0
-                if text_state == IN_TEXT and prev_line_y is not None:
-                    ideal_step = font_size + normal_gap
-                    excess_step = max(0, row.y - prev_line_y - ideal_step)
-                    deformation = excess_step / max(1.0, float(font_size))
-                    spacing_cost = _WEIGHT_VERTICAL_GAP * deformation ** 2
-                step_cost = line_cost + trans_cost + spacing_cost
+        for end, next_wi, slot, x, run_w, curr_center_x, line_cost, line_text in options:
+            trans_cost = (
+                _transition_cost(prev_slot, prev_center_x, slot, curr_center_x, font_size)
+                if text_state == IN_TEXT else 0.0
+            )
+            spacing_cost = 0.0
+            if text_state == IN_TEXT and prev_line_y is not None:
+                ideal_step = font_size + normal_gap
+                excess_step = max(0, row.y - prev_line_y - ideal_step)
+                deformation = excess_step / max(1.0, float(font_size))
+                spacing_cost = _WEIGHT_VERTICAL_GAP * deformation ** 2
+            step_cost = line_cost + trans_cost + spacing_cost
 
-                next_wi = end + 1 if end == break_index and break_index < nw else end
-                rem_dict = dp(
-                    next_wi,
-                    ri + 1,
-                    slot.left,
-                    slot.right,
-                    curr_center_x,
-                    row.y,
-                    IN_TEXT,
-                )
-                for rem_cnt, cand_list in rem_dict.items():
-                    for rem_cost, rem_lines in cand_list:
-                        this_line = PlacedLine(
-                            text=" ".join(words[wi:end]),
-                            y=row.y,
-                            x=x,
-                            width=run_w,
-                            height=font_size,
-                            slot=slot,
-                        )
-                        _add_candidates(
-                            results_by_lines,
-                            rem_cnt + 1,
-                            step_cost + rem_cost,
-                            [this_line] + rem_lines,
-                        )
+            rem_dict = dp(
+                next_wi,
+                ri + 1,
+                slot.left,
+                slot.right,
+                curr_center_x,
+                row.y,
+                IN_TEXT,
+            )
+            for rem_cnt, cand_list in rem_dict.items():
+                for rem_cost, rem_lines in cand_list:
+                    this_line = PlacedLine(
+                        text=line_text,
+                        y=row.y,
+                        x=x,
+                        width=run_w,
+                        height=font_size,
+                        slot=slot,
+                    )
+                    _add_candidates(
+                        results_by_lines,
+                        rem_cnt + 1,
+                        step_cost + rem_cost,
+                        [this_line] + rem_lines,
+                    )
 
-        # Option 2: traverse only a geometry-forced row. Once text has
-        # started, a usable row must carry the next word rather than becoming
-        # typographic whitespace.
-        can_fit_next = wi < nw and _row_can_fit_word(row, word_widths[wi])
-        if text_state == IN_TEXT and can_fit_next:
+        if text_state == IN_TEXT and row_can_fit_next:
             skip_dict = {}
         else:
             skip_dict = dp(

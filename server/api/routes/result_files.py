@@ -151,24 +151,18 @@ def create_result_files_router(
             payload = await store.get_document(folder_name, file_name)
             if file_name == "text_regions.json":
                 payload = await store.get_text_regions(folder_name) if payload is None else payload
+            if payload is None and (folder_path / file_name).is_file():
+                try:
+                    payload = json.loads((folder_path / file_name).read_text(encoding="utf-8"))
+                except Exception:
+                    payload = None
             if payload is None and file_name == "detection.json":
                 regions = await store.get_text_regions(folder_name)
                 if regions is not None:
-                    payload = []
-                    for region in regions:
-                        lines = region.get("lines") or []
-                        confidence = region.get("confidence") if region.get("confidence") is not None else region.get("prob")
-                        if lines:
-                            payload.extend({"pts": line, **({"confidence": confidence} if confidence is not None else {})} for line in lines)
-                        else:
-                            x = region.get("x", 0)
-                            y = region.get("y", 0)
-                            w = region.get("width", 0)
-                            h = region.get("height", 0)
-                            item: dict[str, Any] = {"pts": [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]}
-                            if confidence is not None:
-                                item["confidence"] = confidence
-                            payload.append(item)
+                    payload = [
+                        {"pts": line, **({"confidence": c} if (c := r.get("confidence") if r.get("confidence") is not None else r.get("prob")) is not None else {})}
+                        for r in regions for line in (r.get("lines") or [[[r.get("x", 0), r.get("y", 0)], [r.get("x", 0) + r.get("width", 0), r.get("y", 0)], [r.get("x", 0) + r.get("width", 0), r.get("y", 0) + r.get("height", 0)], [r.get("x", 0), r.get("y", 0) + r.get("height", 0)]]])
+                    ]
             if payload is None:
                 raise HTTPException(404, detail=f"{file_name} not found")
             return JSONResponse(

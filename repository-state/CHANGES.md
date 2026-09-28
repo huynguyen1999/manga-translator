@@ -2,14 +2,27 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-28 — Compact Jobs sidebar workflow
+
+- Reason: The Jobs sidebar's bulk-action row and tall nested page cards obscured live progress and required extra scanning.
+- Moved bulk cleanup into the header's More menu, placed per-job stop beside the title, opened active batch pages by default, and condensed progress, options, thumbnails, status, and page actions into the supplied compact panel hierarchy. Existing job actions remain available in light and dark themes.
+
+## 2026-09-28 — Exact bubble line-break DP optimization
+
+- Reason: Saved-page profiling showed word-break DP dominated several slow layout calls, while reducing search budgets could discard higher-quality alternatives.
+- Reused row/word placement options, pruned only suffixes whose words cannot fit any remaining row, jumped over post-text rows that cannot fit the next word, and precomputed hard-break lookups.
+- Validation: All eight saved-page layout artifacts and rendered JPEGs remained byte-identical. Comparing direct profiles across the same cases showed 7.7% fewer DP invocations and 16.4% fewer created states; elapsed timings varied substantially between runs.
+
 ## 2026-09-28 — Multi-class joint speech bubble and panel detection with interactive web visualization
 
-- Integrated multi-class neural segmentation (`ShadowB/Manga109-panel-balloon-text-yolov26-segmentation`) to replace the single-class speech bubble detector, detecting speech bubbles/balloons and manga panels/frames simultaneously in a single model forward pass.
+- Integrated multi-class neural segmentation (`ShadowB/Manga109-panel-balloon-text-yolov26-segmentation`) as the default engine (`shadowb_manga109`, `manga109_yolov26`) to replace the single-class speech bubble detector, detecting speech bubbles/balloons and manga panels/frames simultaneously in a single model forward pass across backend pipeline, batch configs, and frontend defaults with local storage migration.
 - Added `PanelDetection` data model and Hugging Face checkpoint resolver in `manga_translator/detection/panel.py` with Ultralytics YOLO26 head/loss shims (`Segment26`, `Proto26`, `E2ELoss`) and RTL reading-order geometric sorting (`sort_panel_detections_reading_order`).
 - Extended `BubbleDetector` in `manga_translator/detection/bubble.py` to support joint inference (`detect_joint`, `dispatch_joint`, `dispatch_batch_joint`), preserving backward-compatible single-class outputs for classic callers.
 - Wired detected panels (`ctx.panel_detections`) through pipeline orchestration (`manga_translator/pipeline/run.py` and `orchestrator.py`), serializing `panel_detections.json` artifacts in result folders and server API routes (`server/pipeline_repository.py`, `server/api/routes/pipeline_case_data.py`).
 - Integrated detected panels into reading order region sorting (`manga_translator/utils/sort.py`) and layout panel constraints (`manga_translator/geometry/panels.py`).
-- Added frontend panel detection parser (`front/app/utils/panelRegions.ts`), reusable overlay renderer (`front/app/components/PreviewOverlay.tsx` and `BlockInspectionCard.tsx`), and a "Panels" toggle in the interactive image preview floating toolbar (`front/app/components/PreviewImage.tsx`), rendering cyan polygon boundaries, `#1, #2` sequence order badges, and panel dimension/order inspector badges.
+- Added frontend panel detection parser (`front/app/utils/panelRegions.ts`), reusable overlay renderer (`front/app/components/PreviewOverlay.tsx` and `BlockInspectionCard.tsx`), and unified "Frames" overlay in `front/app/features/page-detail/PageDetailHeader.tsx` and `PreviewImage.tsx`, rendering manga panels (cyan boundary polygons + `#1, #2` sequence order badges) and speech bubbles together simultaneously.
+- Added configurable speech bubble and frame detection confidence threshold (`bubbleConfidence`, default `0.25`, range 0.05–0.95 with step 0.05) in Web Studio Options Panel (`front/app/features/studio/options/OptionsAdvancedPipeline.tsx`), with local storage persistence and full pipeline dispatch support to filter low-confidence detections.
+- Updated terminology across Web Studio and Page Detail views: "Speech bubbles" button updated to "Frames" in Page Detail header and settings tabs, and "Bubble detection" updated to "Frame detection" in Options Panel parameters and summary badges.
 
 ## 2026-09-28 — Web Studio Options Panel compact hierarchy & structured redesign
 

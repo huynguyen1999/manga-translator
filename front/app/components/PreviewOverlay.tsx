@@ -77,7 +77,7 @@ export const PreviewOverlay: React.FC<PreviewOverlayProps> = ({
   return (
     <>
       {/* 1. Panel Detections Layer (Cyan boundary polygons/rects with #1, #2 order badges) */}
-      {showPanels && detectedPanelRegions.length > 0 && (
+      {(showPanels || showBubbleRegions) && detectedPanelRegions.length > 0 && (
         <svg
           role="img"
           aria-label={`${detectedPanelRegions.length} detected manga panels`}

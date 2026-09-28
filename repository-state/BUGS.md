@@ -2,6 +2,26 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-28 — Joint speech bubble and panel detector failed on Ultralytics Boxes iteration and missing document persistence
+
+- Symptom: Opening page detail for translated images showed "No saved frame or bubble regions" error banner despite running the joint frame/bubble segmentation model.
+- Root cause:
+  1. In `manga_translator/detection/bubble.py`, `hasattr(result.boxes, "__iter__")` returned `False` because Ultralytics `Boxes` implements Python sequence indexing (`__len__`, `__getitem__`) instead of `__iter__`. This caused boxes to evaluate as `None` and fall back to class 0 (`panel`), generating zero bubbles and dummy whole-canvas bounding boxes.
+  2. In `manga_translator/manga_translator.py`, `_detect_speech_bubbles` and `_detect_speech_bubbles_batch` were calling single-class `dispatch` / `dispatch_batch` rather than `dispatch_joint` / `dispatch_batch_joint`.
+  3. `bubble_detections.json` and `panel_detections.json` were not serialized or passed to `save_documents_fn` / `result_documents` in `bubble_detection_stage.py`, `single_page.py`, and `orchestrator.py`.
+- Fix:
+  1. Replaced `hasattr(result.boxes, "__iter__")` in `manga_translator/detection/bubble.py` with sequence comprehension `[boxes[i] for i in range(len(boxes))]` and fallback to `list(boxes)`.
+  2. Updated `manga_translator.py` bubble detection entry points to dispatch joint multi-class detections.
+  3. Serialized and saved `bubble_detections.json` and `panel_detections.json` across `bubble_detection_stage.py`, `single_page.py`, `orchestrator.py`, `pipeline_rerun_execution.py`, and database/disk result file routes.
+- Prevention: Avoid checking `hasattr(obj, "__iter__")` on PyTorch/Ultralytics sequence containers; iterate via sequence length or direct iteration. Assert joint detection artifacts exist in pipeline document persistence and result file APIs.
+
+## 2026-09-28 — Bubble line-break DP spent excessive time copying candidate layouts
+
+- Symptom: Saved pages spent up to about 15 seconds in bubble word-break DP.
+- Root cause: DP states repeatedly rebuilt identical row/word placements and recursively traversed forced narrow-row skips; impossible remaining words were discovered only after deeper recursion.
+- Fix: Cache exact row/word placement options, prune only unfillable suffixes, jump directly over rows that cannot fit the next word, and precompute hard-break lookups.
+- Prevention: Track created states separately from memo hits and compare saved-page layout artifacts and rendered output after DP optimizations.
+
 ## 2026-09-28 — Render integrity check failed on hyphenated words
 
 - Symptom: Running pipeline render validation with `--solver-report` failed with `Non-bubble render integrity failed: final draw text differs from layout input text` on words broken across lines.

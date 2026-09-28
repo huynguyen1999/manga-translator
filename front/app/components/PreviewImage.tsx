@@ -148,6 +148,8 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     const [selectedPanelId, setSelectedPanelId] = useState<string | null>(null);
     const [copiedKind, setCopiedKind] = useState<"original" | "translation" | "id" | null>(null);
 
+    const [showFrameBanner, setShowFrameBanner] = useState(false);
+
     // Image measurement state for precise overlay anchoring
     const [imageRect, setImageRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
     const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
@@ -509,10 +511,13 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
 
     // Load Panels
     useEffect(() => {
-      if (!showPanels && panelRegionsStatus !== "idle" && panelRegionsLoadedForRef.current === folder) return;
-      if (!folder) {
-        setDetectedPanelRegions([]);
-        setPanelRegionsStatus("idle");
+      const shouldLoadPanels = showPanels || showBubbleRegions;
+      if (!shouldLoadPanels && panelRegionsStatus !== "idle" && panelRegionsLoadedForRef.current === folder) return;
+      if (!folder || !shouldLoadPanels) {
+        if (!shouldLoadPanels) {
+          setDetectedPanelRegions([]);
+          setPanelRegionsStatus("idle");
+        }
         return;
       }
 
@@ -538,7 +543,24 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       return () => {
         isMounted = false;
       };
-    }, [folder, showPanels]);
+    }, [folder, showPanels, showBubbleRegions]);
+
+    // Auto-dismiss frame & bubble notification after loading completes
+    useEffect(() => {
+      if (!showBubbleRegions && !showPanels) {
+        setShowFrameBanner(false);
+        return;
+      }
+      setShowFrameBanner(true);
+      const isStillLoading = (showBubbleRegions && (bubbleRegionsStatus === "loading" || panelRegionsStatus === "loading"))
+        || (showPanels && panelRegionsStatus === "loading");
+      if (isStillLoading) return;
+
+      const timer = window.setTimeout(() => {
+        setShowFrameBanner(false);
+      }, 3500);
+      return () => window.clearTimeout(timer);
+    }, [showBubbleRegions, showPanels, bubbleRegionsStatus, panelRegionsStatus]);
 
     // Measure rendered image rect within container
     const updateImageRect = useCallback(() => {
@@ -704,19 +726,17 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
         onClick={() => { setSelectedBlockId(null); setSelectedRegionIndex(null); setSelectedBubbleId(null); setSelectedPanelId(null); }}
       >
         {!effectiveShowOriginal && !effectiveShowInpainted && resultFeedback}
-        {showBubbleRegions && bubbleRegionsStatus !== "idle" && (
-          <div role="status" className="absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-md border border-violet-300/20 bg-zinc-950/90 px-2.5 py-1 text-xs text-zinc-100 shadow-lg">
-            {bubbleRegionsStatus === "loading"
-              ? "Loading speech bubbles…"
-              : bubbleRegionsStatus === "error"
-              ? "Saved speech bubble regions unavailable"
-              : detectedBubbleRegions.length > 0
-              ? `${detectedBubbleRegions.length} speech bubbles`
-              : "No saved speech bubble regions"}
+        {showFrameBanner && showBubbleRegions && (bubbleRegionsStatus !== "idle" || panelRegionsStatus !== "idle") && (
+          <div role="status" className="pointer-events-none absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-md border border-violet-300/20 bg-zinc-950/90 px-2.5 py-1 text-xs text-zinc-100 shadow-lg transition-opacity duration-300">
+            {bubbleRegionsStatus === "loading" || panelRegionsStatus === "loading"
+              ? "Loading frames & bubbles…"
+              : (detectedPanelRegions.length > 0 || detectedBubbleRegions.length > 0)
+              ? `${detectedPanelRegions.length > 0 ? `${detectedPanelRegions.length} panel(s), ` : ""}${detectedBubbleRegions.length} bubble(s)`
+              : "No saved frame or bubble regions"}
           </div>
         )}
-        {showPanels && panelRegionsStatus !== "idle" && (
-          <div role="status" className="absolute bottom-10 left-1/2 z-30 -translate-x-1/2 rounded-md border border-cyan-300/20 bg-zinc-950/90 px-2.5 py-1 text-xs text-cyan-200 shadow-lg">
+        {showFrameBanner && showPanels && !showBubbleRegions && panelRegionsStatus !== "idle" && (
+          <div role="status" className="pointer-events-none absolute bottom-10 left-1/2 z-30 -translate-x-1/2 rounded-md border border-cyan-300/20 bg-zinc-950/90 px-2.5 py-1 text-xs text-cyan-200 shadow-lg transition-opacity duration-300">
             {panelRegionsStatus === "loading"
               ? "Loading panels…"
               : panelRegionsStatus === "error"

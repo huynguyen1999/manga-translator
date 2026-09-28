@@ -191,15 +191,16 @@ async def translate_until_translation(
 
     await translator._detect_speech_bubbles(config, ctx)
     ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
-    merged_docs = serialize_regions(ctx.text_regions)
-    ctx.result_documents['text_regions_merged.json'] = merged_docs
+    b_docs = serialize_bubble_detections(getattr(ctx, 'bubble_detections', None) or [])
+    p_docs = serialize_panel_detections(getattr(ctx, 'panel_detections', None) or [], ctx.img_rgb.shape[:2] if ctx.img_rgb is not None else None)
+    m_docs = serialize_regions(ctx.text_regions)
+    saved_stage_docs = {'text_regions_merged.json': m_docs, 'bubble_detections.json': b_docs, 'panel_detections.json': p_docs}
+    ctx.result_documents.update(saved_stage_docs)
     if translator._pipeline_run is not None:
-        translator._pipeline_run.write_json('text_regions_merged.json', merged_docs)
+        for k, v in saved_stage_docs.items():
+            translator._pipeline_run.write_json(k, v)
     elif translator._current_image_context:
-        await save_documents_fn(
-            translator._current_image_context['subfolder'],
-            {'text_regions_merged.json': merged_docs}, translator.result_root,
-        )
+        await save_documents_fn(translator._current_image_context['subfolder'], saved_stage_docs, translator.result_root)
     ctx.page_geometry, ctx.bubble_mask = prepare_page_geometry(
         ctx.img_rgb,
         ctx.text_regions,

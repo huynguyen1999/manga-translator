@@ -60,6 +60,11 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
         "filename": "best.pt",
         "local_subpath": "shadowb_manga109/best.pt",
     },
+    "manga109_yolov26": {
+        "repo_id": "ShadowB/Manga109-panel-balloon-text-yolov26-segmentation",
+        "filename": "best.pt",
+        "local_subpath": "shadowb_manga109/best.pt",
+    },
     "manga109": {
         "repo_id": "juithealien/manga109-segmentation-bubble",
         "filename": "best.pt",
@@ -91,10 +96,21 @@ def normalize_class_name(name: str) -> str:
 
 def resolve_model_checkpoint(model: str) -> Path:
     root = Path(__file__).resolve().parents[2] / "models" / "bubbles"
-    canonical_key = model.lower().strip()
-    if canonical_key in ("shadowb", "shadowb_manga109", "manga109_multiclass", "yolo26_manga109", "shadowb/manga109-panel-balloon-text-yolov26-segmentation"):
+    canonical_key = model.lower().strip().replace(" ", "-").replace("_", "-")
+    shadowb_keys = (
+        "shadowb",
+        "shadowb-manga109",
+        "manga109-multiclass",
+        "yolo26-manga109",
+        "manga109-yolo26",
+        "manga109-yolov26",
+        "manga109-panel-balloon-text-yolov26-segmentation",
+        "manga109-panel-balloon-text-yolov26",
+        "shadowb/manga109-panel-balloon-text-yolov26-segmentation",
+    )
+    if canonical_key in shadowb_keys or model.lower().strip() in MODEL_PRESETS:
         preset = MODEL_PRESETS["shadowb_manga109"]
-    elif canonical_key in ("yolo11_manga_seg", "chiqui7/yolo11-manga-seg"):
+    elif canonical_key in ("yolo11-manga-seg", "chiqui7/yolo11-manga-seg"):
         preset = MODEL_PRESETS["yolo11_manga_seg"]
     elif canonical_key in ("manga109", "juithealien/manga109-segmentation-bubble"):
         preset = MODEL_PRESETS["manga109"]

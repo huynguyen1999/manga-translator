@@ -10,7 +10,7 @@ type ImageSourceType = "original" | "translated";
 const itemStatusLabel: Record<QueuedImage["status"], string> = {
   queued: "Waiting",
   processing: "Processing",
-  finished: "Complete",
+  finished: "Done",
   error: "Failed",
 };
 
@@ -128,16 +128,16 @@ export const ItemRow: React.FC<{
 
   return (
   <RenderProfiler id={`JobItem:${item.id}`}>
-  <div className={`job-card job-offscreen-row flex flex-wrap items-start gap-3 rounded-xl border bg-white p-3 shadow-2xs dark:bg-zinc-900 ${
+  <div className={`job-card job-offscreen-row grid grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1.5 rounded-lg px-2 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 ${
       isError
-        ? "border-rose-200 dark:border-rose-900/70"
+        ? "bg-rose-50/60 dark:bg-rose-950/20"
         : isAwaitingTranslation
-        ? "border-sky-200 dark:border-sky-900/70"
-        : "border-zinc-200 dark:border-zinc-800"
+        ? "bg-sky-50/50 dark:bg-sky-950/20"
+        : ""
     }`}>
       <button
         type="button"
-        className={`group relative h-16 w-12 shrink-0 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-950 ${canOpenPreview ? "cursor-zoom-in" : ""}`}
+        className={`group relative h-10 w-8 shrink-0 overflow-hidden rounded border border-zinc-200 bg-zinc-200 dark:border-zinc-600 dark:bg-zinc-700 ${canOpenPreview ? "cursor-zoom-in" : ""}`}
         onClick={() =>
           canOpenPreview &&
           onOpenLightbox?.(
@@ -173,34 +173,18 @@ export const ItemRow: React.FC<{
       </button>
 
       <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100" title={item.file.name}>
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100" title={item.file.name}>
             {item.file.name}
           </span>
-          <span className={`text-xs ${
-            needsReview
-              ? "text-amber-600 dark:text-amber-400"
-              : isAwaitingTranslation
-              ? "font-medium text-sky-600 dark:text-sky-400"
-              : "text-zinc-400 dark:text-zinc-500"
-          }`}>
-            {needsReview
-              ? "Needs review"
-              : isAwaitingTranslation
-              ? "Awaiting translation"
-              : item.status === "queued"
-              ? queuedStatus
-              : itemStatusLabel[item.status]}
-          </span>
         </div>
-        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-          {isAwaitingTranslation ? (
-            <span className="inline-flex items-center gap-1 rounded-full border border-sky-200/80 bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700 dark:border-sky-800/60 dark:bg-sky-950/40 dark:text-sky-300">
-              <Icon icon="carbon:hourglass" className="h-3 w-3 text-sky-600 dark:text-sky-400" />
-              Prepared · Waiting for batch translation
-            </span>
+        <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 text-[11px] text-zinc-600 dark:text-zinc-400">
+          {item.status === "queued" ? (
+            <span className="truncate">{queuedStatus}</span>
+          ) : isAwaitingTranslation ? (
+            <span className="truncate text-sky-700 dark:text-sky-300">Prepared · Waiting for batch translation</span>
           ) : isProcessing && (
-            <span>{formatStage(item.step)}{item.stepStartedAt ? ` · ${formatStageElapsed(item.stepStartedAt, now)}` : ""}</span>
+            <span>{item.stepStartedAt ? formatStageElapsed(item.stepStartedAt, now) : "In progress"}</span>
           )}
           {isProcessing && item.offlineModel && (
             <span className="truncate" title={item.offlineModel}>
@@ -227,7 +211,7 @@ export const ItemRow: React.FC<{
           )}
         </div>
         {isError && (
-          <div className="mt-2 flex items-start gap-2 rounded-lg border border-rose-200/80 bg-rose-50/80 px-2.5 py-2 dark:border-rose-900/60 dark:bg-rose-950/30">
+          <div className="mt-1 flex items-start gap-1.5">
             <Icon icon="carbon:warning-alt" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-600 dark:text-rose-400" aria-hidden="true" />
             <p className="min-w-0 flex-1 break-words text-xs leading-relaxed text-rose-700 dark:text-rose-300" title={item.error}>
               {item.error || "Translation failed"}
@@ -236,7 +220,11 @@ export const ItemRow: React.FC<{
         )}
       </div>
 
-      <div className={`flex w-full shrink-0 flex-wrap items-center justify-end gap-2 ${isError ? "border-t border-rose-100 pt-3 dark:border-rose-900/50" : "sm:w-auto"}`}>
+      <div className={`flex shrink-0 flex-wrap items-center justify-end gap-1 ${isError ? "col-span-3 border-t border-rose-200 pt-1.5 dark:border-rose-900/50" : ""}`}>
+        <span className={`inline-flex items-center gap-1 text-[11px] font-medium whitespace-nowrap ${needsReview ? "text-amber-700 dark:text-amber-300" : isError ? "text-rose-700 dark:text-rose-300" : isProcessing && !isAwaitingTranslation ? "text-indigo-700 dark:text-indigo-300" : isFinished ? "text-emerald-700 dark:text-emerald-300" : "text-zinc-600 dark:text-zinc-400"}`}>
+          <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />
+          {needsReview ? "Review" : isAwaitingTranslation ? "Waiting" : isProcessing ? formatStage(item.step) : itemStatusLabel[item.status]}
+        </span>
         {canSkip && (
           <button
             type="button"
@@ -244,7 +232,7 @@ export const ItemRow: React.FC<{
             disabled={isActionPending(removeActionKey)}
             aria-busy={isActionPending(removeActionKey)}
             aria-label={`Skip ${item.file.name}`}
-            className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-semibold text-zinc-600 hover:bg-zinc-100 disabled:cursor-wait disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            className="inline-flex min-h-8 items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium text-zinc-600 hover:bg-zinc-200 disabled:cursor-wait disabled:opacity-60 dark:text-zinc-300 dark:hover:bg-zinc-600"
             title={isProcessing ? "Skip this page after its current step" : "Skip this page in the current batch"}
           >
             <Icon icon={isActionPending(removeActionKey) ? "carbon:renew" : "carbon:close-outline"} className={`h-3.5 w-3.5 ${isActionPending(removeActionKey) ? "animate-spin" : ""}`} />
@@ -291,7 +279,7 @@ export const ItemRow: React.FC<{
           <a
             href={downloadUrl}
             download={`${sourceType === "original" ? "original" : "translated"}_${item.file.name}`}
-            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg p-2 text-zinc-400 hover:bg-zinc-100 hover:text-indigo-600 dark:hover:bg-zinc-800 dark:hover:text-indigo-400"
+            className="inline-flex size-8 items-center justify-center rounded-lg text-zinc-600 hover:bg-zinc-200 hover:text-indigo-600 dark:text-zinc-400 dark:hover:bg-zinc-600 dark:hover:text-indigo-300"
             title={`Download ${sourceType === "original" ? "original" : "translated"} page`}
           >
             <Icon icon="carbon:download" className="h-4 w-4" />

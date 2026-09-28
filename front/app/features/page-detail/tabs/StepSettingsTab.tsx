@@ -91,7 +91,7 @@ export const StepSettingsTab: React.FC<StepSettingsTabProps> = ({
                               <div className="mb-1.5 flex items-center justify-between font-semibold text-zinc-200">
                                 <span className="flex items-center gap-1.5">
                                   <Icon icon="carbon:chat" className="h-3.5 w-3.5 text-indigo-300" />
-                                  <span>Speech Bubbles</span>
+                                  <span>Frame & Bubble Detection</span>
                                 </span>
                                 <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${stepSettings.bubbleDetection.enabled ? "bg-emerald-500/15 text-emerald-300" : "bg-zinc-500/20 text-zinc-400"}`}>
                                   {stepSettings.bubbleDetection.enabled ? "Enabled" : "Disabled"}
@@ -119,7 +119,7 @@ export const StepSettingsTab: React.FC<StepSettingsTabProps> = ({
                                   ) : null}
                                 </dl>
                               ) : (
-                                <p className="text-[11px] text-zinc-400">Bubble shape segmentation turned off</p>
+                                <p className="text-[11px] text-zinc-400">Frame & bubble segmentation turned off</p>
                               )}
                             </div>
 

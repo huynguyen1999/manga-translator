@@ -39,6 +39,7 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
   customOcrProb,
   maskDilationOffset,
   bubbleDetection,
+  bubbleConfidence,
   inpainter,
   colorizer,
   colorizeOnly,
@@ -67,6 +68,7 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
   setCustomOcrProb,
   setMaskDilationOffset,
   setBubbleDetection,
+  setBubbleConfidence,
   setInpainter,
   setColorizer,
   setColorizeOnly,
@@ -98,6 +100,7 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
     setCustomOcrProb(undefined);
     setMaskDilationOffset(30);
     setBubbleDetection(false);
+    setBubbleConfidence(0.25);
     setInpainter("default");
     setColorizer("none");
     setColorizeOnly(false);
@@ -343,6 +346,8 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
         setMaskDilationOffset={setMaskDilationOffset}
         bubbleDetection={bubbleDetection}
         setBubbleDetection={setBubbleDetection}
+        bubbleConfidence={bubbleConfidence}
+        setBubbleConfidence={setBubbleConfidence}
         summaryModel={summaryModel}
         setSummaryModel={setSummaryModel}
       />

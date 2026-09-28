@@ -275,6 +275,7 @@ export interface TranslationSettings {
   migratedDefaultSugoi?: boolean;
   migratedDefaultGemini?: boolean;
   migratedDefaultBubbleDetection?: boolean;
+  migratedDefaultBubbleModel?: boolean;
   migratedDefaultTargetLang?: boolean;
   keepFailedPagesForEditing?: boolean;
   translationBatchSize?: number;

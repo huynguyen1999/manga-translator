@@ -78,7 +78,7 @@ def config_for(batch: dict, item: dict) -> Config:
                 "mask_dilation_offset": settings.get("maskDilationOffset", 20),
                 "bubble_detection": {
                     "enabled": bool(settings.get("bubbleDetection", True)),
-                    "model": settings.get("bubbleModel", "yolov8m"),
+                    "model": settings.get("bubbleModel", "shadowb_manga109"),
                     "confidence": float(settings.get("bubbleConfidence", 0.25)),
                     "mask_threshold": float(settings.get("bubbleMaskThreshold", 0.5)),
                     "padding": int(settings.get("bubblePadding", 9)),

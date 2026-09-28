@@ -47,8 +47,8 @@ from .detection import (
 )
 from .detection.bubble import (
     BubbleDetection,
-    dispatch as dispatch_bubble_detection,
-    dispatch_batch as dispatch_bubble_detection_batch,
+    dispatch_joint as dispatch_bubble_detection,
+    dispatch_batch_joint as dispatch_bubble_detection_batch,
     detect as detect_bubbles,
     prepare as prepare_bubble_detection,
     unload as unload_bubble_detection,

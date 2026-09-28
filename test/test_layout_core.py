@@ -314,6 +314,22 @@ def test_compression_thresholds_and_explicit_break_only_split_at_chosen_word():
     assert any([line.text for line in lines] == ["INTER-", "VIEW"] for lines in rescue)
 
 
+def test_dp_prunes_when_a_remaining_word_fits_no_remaining_row():
+    from manga_translator.rendering.layout.profiling import reset_solver_profile
+
+    profile = reset_solver_profile()
+    rows = [
+        RowGeometry(0, 10, [BandSlot(0, 40, 0, 10)]),
+        RowGeometry(10, 10, [BandSlot(0, 32, 10, 20)]),
+    ]
+
+    candidates = _dp_word_break_rows(["OK", "TOOLONG"], [10, 50], 2, rows, 10)
+
+    assert candidates == []
+    assert profile.dp_states_pruned == 1
+    assert profile.dp_states_created == 0
+
+
 def test_hyphenation_variant_uses_dictionary_breaks_and_preserves_source_compounds(monkeypatch):
     class Dictionary:
         def syllables(self, word):

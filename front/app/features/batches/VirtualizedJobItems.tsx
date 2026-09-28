@@ -15,7 +15,7 @@ export const VirtualizedJobItems: React.FC<{
   const [viewportHeight, setViewportHeight] = useState(480);
   const [layoutVersion, setLayoutVersion] = useState(0);
   const virtualized = items.length > 16;
-  const estimatedHeight = 136;
+  const estimatedHeight = 56;
   const overscan = 240;
 
   useEffect(() => {
@@ -70,7 +70,7 @@ export const VirtualizedJobItems: React.FC<{
     let totalHeight = 0;
     const offsets = items.map((item) => {
       const offset = totalHeight;
-      totalHeight += (heights.current.get(item.id) ?? estimatedHeight) + 8;
+      totalHeight += (heights.current.get(item.id) ?? estimatedHeight) + 2;
       return offset;
     });
     return { offsets, totalHeight };
@@ -112,7 +112,7 @@ export const VirtualizedJobItems: React.FC<{
 
   if (!virtualized) {
     return (
-      <div className="space-y-2 border-t border-zinc-100 p-4 dark:border-zinc-800" role="list">
+      <div className="max-h-[300px] overflow-y-auto border-t border-zinc-200 p-1 dark:border-zinc-700" role="list" aria-label="Batch pages">
         {items.map((item) => <div key={item.id} role="listitem">{renderItem(item)}</div>)}
       </div>
     );
@@ -121,13 +121,13 @@ export const VirtualizedJobItems: React.FC<{
   return (
     <div
       ref={listRef}
-      className="max-h-[60vh] overflow-y-auto border-t border-zinc-100 dark:border-zinc-800"
+      className="max-h-[300px] overflow-y-auto border-t border-zinc-200 dark:border-zinc-700"
       role="list"
       aria-label="Batch pages"
       onKeyDown={handleVirtualizedTab}
       onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
     >
-      <div className="relative px-4" style={{ height: totalHeight + 24 }}>
+      <div className="relative px-1" style={{ height: totalHeight + 8 }}>
         {items.slice(first, last).map((item, relativeIndex) => {
           const index = first + relativeIndex;
           return (
@@ -139,8 +139,8 @@ export const VirtualizedJobItems: React.FC<{
               role="listitem"
               aria-posinset={index + 1}
               aria-setsize={items.length}
-              className="absolute left-4 right-4"
-              style={{ top: offsets[index] + 12 }}
+              className="absolute left-1 right-1"
+              style={{ top: offsets[index] + 4 }}
             >
               {renderItem(item)}
             </div>

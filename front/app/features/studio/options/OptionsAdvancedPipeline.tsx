@@ -34,6 +34,8 @@ interface OptionsAdvancedPipelineProps {
   setMaskDilationOffset: (val: number) => void;
   bubbleDetection: boolean;
   setBubbleDetection: (val: boolean) => void;
+  bubbleConfidence: number;
+  setBubbleConfidence: (val: number) => void;
   summaryModel: string;
   setSummaryModel: (val: string) => void;
 }
@@ -61,6 +63,8 @@ export const OptionsAdvancedPipeline: React.FC<OptionsAdvancedPipelineProps> = (
   setMaskDilationOffset,
   bubbleDetection,
   setBubbleDetection,
+  bubbleConfidence,
+  setBubbleConfidence,
   summaryModel,
   setSummaryModel,
 }) => {
@@ -79,7 +83,7 @@ export const OptionsAdvancedPipeline: React.FC<OptionsAdvancedPipelineProps> = (
           <span>Advanced Neural Engine Parameters</span>
         </div>
         <span className="truncate rounded-full bg-zinc-100 px-2.5 py-0.5 text-[11px] font-normal text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-          {textDetector} · {detectionResolution}px · {ocr} · {inpainter} · {bubbleDetection ? "Bubbles ON" : "Bubbles OFF"}
+          {textDetector} · {detectionResolution}px · {ocr} · {inpainter} · {bubbleDetection ? "Frames ON" : "Frames OFF"}
         </span>
       </button>
 
@@ -164,25 +168,25 @@ export const OptionsAdvancedPipeline: React.FC<OptionsAdvancedPipelineProps> = (
             </div>
           </div>
 
-          {/* Inpainting & Bubble Geometry Sub-card */}
+          {/* Inpainting & Frame Detection Sub-card */}
           <div className="rounded-lg border border-zinc-200/60 bg-zinc-50/40 p-3 dark:border-zinc-800/60 dark:bg-zinc-800/20 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-1.5 text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                 <Icon icon="carbon:paint-brush" className="h-3.5 w-3.5" />
-                <span>Inpainting & Mask Generation</span>
+                <span>Inpainting & Frame Detection</span>
               </div>
-              <label className="flex cursor-pointer items-center gap-1.5 text-xs font-medium text-zinc-700 select-none dark:text-zinc-300">
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs font-medium text-zinc-700 select-none dark:text-zinc-300" title="Detect panels and speech bubbles for frame-aware text fitting">
                 <input
                   type="checkbox"
                   checked={bubbleDetection}
                   onChange={(e) => setBubbleDetection(e.target.checked)}
                   className="h-3.5 w-3.5 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500 dark:border-zinc-600"
                 />
-                <span>Fit text to speech bubbles</span>
+                <span>Frame detection</span>
               </label>
             </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <LabeledSelect
                 id="inpainter"
                 label="Inpainter Model"
@@ -215,6 +219,18 @@ export const OptionsAdvancedPipeline: React.FC<OptionsAdvancedPipelineProps> = (
                 value={maskDilationOffset}
                 onChange={setMaskDilationOffset}
                 tooltip="Pixel padding expanding around characters to erase original text edges completely."
+              />
+              <LabeledInput
+                id="bubbleConfidence"
+                label="Frame Confidence"
+                icon="carbon:chart-bubble"
+                title="Confidence threshold for speech bubble and frame detector"
+                step={0.05}
+                min={0.05}
+                max={0.95}
+                value={bubbleConfidence}
+                onChange={setBubbleConfidence}
+                tooltip="Minimum confidence threshold (0.05–0.95) for speech bubble and frame detection. Detections with confidence below this are discarded."
               />
             </div>
           </div>

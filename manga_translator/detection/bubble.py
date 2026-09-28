@@ -67,7 +67,7 @@ class BubbleDetector:
         self.model = YOLO(str(_resolve_checkpoint(model)))
         raw_names = getattr(self.model, "names", {})
         self.class_map = {int(k): normalize_class_name(v) for k, v in raw_names.items()} if isinstance(raw_names, dict) else {}
-        self.is_multiclass = any(name in ("panel", "balloon") for name in self.class_map.values())
+        self.is_multiclass = len(self.class_map) > 1 and any(name in ("panel", "balloon") for name in self.class_map.values())
         self.last_panel_detections: list[PanelDetection] = []
 
     def __call__(self, image: np.ndarray, confidence: float | None = None, mask_threshold: float | None = None, image_size: int | None = None) -> list[BubbleDetection]:
@@ -131,8 +131,20 @@ class BubbleDetector:
         bubbles: list[BubbleDetection] = []
         raw_panels: list[PanelDetection] = []
         raw_polygons = getattr(result.masks, "xy", None)
-        boxes_conf = getattr(result.boxes, "conf", None) if getattr(result, "boxes", None) is not None else None
-        boxes_iter = list(result.boxes) if (getattr(result, "boxes", None) is not None and hasattr(result.boxes, "__iter__") and not isinstance(result.boxes, (dict, type))) else [None] * len(masks_data)
+        boxes = getattr(result, "boxes", None)
+        boxes_conf = getattr(boxes, "conf", None) if boxes is not None else None
+        if boxes is not None:
+            try:
+                boxes_iter = [boxes[i] for i in range(len(boxes))]
+                if len(boxes_iter) == 0 and len(masks_data) > 0:
+                    boxes_iter = list(boxes)
+            except Exception:
+                try:
+                    boxes_iter = list(boxes)
+                except Exception:
+                    boxes_iter = [None] * len(masks_data)
+        else:
+            boxes_iter = [None] * len(masks_data)
         if len(boxes_iter) < len(masks_data):
             boxes_iter = boxes_iter + [None] * (len(masks_data) - len(boxes_iter))
 

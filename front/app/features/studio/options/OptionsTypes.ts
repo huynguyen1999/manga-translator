@@ -18,6 +18,7 @@ export type OptionsPanelProps = {
   customOcrProb?: number;
   maskDilationOffset: number;
   bubbleDetection: boolean;
+  bubbleConfidence: number;
   inpainter: string;
   colorizer: string;
   colorizeOnly: boolean;
@@ -47,6 +48,7 @@ export type OptionsPanelProps = {
   setCustomOcrProb: (val: number | undefined) => void;
   setMaskDilationOffset: (val: number) => void;
   setBubbleDetection: (val: boolean) => void;
+  setBubbleConfidence: (val: number) => void;
   setInpainter: (val: string) => void;
   setColorizer: (val: string) => void;
   setColorizeOnly: (val: boolean) => void;

@@ -215,9 +215,9 @@ export const PageDetailHeader: React.FC<PageDetailHeaderProps> = ({
                       ? "bg-violet-600 text-white shadow-xs"
                       : "text-zinc-300 hover:bg-white/10 hover:text-white"
                   }`}
-                  title="Show saved speech bubble regions over the original page"
+                  title="Show saved frame & speech bubble regions over the original page"
                 >
-                  Speech bubbles
+                  Frames
                 </button>
               )}
 

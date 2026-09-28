@@ -26,7 +26,7 @@ const SummaryJobRow: React.FC<{
   isActionPending: (key: string) => boolean;
   runAction: (key: string, label: string, action: AsyncAction) => void;
 }> = React.memo(({ job, onDismiss, onRetry, onPause, onResume, onStop, onOpen, isActionPending, runAction }) => {
-  const [expanded, setExpanded] = useState(job.status === "generating" || job.status === "error");
+  const [expanded, setExpanded] = useState(job.status === "error");
   const [summaryModel, setSummaryModel] = useState(() => {
     const provider = job.provider?.toLowerCase();
     const model = job.model?.toLowerCase() || "";
@@ -40,17 +40,17 @@ const SummaryJobRow: React.FC<{
 
   return (
     <RenderProfiler id={`SummaryJob:${job.id}`}>
-    <article className="job-card job-offscreen-row relative overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+    <article className="job-card job-offscreen-row relative overflow-hidden rounded-xl border border-zinc-200 bg-zinc-50/70 dark:border-zinc-700 dark:bg-zinc-800/70">
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
-        className="flex w-full items-start gap-3 p-4 pr-12 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500"
+        className="flex w-full items-start gap-1.5 px-3 py-2.5 pr-12 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500"
         aria-expanded={expanded}
       >
-        <Icon icon={expanded ? "carbon:chevron-down" : "carbon:chevron-right"} className="mt-0.5 h-4 w-4 shrink-0 text-zinc-400" aria-hidden="true" />
+        <Icon icon={expanded ? "carbon:chevron-down" : "carbon:chevron-right"} className="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-500 dark:text-zinc-400" aria-hidden="true" />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{job.title}</span>
-          <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+          <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-400">
             <span className="rounded-full bg-indigo-100 px-2 py-0.5 font-semibold text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300">Summary</span>
             <span>
               {job.status === "queued"
@@ -75,15 +75,15 @@ const SummaryJobRow: React.FC<{
           runAction(`dismiss-summary:${job.id}`, "Clearing…", () => onDismiss(job));
         }}
         disabled={isActionPending(`dismiss-summary:${job.id}`)}
-        className="absolute right-2 top-2 inline-flex min-h-10 min-w-10 items-center justify-center rounded-lg p-2 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 disabled:cursor-wait disabled:opacity-60 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+        className="absolute right-2 top-2 inline-flex size-9 items-center justify-center rounded-lg text-zinc-600 hover:bg-zinc-200 disabled:cursor-wait disabled:opacity-60 dark:text-zinc-400 dark:hover:bg-zinc-700"
         title="Dismiss summary job"
         aria-label={`Dismiss summary job for ${job.title}`}
       >
         <Icon icon={isActionPending(`dismiss-summary:${job.id}`) ? "carbon:renew" : "carbon:close"} className={`h-4 w-4 ${isActionPending(`dismiss-summary:${job.id}`) ? "animate-spin" : ""}`} />
       </button>
 
-      <div className="px-4 pb-4 pl-11">
-        <div className="h-1.5 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800" role="progressbar" aria-label={`Summary progress for ${job.title}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
+      <div className="px-3 pb-2.5">
+        <div className="h-1.5 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700" role="progressbar" aria-label={`Summary progress for ${job.title}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
           <div className={`h-full rounded-full bg-indigo-500 transition-[width] duration-300 ${job.status === "generating" && !job.jobProgress ? "animate-pulse" : ""}`} style={{ width: `${progress}%` }} />
         </div>
         {job.jobMessage && <p className="mt-2 text-xs leading-relaxed text-zinc-600 dark:text-zinc-300" aria-live="polite">{job.jobMessage}</p>}

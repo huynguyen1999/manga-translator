@@ -28,7 +28,8 @@ export const useTranslationSettings = () => {
   const [customOcrProb, setCustomOcrProb] = useState<number | undefined>(undefined);
   const [maskDilationOffset, setMaskDilationOffset] = useState<number>(20);
   const [bubbleDetection, setBubbleDetection] = useState(true);
-  const [bubbleModel, setBubbleModel] = useState("yolov8m");
+  const [bubbleModel, setBubbleModel] = useState("shadowb_manga109");
+  const [bubbleConfidence, setBubbleConfidence] = useState<number>(0.25);
   const [inpainter, setInpainter] = useState("default");
   const [colorizer, setColorizer] = useState("none");
   const [colorizeOnly, setColorizeOnly] = useState(false);
@@ -63,6 +64,7 @@ export const useTranslationSettings = () => {
     maskDilationOffset,
     bubbleDetection,
     bubbleModel,
+    bubbleConfidence,
     inpainter,
     colorizer,
     colorizeOnly,
@@ -84,35 +86,23 @@ export const useTranslationSettings = () => {
     if (shouldRememberSettings && savedSettings.ocr && ocrOptions.some((option) => option.value === savedSettings.ocr)) setOcr(savedSettings.ocr);
     if (shouldRememberSettings && savedSettings.renderFont) setRenderFont(savedSettings.renderFont);
     if (shouldRememberSettings && savedSettings.renderTextDirection) setRenderTextDirection(savedSettings.renderTextDirection);
-    if (shouldRememberSettings && savedSettings.letterCase) {
-      setLetterCase(savedSettings.letterCase);
-    } else if (shouldRememberSettings && savedSettings.uppercase) {
-      setLetterCase("uppercase");
-    } else if (shouldRememberSettings && savedSettings.lowercase) {
-      setLetterCase("lowercase");
-    }
+    if (shouldRememberSettings && savedSettings.letterCase) setLetterCase(savedSettings.letterCase);
+    else if (shouldRememberSettings && savedSettings.uppercase) setLetterCase("uppercase");
+    else if (shouldRememberSettings && savedSettings.lowercase) setLetterCase("lowercase");
+
     if (shouldRememberSettings && savedSettings.translator) {
       const savedTranslator = savedSettings.translator;
-      if (
-        (savedTranslator === "youdao" && !savedSettings.migratedDefaultTranslator) ||
+      const isLegacy = (savedTranslator === "youdao" && !savedSettings.migratedDefaultTranslator) ||
         ((savedTranslator as string) === "offline" && !savedSettings.migratedDefaultSugoi) ||
         ((savedTranslator as string) === "qwen2" && !savedSettings.migratedDefaultSugoi) ||
-        (savedTranslator === "sugoi" && !savedSettings.migratedDefaultGemini)
-      ) {
-        setTranslator("deepseek");
-      } else {
-        setTranslator(savedTranslator);
-      }
+        (savedTranslator === "sugoi" && !savedSettings.migratedDefaultGemini);
+      setTranslator(isLegacy ? "deepseek" : savedTranslator);
     }
     if (shouldRememberSettings && savedSettings.summaryModel && summaryModelOptions.some((option) => option.value === savedSettings.summaryModel)) {
       setSummaryModel(savedSettings.summaryModel);
     }
     if (shouldRememberSettings && savedSettings.targetLanguage) {
-      if (savedSettings.targetLanguage === "CHS" && !savedSettings.migratedDefaultTargetLang) {
-        setTargetLanguage("ENG");
-      } else {
-        setTargetLanguage(savedSettings.targetLanguage);
-      }
+      setTargetLanguage(savedSettings.targetLanguage === "CHS" && !savedSettings.migratedDefaultTargetLang ? "ENG" : savedSettings.targetLanguage);
     }
     if (shouldRememberSettings && savedSettings.translationQuality) setTranslationQuality(savedSettings.translationQuality);
     if (shouldRememberSettings && savedSettings.draftTranslator) setDraftTranslator(savedSettings.draftTranslator);
@@ -126,12 +116,14 @@ export const useTranslationSettings = () => {
     }
     if (shouldRememberSettings && savedSettings.maskDilationOffset !== undefined) setMaskDilationOffset(savedSettings.maskDilationOffset);
     if (shouldRememberSettings && savedSettings.bubbleDetection !== undefined) {
-      if (!savedSettings.migratedDefaultBubbleDetection) {
-        setBubbleDetection(true);
-      } else {
-        setBubbleDetection(savedSettings.bubbleDetection);
-      }
+      if (!savedSettings.migratedDefaultBubbleDetection) setBubbleDetection(true);
+      else setBubbleDetection(savedSettings.bubbleDetection);
     }
+    if (shouldRememberSettings && savedSettings.bubbleModel) {
+      if (savedSettings.bubbleModel === "yolov8m" && !savedSettings.migratedDefaultBubbleModel) setBubbleModel("shadowb_manga109");
+      else setBubbleModel(savedSettings.bubbleModel);
+    }
+    if (shouldRememberSettings && savedSettings.bubbleConfidence !== undefined) setBubbleConfidence(savedSettings.bubbleConfidence);
     if (shouldRememberSettings && savedSettings.inpainter) setInpainter(savedSettings.inpainter);
     if (shouldRememberSettings && savedSettings.colorizer) setColorizer(savedSettings.colorizer);
     if (shouldRememberSettings && savedSettings.colorizeOnly !== undefined) setColorizeOnly(savedSettings.colorizeOnly);
@@ -180,6 +172,7 @@ export const useTranslationSettings = () => {
       maskDilationOffset,
       bubbleDetection,
       bubbleModel,
+      bubbleConfidence,
       inpainter,
       colorizer,
       colorizeOnly,
@@ -195,6 +188,7 @@ export const useTranslationSettings = () => {
       migratedDefaultSugoi: true,
       migratedDefaultGemini: true,
       migratedDefaultBubbleDetection: true,
+      migratedDefaultBubbleModel: true,
       migratedDefaultTargetLang: true,
     };
     saveSettings(settings);
@@ -216,6 +210,7 @@ export const useTranslationSettings = () => {
     maskDilationOffset,
     bubbleDetection,
     bubbleModel,
+    bubbleConfidence,
     inpainter,
     colorizer,
     colorizeOnly,
@@ -267,6 +262,8 @@ export const useTranslationSettings = () => {
     setBubbleDetection,
     bubbleModel,
     setBubbleModel,
+    bubbleConfidence,
+    setBubbleConfidence,
     inpainter,
     setInpainter,
     colorizer,

@@ -42,18 +42,11 @@ async def load_rerun_context(
     if database is not None:
         try:
             documents = await database.get_documents(folder) or {}
-        except Exception:
-            documents = {}
-        try:
             target_id = record_id or folder
-            pg_regions = await database.get_text_regions(target_id)
-            if not pg_regions and record_id and record_id != folder:
-                pg_regions = await database.get_text_regions(folder)
+            pg_regions = await database.get_text_regions(target_id) or (await database.get_text_regions(folder) if record_id and record_id != folder else None)
             if pg_regions:
-                if "text_regions.json" not in documents:
-                    documents["text_regions.json"] = pg_regions
-                if "translations.json" not in documents:
-                    documents["translations.json"] = pg_regions
+                documents.setdefault("text_regions.json", pg_regions)
+                documents.setdefault("translations.json", pg_regions)
         except Exception:
             pass
 
@@ -108,12 +101,17 @@ async def load_rerun_context(
         elif mask_final_path.is_file():
             ctx.inpaint_mask = cv2.imread(str(mask_final_path), cv2.IMREAD_GRAYSCALE)
         ctx.mask = ctx.inpaint_mask
-    bubble_dets_raw = _read_json("bubble_detections.json")
-    if bubble_dets_raw:
+    if (b_raw := _read_json("bubble_detections.json")):
         try:
             from manga_translator.detection.bubble import deserialize_bubble_detections
-            ctx.bubble_detections = deserialize_bubble_detections(bubble_dets_raw, ctx.img_rgb.shape)
+            ctx.bubble_detections = deserialize_bubble_detections(b_raw, ctx.img_rgb.shape)
             ctx._bubble_detection_done = True
+        except Exception:
+            pass
+    if (p_raw := _read_json("panel_detections.json")):
+        try:
+            from manga_translator.detection.panel import deserialize_panel_detections
+            ctx.panel_detections = deserialize_panel_detections(p_raw, ctx.img_rgb.shape[:2] if getattr(ctx, "img_rgb", None) is not None else None)
         except Exception:
             pass
 

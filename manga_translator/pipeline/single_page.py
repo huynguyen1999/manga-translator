@@ -16,6 +16,7 @@ from manga_translator.rendering.paragraph_coalescing import coalesce_free_text_r
 from manga_translator.rendering.layout import layout_page
 from manga_translator.rendering.layout.frozen import serialize_frozen_layout
 from manga_translator.detection.bubble import serialize_bubble_detections
+from manga_translator.detection.panel import serialize_panel_detections
 from manga_translator.translation_errors import TranslationFailure
 from manga_translator.utils import Context, dump_image, is_preserved_region, load_image
 from manga_translator.colorization import is_image_colored
@@ -172,17 +173,16 @@ async def translate_page(
 
     await owner._detect_speech_bubbles(config, ctx)
     ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
-    if ctx.text_regions:
-        merged_docs = serialize_regions(ctx.text_regions)
-        ctx.result_documents['text_regions_merged.json'] = merged_docs
-        if owner._pipeline_run is not None:
-            owner._pipeline_run.write_json('text_regions_merged.json', merged_docs)
-        elif owner._current_image_context:
-            await save_documents_fn(
-                owner._current_image_context['subfolder'],
-                {'text_regions_merged.json': merged_docs},
-                owner.result_root,
-            )
+    b_docs = serialize_bubble_detections(getattr(ctx, 'bubble_detections', None) or [])
+    p_docs = serialize_panel_detections(getattr(ctx, 'panel_detections', None) or [], ctx.img_rgb.shape[:2] if ctx.img_rgb is not None else None)
+    m_docs = serialize_regions(ctx.text_regions) if ctx.text_regions else None
+    saved_stage_docs = {'bubble_detections.json': b_docs, 'panel_detections.json': p_docs, **({'text_regions_merged.json': m_docs} if m_docs else {})}
+    ctx.result_documents.update(saved_stage_docs)
+    if owner._pipeline_run is not None:
+        for k, v in saved_stage_docs.items():
+            owner._pipeline_run.write_json(k, v)
+    elif owner._current_image_context:
+        await save_documents_fn(owner._current_image_context['subfolder'], saved_stage_docs, owner.result_root)
 
     pre_dict = load_dictionary_fn(owner.pre_dict)
     pre_replacements = []

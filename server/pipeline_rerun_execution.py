@@ -18,6 +18,8 @@ from manga_translator.pipeline.run import (
     serialize_editor_regions,
     serialize_regions,
 )
+from manga_translator.detection.bubble import serialize_bubble_detections
+from manga_translator.detection.panel import serialize_panel_detections
 from manga_translator.rendering.grouping import group_regions_by_bubbles
 from manga_translator.rendering.paragraph_coalescing import coalesce_free_text_regions
 from manga_translator.utils import Context, dump_image
@@ -27,6 +29,10 @@ from server.pipeline_rerun_plan import (
     PipelineRerunPlan,
     _frozen_layout_document,
 )
+
+
+def _save_json(path: Path, payload: Any):
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 async def execute_rerun_plan(
@@ -48,10 +54,7 @@ async def execute_rerun_plan(
 
     # Snapshot old metadata into staging dir
     if old_regions:
-        (staging_dir / "old_regions_snapshot.json").write_text(
-            json.dumps(serialize_regions(old_regions), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _save_json(staging_dir / "old_regions_snapshot.json", serialize_regions(old_regions))
 
     # 1. Full Pipeline Execution
     if plan.mode == PipelineRerunMode.FULL:
@@ -87,13 +90,14 @@ async def execute_rerun_plan(
         documents["layout.json"] = _frozen_layout_document(ctx, translator, config)
         documents["text_regions.json"] = serialize_editor_regions(ctx.text_regions or [])
         if getattr(ctx, "bubble_detections", None) is not None:
-            from manga_translator.detection.bubble import serialize_bubble_detections
             documents["bubble_detections.json"] = serialize_bubble_detections(ctx.bubble_detections)
+        if getattr(ctx, "panel_detections", None) is not None:
+            documents["panel_detections.json"] = serialize_panel_detections(
+                ctx.panel_detections, ctx.img_rgb.shape[:2] if getattr(ctx, "img_rgb", None) is not None else None
+            )
         for name, payload in documents.items():
             if Path(name).name == name and name.endswith(".json"):
-                (staging_dir / name).write_text(
-                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
+                _save_json(staging_dir / name, payload)
         return ctx, None
 
     # 2. Reprocess Text Mode (Detection -> OCR -> Textline Merge -> Bubble -> Mask -> Inpaint -> Remap -> Typeset)
@@ -103,27 +107,21 @@ async def execute_rerun_plan(
         ctx.textlines, ctx.mask_raw, ctx.mask = await translator._run_detection(config, ctx)
         if ctx.mask_raw is not None:
             cv2.imwrite(str(staging_dir / "mask_raw.png"), ctx.mask_raw)
-        (staging_dir / "detection.json").write_text(
-            json.dumps(serialize_regions(ctx.textlines), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _save_json(staging_dir / "detection.json", serialize_regions(ctx.textlines))
 
         if not ctx.textlines:
             ctx.text_regions = []
             ctx.img_inpainted = ctx.img_rgb.copy()
             save_jpeg(ctx.img_inpainted, staging_dir / "inpainted.jpg")
             save_jpeg(ctx.img_inpainted, staging_dir / "final.jpg")
-            (staging_dir / "text_regions.json").write_text("[]", encoding="utf-8")
+            _save_json(staging_dir / "text_regions.json", [])
             ctx.result = dump_image(ctx.input, ctx.img_inpainted, ctx.img_alpha)
             return ctx, TranslationRemapResult(remapped_regions=[], total_new=0, total_old=len(old_regions))
 
         # OCR
         await report("ocr")
         ctx.textlines = await translator._run_ocr(config, ctx)
-        (staging_dir / "ocr.json").write_text(
-            json.dumps(serialize_regions(ctx.textlines), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _save_json(staging_dir / "ocr.json", serialize_regions(ctx.textlines))
 
         await report("textline_merge")
         ctx.text_regions = await translator._run_textline_merge(config, ctx)
@@ -136,17 +134,14 @@ async def execute_rerun_plan(
                 group=config.bubble_detection.group_regions,
             )
         ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
-        (staging_dir / "text_regions_merged.json").write_text(
-            json.dumps(serialize_regions(ctx.text_regions), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _save_json(staging_dir / "text_regions_merged.json", serialize_regions(ctx.text_regions))
 
         if getattr(ctx, "bubble_detections", None):
-            from manga_translator.detection.bubble import serialize_bubble_detections
-            (staging_dir / "bubble_detections.json").write_text(
-                json.dumps(serialize_bubble_detections(ctx.bubble_detections), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            _save_json(staging_dir / "bubble_detections.json", serialize_bubble_detections(ctx.bubble_detections))
+        if getattr(ctx, "panel_detections", None):
+            _save_json(staging_dir / "panel_detections.json", serialize_panel_detections(
+                ctx.panel_detections, ctx.img_rgb.shape[:2] if getattr(ctx, "img_rgb", None) is not None else None
+            ))
 
         await report("mask-generation")
         bundle = await run_cpu_stage(
@@ -171,8 +166,7 @@ async def execute_rerun_plan(
         ctx.mask = bundle.final_inpaint_mask
         ctx.inpaint_mask = bundle.final_inpaint_mask
 
-        with open(staging_dir / "profiling.json", "w", encoding="utf-8") as profile_file:
-            json.dump(bundle.profile, profile_file, indent=2)
+        _save_json(staging_dir / "profiling.json", bundle.profile)
 
         cv2.imwrite(str(staging_dir / "text_mask.png"), ctx.text_mask)
         cv2.imwrite(str(staging_dir / "bubble_mask.png"), ctx.bubble_mask)
@@ -195,72 +189,47 @@ async def execute_rerun_plan(
             canvas_size=(ctx.img_rgb.shape[1], ctx.img_rgb.shape[0]),
         )
         ctx.text_regions = remap_result.remapped_regions
-        (staging_dir / "translations.json").write_text(
-            json.dumps(serialize_regions(ctx.text_regions), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        (staging_dir / "translation_remap.json").write_text(
-            json.dumps(
+        _save_json(staging_dir / "translations.json", serialize_regions(ctx.text_regions))
+        _save_json(staging_dir / "translation_remap.json", {
+            "summary": remap_result.summary(),
+            "details": [
                 {
-                    "summary": remap_result.summary(),
-                    "details": [
-                        {
-                            "new_region_id": d.new_region_id,
-                            "old_region_ids": d.old_region_ids,
-                            "confidence": d.confidence,
-                            "method": d.method,
-                            "status": d.status,
-                            "translation": d.translation,
-                            "review_required": d.review_required,
-                            "review_reason": d.review_reason,
-                        }
-                        for d in remap_result.details
-                    ],
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+                    "new_region_id": d.new_region_id,
+                    "old_region_ids": d.old_region_ids,
+                    "confidence": d.confidence,
+                    "method": d.method,
+                    "status": d.status,
+                    "translation": d.translation,
+                    "review_required": d.review_required,
+                    "review_reason": d.review_reason,
+                }
+                for d in remap_result.details
+            ],
+        })
 
         # Rendering & Layout
         await report("layout")
         await report("rendering")
         ctx.img_rendered = await translator._run_text_rendering(config, ctx)
-        (staging_dir / "layout.json").write_text(
-            json.dumps(_frozen_layout_document(ctx, translator, config), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _save_json(staging_dir / "layout.json", _frozen_layout_document(ctx, translator, config))
         ctx.result = dump_image(ctx.input, ctx.img_rendered, ctx.img_alpha)
         save_jpeg(np.array(ctx.result), staging_dir / "final.jpg")
-        (staging_dir / "text_regions.json").write_text(
-            json.dumps(serialize_editor_regions(ctx.text_regions), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _save_json(staging_dir / "text_regions.json", serialize_editor_regions(ctx.text_regions))
         return ctx, remap_result
 
     # 3. Translation + Typesetting Mode
     if plan.mode == PipelineRerunMode.TRANSLATION_TYPESETTING:
         await report("translating")
         ctx.text_regions = await translator._run_text_translation(config, ctx)
-        (staging_dir / "translations.json").write_text(
-            json.dumps(serialize_regions(ctx.text_regions), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _save_json(staging_dir / "translations.json", serialize_regions(ctx.text_regions))
 
         await report("layout")
         await report("rendering")
         ctx.img_rendered = await translator._run_text_rendering(config, ctx)
-        (staging_dir / "layout.json").write_text(
-            json.dumps(_frozen_layout_document(ctx, translator, config), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _save_json(staging_dir / "layout.json", _frozen_layout_document(ctx, translator, config))
         ctx.result = dump_image(ctx.input, ctx.img_rendered, ctx.img_alpha)
         save_jpeg(np.array(ctx.result), staging_dir / "final.jpg")
-        (staging_dir / "text_regions.json").write_text(
-            json.dumps(serialize_editor_regions(ctx.text_regions), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _save_json(staging_dir / "text_regions.json", serialize_editor_regions(ctx.text_regions))
         return ctx, None
 
     # 4. Typesetting Only Mode
@@ -273,16 +242,9 @@ async def execute_rerun_plan(
             ctx.img_rendered = await translator._run_text_rendering(config, ctx)
             ctx.result = dump_image(ctx.input, ctx.img_rendered, ctx.img_alpha)
 
-        (staging_dir / "layout.json").write_text(
-            json.dumps(_frozen_layout_document(ctx, translator, config), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
+        _save_json(staging_dir / "layout.json", _frozen_layout_document(ctx, translator, config))
         save_jpeg(np.array(ctx.result), staging_dir / "final.jpg")
-        (staging_dir / "text_regions.json").write_text(
-            json.dumps(serialize_editor_regions(ctx.text_regions), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _save_json(staging_dir / "text_regions.json", serialize_editor_regions(ctx.text_regions))
         return ctx, None
 
     raise ValueError(f"Unhandled rerun execution mode: {plan.mode}")

@@ -3086,7 +3086,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="bubble_grouping", action="store_false", default=False,
         help="Keep multiple text regions inside one speech bubble separate (the default)."
     )
-    p_cap.add_argument("--bubble-model", default="yolov8m", help="Bubble detection model checkpoint (yolov8m, manga109).")
+    p_cap.add_argument("--bubble-model", default="shadowb_manga109", help="Bubble/frame detection model checkpoint (shadowb_manga109, yolov8m, manga109).")
     p_cap.add_argument("--bubble-padding", type=int, default=9, help="Padding erosion in pixels from bubble contour to preserve the boundary edge outline during inpainting.")
     p_cap.add_argument("--device", default=default_device, help="Explicit torch device (mps, cuda, cpu, xpu).")
     p_cap.add_argument("--use-gpu", dest="use_gpu", action="store_true", default=default_use_gpu, help="Run neural models on GPU/MPS.")
