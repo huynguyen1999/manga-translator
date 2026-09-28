@@ -1,4 +1,0 @@
-interface:
-  display_name: "Worktree Commit Back"
-  short_description: "Commit completed agent worktree changes to the source branch"
-  default_prompt: "Commit this completed worktree session to the branch it started from."
