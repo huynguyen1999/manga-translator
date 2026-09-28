@@ -2,6 +2,47 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-29 — Overlapping and full-page panel detections hijacked region assignment and corrupted context
+
+- Symptom: On pages with multi-scale, compound, or near-full-page panel detections (e.g. `1790618090324-99ecbb08-2048-ENG-sugoi`), multiple overlapping frames were predicted (e.g. a 100% full-page bounding box at lower confidence alongside individual sub-panels). Downstream, all bottom text regions were assigned exclusively to the full-page panel, leaving actual sub-panels with 0 regions and polluting LLM prompt hierarchy and UI overlays.
+- Root cause:
+  1. In `manga_translator/detection/panel.py`, neural panel segmentation had no containment or Intersection-over-Smaller (IoS) overlap suppression, allowing spurious full-page boxes and compound macro-panels to survive alongside granular sub-panels.
+  2. In `manga_translator/professional_panels.py` (`assign_regions_to_panels`) and `manga_translator/utils/sort.py` (`_assign_regions_to_panels`), text regions were greedily assigned to the *first* panel in iteration order containing their center `(cx, cy)`, causing any preceding macro or whole-page panel to swallow all enclosed text.
+- Fix:
+  1. Added `suppress_overlapping_panels` in `manga_translator/detection/panel.py` and integrated it with `sort_panel_detections_reading_order` and `BubbleDetector._read_result` to drop near-full-page false positives (>92% image area when other panels exist) and suppress redundant compound/duplicate detections with $\text{IoS} \ge 0.80$.
+  2. Updated `assign_regions_to_panels` (`professional_panels.py`) and `_assign_regions_to_panels` (`sort.py`) to select the *smallest enclosing panel* (most specific containment) rather than the first matching panel.
+- Prevention: Apply containment/IoS suppression to multi-scale segmentation outputs and always assign spatial child elements to their tightest/smallest enclosing container.
+
+## 2026-09-28 — Page detail modal "Retry pipeline" button failed for gallery and unlinked batch pages
+
+- Symptom: Clicking the "Retry pipeline" button in Page Detail displayed "Retry failed" error banner (with backend error `NameError: name 'secrets' is not defined` on `POST /results/rerun`).
+- Root cause:
+  1. `retryFinishedImage` in `front/app/App.tsx` looked exclusively in `translationBatches` for a matching batch item (`item.folder === image.folder`). For gallery pages, database-backed pages, or pages where batch details were not actively in client memory, `match` evaluated to `undefined` and threw `Error("This image is not linked to a retryable translation batch.")`.
+  2. In `server/api/routes/pipeline_reruns.py`, `batch_id = f"rerun-{secrets.token_hex(8)}"` was called without importing the standard library `secrets` module.
+- Fix:
+  1. Extracted `retryFinishedPage` (`front/app/features/batches/retryFinishedPage.ts`). When an active batch item is found, it retries via `retryTranslationItem`; when unlinked or when batch item retry fails, it falls back to queueing a `rerunPipeline` (`POST /api/results/rerun`) with the corresponding `PipelineRerunMode` (`mode: "full"` or resolved from `fromStage`), appending the resulting batch to `translationBatches`.
+  2. Added `import secrets` to `server/api/routes/pipeline_reruns.py` and added characterization contract tests in `test/refactor_contract/test_api_contract.py`.
+- Prevention: Decouple page-level retry actions in viewer modals from transient client batch memory; gracefully fallback to standalone pipeline rerun endpoints (`/api/results/rerun`) for finished/saved library items and ensure standard library token generators are imported.
+
+## 2026-09-28 — Page detail modal erroneously displayed "Rerun queued" when opening pipeline rerun dialog
+
+- Symptom: Clicking the "Rerun pipeline" button in the Page Detail modal header immediately changed the button label to "Rerun queued" and disabled the button, even before the user had configured or submitted the pipeline rerun dialog.
+- Root cause: `handleRerender` in `front/app/features/page-detail/usePageDetailActions.ts` was copied from `handleRetry` and executed `setRerenderStatus('queued')` upon calling `await onRerender(image)`. While `onRetry` directly calls the server to queue a retry, `onRerender` only opens the `PipelineRerunDialog` without submitting or queueing a batch.
+- Fix: Removed `setRerenderStatus('queued')` from `handleRerender` in `usePageDetailActions.ts`, allowing the button to remain enabled as "Rerun pipeline" while opening the dialog and preventing it from becoming permanently disabled.
+- Prevention: Distinguish UI modal trigger callbacks (which only open a configuration dialog) from backend task dispatchers (which actually queue jobs), avoiding premature "queued" state updates before form submission.
+
+## 2026-09-28 — Professional translation rejected non-LLM and offline primary translators
+
+- Symptom: Selecting a non-LLM or offline primary translator (e.g. Sugoi or DeepL) in Professional mode raised a validation error or caused story analysis / translation to fail when chat-style JSON prompts were sent to a text-in/text-out backend.
+- Root cause:
+  1. `ProfessionalTranslator.__init__` required the primary translator to be in `GPT_TRANSLATORS`.
+  2. Story analysis and translation assumed all backends supported prompt-based JSON chat requests.
+- Fix:
+  1. Removed the LLM-only validation for the primary translator.
+  2. Kept story analysis LLM-only, returning configured/default story boundaries for non-LLM primaries.
+  3. Dispatches non-LLM primary translation as text blocks and sends one context-rich structured request per chunk to LLM primaries.
+- Prevention: Keep prompt-based LLM calls separate from direct text-block backends; do not require non-LLM translators to implement chat or JSON response behavior.
+
 ## 2026-09-28 — Batch translation scheduler discarded panel detections during bubble detection stage
 
 - Symptom: When translation jobs were processed through the batch scheduler, `panel_detections.json` was serialized as an empty list `[]` and panel frames/badges were missing from the UI for batch-translated pages, despite the model detecting high-confidence panels.

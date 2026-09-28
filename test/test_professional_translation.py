@@ -45,14 +45,14 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
 
         with patch("manga_translator.professional_translation.get_translator",
                    side_effect=lambda key: fallback if key == Translator.deepseek else primary):
-            raw, provider = await engine._request("draft", "prompt")
+            raw, provider = await engine._request("translation", "prompt")
 
         self.assertEqual(raw, '{"regions": []}')
         self.assertEqual(provider, "deepseek")
         primary._request_translation.assert_awaited_once_with("English", "prompt")
         fallback._request_translation.assert_awaited_once_with("English", "prompt")
 
-    async def test_sequential_result_keeps_draft_final_and_review_data(self):
+    async def test_sequential_result_keeps_final_translation_and_review_data(self):
         region = SimpleNamespace(text="だめ", region_id=None)
         ctx = SimpleNamespace(text_regions=[region], result_documents={}, manual_review_required=False)
         config = SimpleNamespace(
@@ -67,16 +67,11 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
 
         async def localize(_self, _story, pages, *_metadata):
             item = pages[0]["regions"][0]
-            item.update(draft="No...", confidence=0.9, review_reasons=[], draft_provider="deepseek")
-
-        async def edit(_self, _story, pages, *_metadata):
-            item = pages[0]["regions"][0]
-            item.update(final="Don't...", confidence=0.8, editor_provider="deepseek")
+            item.update(final="Don't...", confidence=0.8, review_reasons=[], translation_provider="deepseek")
 
         with (
             patch.object(ProfessionalTranslator, "analyze", analyze),
             patch.object(ProfessionalTranslator, "localize_story", localize),
-            patch.object(ProfessionalTranslator, "edit_story", edit),
         ):
             result = await translate_professionally([(ctx, config)])
 
@@ -85,7 +80,6 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(region.review_required)
         audit = ctx.result_documents["professional_translation.json"]
         self.assertEqual(audit["regions"][0]["source"], "だめ")
-        self.assertEqual(audit["regions"][0]["draft"], "No...")
         self.assertEqual(audit["regions"][0]["final"], "Don't...")
 
     async def test_professional_requests_chunk_pages_within_story(self):
@@ -110,17 +104,20 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
 
         engine._json_request = request
         pages = [{"number": index, "regions": [{"id": f"r{index}", "source": "日本語"}]} for index in range(1, 6)]
-        story = {"start_page": 1, "end_page": 5, "confidence": 1.0}
+        story = {"start_page": 1, "end_page": 5, "confidence": 1.0, "summary": "A continuous story."}
         await engine.localize_story(story, pages)
-        await engine.edit_story(story, pages)
-        self.assertEqual(calls, ["draft", "draft", "draft", "editing", "editing", "editing"])
+        self.assertEqual(calls, ["translation", "translation", "translation"])
         self.assertEqual(events, [
-            "drafting:1/1:1/3", "drafting:1/1:2/3", "drafting:1/1:3/3",
-            "editing:1/1:1/3", "editing:1/1:2/3", "editing:1/1:3/3",
+            "translating:1/1:1/3", "translating:1/1:2/3", "translating:1/1:3/3",
         ])
-        self.assertIn("working draft for a separate senior editor", prompts[0])
-        self.assertNotIn("natural, idiomatic English that reads as human localization", prompts[0])
-        self.assertIn("Independently compare the Japanese source and the first draft", prompts[-1])
+        for prompt in prompts:
+            self.assertIn("STORY SUMMARY AND LOCALIZATION GUIDE", prompt)
+            self.assertIn("A continuous story.", prompt)
+        self.assertIn("clear, grammatical, concise, natural English", prompts[0])
+        self.assertIn('"id": "r2"', prompts[1])
+        self.assertIn('"translation": "ok"', prompts[1])
+        self.assertNotIn('"id": "r1"', prompts[2])
+        self.assertIn('"id": "r4"', prompts[2])
 
     def test_json_object_robust_parsing(self):
         # 1. Closed thinking tags
@@ -161,7 +158,7 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
 
         with patch("manga_translator.professional_translation.get_translator",
                    side_effect=lambda key: deepseek if key == Translator.deepseek else primary):
-            data, provider = await engine._json_request("draft", "prompt")
+            data, provider = await engine._json_request("translation", "prompt")
 
         self.assertEqual(provider, "deepseek")
         self.assertEqual(data["regions"][0]["translation"], "recovered")
@@ -189,7 +186,7 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed_json_mode, [True])
         self.assertFalse(hasattr(translator, "_professional_json_mode"))
 
-    async def test_separate_draft_and_primary_editor_translators(self):
+    async def test_legacy_draft_translator_does_not_change_professional_llm(self):
         config = TranslatorConfig(
             translator="chatgpt",
             draft_translator="gemini",
@@ -197,11 +194,7 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
             translation_quality="professional",
         )
         engine = ProfessionalTranslator(config)
-        self.assertEqual(engine.draft_translator, Translator.gemini)
         self.assertEqual(engine.primary, Translator.chatgpt)
-        self.assertEqual(engine._get_translator_for_stage("draft"), Translator.gemini)
-        self.assertEqual(engine._get_translator_for_stage("editing"), Translator.chatgpt)
-        self.assertEqual(engine._get_translator_for_stage("analysis"), Translator.gemini)
 
         requested_keys = []
 
@@ -217,33 +210,103 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
                 return '{"regions": []}'
 
         with patch("manga_translator.professional_translation.get_translator", side_effect=lambda key: MockTranslator(key)):
-            await engine._json_request("draft", "draft prompt")
-            await engine._json_request("editing", "editing prompt")
+            await engine._json_request("translation", "translation prompt")
+            await engine._json_request("analysis", "analysis prompt")
 
-        self.assertEqual(requested_keys, [Translator.gemini, Translator.chatgpt])
+        self.assertEqual(requested_keys, [Translator.chatgpt, Translator.chatgpt])
 
-    def test_invalid_draft_translator_raises_error(self):
+    async def test_pure_offline_translator_runs_end_to_end_in_professional_mode(self):
         config = TranslatorConfig(
-            translator="deepseek",
-            draft_translator="sugoi",
-            target_lang="ENG",
-            translation_quality="professional",
-        )
-        with self.assertRaises(ValueError):
-            ProfessionalTranslator(config)
-
-    def test_draft_translator_fallback_to_primary(self):
-        config = TranslatorConfig(
-            translator="deepseek",
+            translator="sugoi",
             target_lang="ENG",
             translation_quality="professional",
         )
         engine = ProfessionalTranslator(config)
-        self.assertEqual(engine.draft_translator, Translator.deepseek)
-        self.assertEqual(engine._get_translator_for_stage("editing"), Translator.deepseek)
+        self.assertEqual(engine.primary, Translator.sugoi)
+
+        pages = [
+            {
+                "number": 1,
+                "regions": [
+                    {"id": "r1", "source": "こんにちは", "region": SimpleNamespace(text="こんにちは")},
+                    {"id": "r2", "source": "さようなら", "region": SimpleNamespace(text="さようなら")},
+                ],
+            }
+        ]
+        analysis = await engine.analyze(pages, None)
+        self.assertEqual(analysis["stories"], [{"start_page": 1, "end_page": 1, "confidence": 1.0}])
+
+        dispatched_calls = []
+
+        async def fake_dispatch_one(key, tgt_lang, queries, cfg, use_mtpe, args, device, unload=False):
+            dispatched_calls.append((key, tgt_lang, queries))
+            if args is not None:
+                args["offline_model"] = "SugoiTranslator"
+            return ["Hello", "Goodbye"]
+
+        with patch("manga_translator.professional_translation._dispatch_one", side_effect=fake_dispatch_one):
+            await engine.localize_story(analysis["stories"][0], pages)
+
+        self.assertEqual(len(dispatched_calls), 1)
+        self.assertEqual(pages[0]["regions"][0]["final"], "Hello")
+        self.assertEqual(pages[0]["regions"][1]["final"], "Goodbye")
+
+    async def test_legacy_draft_setting_does_not_override_non_llm_primary(self):
+        config = TranslatorConfig(
+            translator="sugoi",
+            draft_translator="deepseek",
+            target_lang="ENG",
+            translation_quality="professional",
+        )
+        engine = ProfessionalTranslator(config)
+        self.assertEqual(engine.primary, Translator.sugoi)
+
+        pages = [
+            {
+                "number": 1,
+                "regions": [
+                    {"id": "r1", "source": "こんにちは", "region": SimpleNamespace(text="こんにちは")},
+                    {"id": "r2", "source": "さようなら", "region": SimpleNamespace(text="さようなら")},
+                ],
+            }
+        ]
+        story = {"start_page": 1, "end_page": 1, "confidence": 1.0}
+
+        dispatched_calls = []
+
+        async def fake_dispatch_one(key, tgt_lang, queries, cfg, use_mtpe, args, device, unload=False):
+            dispatched_calls.append((key, tgt_lang, queries))
+            if args is not None:
+                args["offline_model"] = "SugoiTranslator"
+            return ["Hello", "Goodbye"]
+
+        with patch("manga_translator.professional_translation._dispatch_one", side_effect=fake_dispatch_one):
+            await engine.localize_story(story, pages)
+
+        self.assertEqual(len(dispatched_calls), 1)
+        self.assertEqual(dispatched_calls[0][0], Translator.sugoi)
+        self.assertEqual(dispatched_calls[0][1], "ENG")
+        self.assertEqual(dispatched_calls[0][2], ["こんにちは", "さようなら"])
+
+        self.assertEqual(pages[0]["regions"][0]["final"], "Hello")
+        self.assertEqual(pages[0]["regions"][0]["translation_provider"], "sugoi")
+        self.assertEqual(pages[0]["regions"][1]["final"], "Goodbye")
+        self.assertEqual(pages[0]["regions"][1]["translation_provider"], "sugoi")
+        self.assertEqual(engine.provenance[-1], {"stage": "translation", "provider": "sugoi", "model": "SugoiTranslator"})
+
+    def test_legacy_draft_translator_setting_is_still_accepted(self):
+        config = TranslatorConfig(
+            translator="deepseek",
+            draft_translator="gemini",
+            target_lang="ENG",
+            translation_quality="professional",
+        )
+        engine = ProfessionalTranslator(config)
+        self.assertEqual(config.draft_translator, Translator.gemini)
+        self.assertEqual(engine.primary, Translator.deepseek)
 
 
-    async def test_panel_context_in_draft_and_analysis_prompts(self):
+    async def test_panel_context_in_translation_and_analysis_prompts(self):
         config = TranslatorConfig(
             translator="deepseek",
             target_lang="ENG",
@@ -276,17 +339,16 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[r2 | estimated order 1]\nナレーション", recorded_prompts["analysis"])
 
         story = {"start_page": 1, "end_page": 1, "confidence": 1.0}
-        async def fake_draft_request(stage, prompt):
+        async def fake_translation_request(stage, prompt):
             recorded_prompts[stage] = prompt
             return ({"regions": [{"id": "r1", "translation": "Hello", "confidence": 1.0, "review_reasons": []}, {"id": "r2", "translation": "Narration", "confidence": 1.0, "review_reasons": []}]}, "deepseek")
 
-        engine._json_request = fake_draft_request
+        engine._json_request = fake_translation_request
         await engine.localize_story(story, pages)
-        self.assertIn('"panel_id": "p1_01"', recorded_prompts["draft"])
-        self.assertIn('"japanese": "こんにちは"', recorded_prompts["draft"])
-        self.assertIn('"unassigned_regions"', recorded_prompts["draft"])
+        self.assertIn('"panel_id": "p1_01"', recorded_prompts["translation"])
+        self.assertIn('"japanese": "こんにちは"', recorded_prompts["translation"])
+        self.assertIn('"unassigned_regions"', recorded_prompts["translation"])
 
 
 if __name__ == "__main__":
     unittest.main()
-

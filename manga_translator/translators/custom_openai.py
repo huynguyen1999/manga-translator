@@ -50,24 +50,6 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         self.config = args.chatgpt_config
 
 
-    def extract_capture_groups(self, text, regex=r"(.*)"):
-        """
-        Extracts all capture groups from matches and concatenates them into a single string.
-        
-        :param text: The multi-line text to search.
-        :param regex: The regex pattern with capture groups.
-        :return: A concatenated string of all matched groups.
-        """
-        pattern = re.compile(regex, re.DOTALL)  # DOTALL to match across multiple lines
-        matches = pattern.findall(text)  # Find all matches
-        
-        # Ensure matches are concatonated (handles multiple groups per match)
-        extracted_text = "\n".join(
-            "\n".join(m) if isinstance(m, tuple) else m for m in matches
-        )
-        
-        return extracted_text.strip() if extracted_text else None
-
     def _assemble_prompts(self, from_lang: str, to_lang: str, queries: List[str]):
         prompt = ''
 

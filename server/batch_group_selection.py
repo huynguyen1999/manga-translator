@@ -158,7 +158,7 @@ def find_next_queued_item(
 def item_batch_stage(item: dict[str, Any]) -> str:
     stage = item.get("retryFromStage") or item.get("pipelineStage") or item.get("stage") or "initialize"
     stage = str(stage)
-    if stage.startswith(("drafting:", "editing:")):
+    if stage.startswith(("drafting:", "editing:", "translating:")):
         return "translation"
     stage = _BATCH_STAGE_ALIASES.get(stage, stage)
     return stage if stage in _BATCH_STAGE_ORDER else "initialize"

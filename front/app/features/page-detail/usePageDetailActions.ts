@@ -138,18 +138,17 @@ export function usePageDetailActions({
   }, [image, onRetryFromStage, setRetryStatus]);
 
   const handleRerender = useCallback(async () => {
-    if (!onRerender || isRerendering || rerenderStatus === 'queued') return;
+    if (!onRerender || isRerendering) return;
     setIsRerendering(true);
     setRerenderStatus(null);
     try {
       await onRerender(image);
-      setRerenderStatus('queued');
     } catch {
       setRerenderStatus('error');
     } finally {
       setIsRerendering(false);
     }
-  }, [image, isRerendering, onRerender, rerenderStatus, setIsRerendering, setRerenderStatus]);
+  }, [image, isRerendering, onRerender, setIsRerendering, setRerenderStatus]);
 
   const activeIndex = currentIndex ?? (images.length > 0 ? images.findIndex((item) => item.id === image.id) : -1);
   const hasPrev = images.length > 1 && activeIndex > 0;

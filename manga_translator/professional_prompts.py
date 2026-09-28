@@ -100,65 +100,29 @@ def build_analysis_consolidation_prompt(
     )
 
 
-def build_draft_prompt(
+def build_translation_prompt(
     payload: list[dict[str, Any]],
     guide: str,
     previous: str,
 ) -> str:
-    return f"""You are the first-pass Japanese-to-English translator preparing a working draft for a separate senior editor.
-The source is organized by page and panel (or directly by page when panel detection is unavailable).
+    previous_context = previous or "None; this is the first chunk of this story."
+    return f"""Produce the final Japanese-to-English manga localization in one pass. The source is organized by page and panel (or directly by page when panel detection is unavailable).
 
-Use the STORY GUIDE, finalized earlier English, surrounding panels (if present), and all regions within the current panel or page to resolve:
-- omitted Japanese subjects
-- speaker intent and pronouns
-- references and reactions
-- tone, terminology, and dialogue continuing across multiple balloons
+Read each current page and panel as a connected scene before translating its individual regions. Use the STORY SUMMARY AND LOCALIZATION GUIDE to keep plot references, terminology, relationships, tone, and each character's voice consistent. For later chunks, use the immediately preceding chunk transcript to carry forward names, phrasing, and conversational continuity. The current Japanese source is authoritative if context conflicts.
 
-CONTEXT RULES:
-1. When panel information is present, treat all text regions inside the same panel as belonging to the same immediate narrative moment unless clearly indicated otherwise. Text outside detected panels appears under `unassigned_regions` (e.g. narration, margin notes, titles, or floating dialogue) and should be interpreted using the surrounding page and narrative context.
-2. Interpret regions together within the panel (or page) before translating individual regions.
-3. Region order is an estimated manga reading order. Use it as a helpful guide, not an absolute constraint.
-4. If the apparent order produces an unnatural or contradictory exchange, rely on Japanese grammar and context.
-5. Do not merge region outputs. Every supplied region ID must receive exactly one translation.
-6. When a sentence is split across multiple balloons in a panel or page, preserve the intended division across region IDs.
-7. Do not move dialogue from one region ID into another.
-8. Stay close to the Japanese meaning, tone, explicitness, and uncertainty. Preserve meaningful honorifics and cultural terms. This is an accurate translation draft, not the final polished localization: do not spend this pass polishing idioms, rhythm, or localization flourishes, and do not invent context.
-9. Translate every region in every supplied page (including all unassigned regions). Return JSON only:
-{{"regions":[{{"id":"...","translation":"...","confidence":0.0,"review_reasons":[]}}]}}.
-Include every id once.
+Write clear, grammatical, concise, natural English with dialogue that flows across balloons. Preserve the author's meaning and voice, including register, emotion, humor, hesitation, repetition, explicitness, profanity, power dynamics, and consent or coercion signals. Apply the guide's character profiles, honorific policy, glossary, and localization conventions consistently. Keep meaningful Japanese terms and honorifics according to the guide.
+Before returning, silently check each line against its Japanese source and adjacent dialogue for accuracy, grammar, flow, concision, terminology, tone, and character voice.
 
-STORY GUIDE: {guide}
-FINALIZED EARLIER ENGLISH: {previous[-8000:]}
-CURRENT PAGES: {json.dumps(payload, ensure_ascii=False)}"""
+REGION RULES:
+1. Read all regions within a panel (or page when panels are absent) together to resolve omitted subjects, intent, pronouns, references, and reactions.
+2. Region order is an estimated guide, not an absolute constraint. Use Japanese grammar and context when the order appears contradictory.
+3. Keep every region separate: do not merge, omit, invent, or move text between region IDs. Preserve sentences split across balloons in their original regions.
+4. Do not add context, sanitize, moralize, summarize, or include commentary. Flag material OCR or meaning ambiguity in `review_reasons` instead of guessing.
+5. Translate every supplied region, including unassigned regions. Return JSON only, with each supplied ID exactly once:
+{{"regions":[{{"id":"...","translation":"...","confidence":0.0,"review_reasons":[]}}]}}
 
-
-def build_editor_prompt(
-    payload: list[dict[str, Any]],
-    guide: str,
-    previous: str,
-) -> str:
-    return f"""You are a separate senior English editor for a professionally localized adult manga.
-Independently compare the Japanese source and the first draft for each panel or page; do not rubber-stamp the draft.
-
-EDITING RULES:
-1. When panels are present, read each panel as a complete conversational and narrative unit before editing individual regions. Text outside panels appears under `unassigned_regions` and should be edited in full page context. When panels are absent, read the page as a whole.
-2. Verify that dialogue exchanges flow naturally between speakers.
-3. Rewrite literal, stiff, repetitive, awkward, or AI-sounding English into natural professional localization while preserving the Japanese meaning, character voice, exact explicitness, consent/coercion signals, terminology, and hybrid Japanese flavor.
-4. Apply the story guide's character language profiles, language_features, honorific_policy, and localization_conventions consistently, including dialect function and forms of address.
-5. Fix issues such as:
-   - responses that do not logically answer the preceding balloon
-   - inconsistent pronouns, honorifics, or forms of address within the scene
-   - repeated explicit subjects that natural English would omit or pronominalize
-   - multi-balloon sentences that were translated in isolation
-   - emotional tone or intensity mismatch between balloons
-6. Region order is an estimated guide. Do not distort the Japanese meaning merely to make the supplied ordering work.
-7. Edit each region independently in the output (including all unassigned regions). Never combine, omit, or invent region IDs.
-8. Do not invent, omit, censor, moralize, or add commentary. A final identical to the draft is acceptable only after deliberately checking that it is already natural and accurate.
-9. Flag ambiguous OCR, speaker/pronoun uncertainty, wordplay, missing context, or a meaning-sensitive rewrite.
-10. Return JSON only: {{"regions":[{{"id":"...","translation":"...","confidence":0.0,"review_reasons":[]}}]}}. Include every id once.
-
-STORY GUIDE: {guide}
-FINALIZED EARLIER ENGLISH: {previous[-8000:]}
+STORY SUMMARY AND LOCALIZATION GUIDE: {guide}
+IMMEDIATELY PRECEDING CHUNK TRANSCRIPT: {previous_context}
 CURRENT PAGES: {json.dumps(payload, ensure_ascii=False)}"""
 
 

@@ -93,7 +93,7 @@ async def process_translation_group(
         if translator is not None and hasattr(translator, "add_progress_hook"):
             async def progress(state: str, _finished: bool):
                 nonlocal owns_translation_lock
-                professional_stage = state == "analyzing-story" or state.startswith(("drafting:", "editing:"))
+                professional_stage = state == "analyzing-story" or state.startswith(("drafting:", "editing:", "translating:"))
                 if (state == "translating" or professional_stage) and not owns_translation_lock:
                     future = asyncio.run_coroutine_threadsafe(lock.acquire(), main_loop)
                     await asyncio.wrap_future(future)

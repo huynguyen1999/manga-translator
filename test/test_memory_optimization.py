@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -169,10 +170,10 @@ class BatchRenderCpuLaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ctx._bubble_layout_ready)
 
 
-class BoundedRollingContextTest(unittest.IsolatedAsyncioTestCase):
-    """Verify the rolling `previous` string is bounded at 8000 chars."""
+class PreviousChunkContextTest(unittest.IsolatedAsyncioTestCase):
+    """Verify professional translation only carries the immediately previous chunk."""
 
-    async def test_previous_never_exceeds_8000_chars(self):
+    async def test_subsequent_chunks_receive_previous_chunk_transcript(self):
         from manga_translator.professional_translation import ProfessionalTranslator
 
         config = TranslatorConfig(
@@ -182,26 +183,20 @@ class BoundedRollingContextTest(unittest.IsolatedAsyncioTestCase):
             translation_batch_size=1,
         )
         engine = ProfessionalTranslator(config)
-
-        previous_snapshots: list[int] = []
-
-        # Each chunk produces a long translation
-        long_translation = "A" * 2000  # 2000-char per chunk
+        prompts = []
 
         async def fake_json_request(stage, prompt):
-            ids = []
-            import re
             ids = re.findall(r'"id":\s*"([^"\\]+)"', prompt)
+            prompts.append(prompt)
             return (
                 {
                     "regions": [
                         {
-                            "id": rid,
-                            "translation": long_translation,
+                            "id": ids[-1],
+                            "translation": f"English {len(prompts)}",
                             "confidence": 1.0,
                             "review_reasons": [],
                         }
-                        for rid in ids
                     ]
                 },
                 "deepseek",
@@ -209,55 +204,20 @@ class BoundedRollingContextTest(unittest.IsolatedAsyncioTestCase):
 
         engine._json_request = fake_json_request
 
-        # 20 pages, chunk_size=1 → 20 API calls, each appending 2000 chars
         pages = [
             {"number": i, "regions": [{"id": f"r{i}", "source": "日本語"}]}
             for i in range(1, 21)
         ]
-        story = {"start_page": 1, "end_page": 20, "confidence": 1.0}
-
-        # Monkey-patch to capture `previous` length after each chunk
-        original_localize = engine.localize_story.__func__
-
-        captured: list[int] = []
-
-        async def instrumented_localize(self_inner, story_d, pages_d, *args):
-            prev = ""
-            guide = __import__("json").dumps(story_d, ensure_ascii=False)
-            chunk_size = max(1, int(self_inner.config.translation_batch_size))
-            import json, re as re2
-            for offset in range(0, len(pages_d), chunk_size):
-                chunk = pages_d[offset: offset + chunk_size]
-                payload = [
-                    {"page": p["number"], "regions": [{"id": it["id"], "japanese": it["source"]} for it in p["regions"]]}
-                    for p in chunk
-                ]
-                expected = [it for p in payload for it in p["regions"]]
-                if not expected:
-                    continue
-                prompt = f"GUIDE:{guide}\nPREV:{prev[-8000:]}\nPAGES:{json.dumps(payload)}"
-                data, provider = await self_inner._json_request("draft", prompt)
-                values = ProfessionalTranslator._regions(data, expected)
-                for p in chunk:
-                    for it in p["regions"]:
-                        it["draft"] = values[it["id"]]["translation"]
-                        it["confidence"] = values[it["id"]]["confidence"]
-                        it["review_reasons"] = values[it["id"]]["review_reasons"]
-                        it["draft_provider"] = provider
-                prev = (prev + "\n" + "\n".join(values[it["id"]]["translation"] for it in expected))[-8000:]
-                captured.append(len(prev))
-
-        # Run directly to avoid patching complexity
-        await instrumented_localize(engine, story, pages)
-
-        self.assertTrue(
-            all(l <= 8000 for l in captured),
-            f"previous exceeded 8000 chars: max was {max(captured)}",
+        await engine.localize_story(
+            {"start_page": 1, "end_page": 20, "confidence": 1.0, "summary": "A story."}, pages
         )
-        # After many chunks the string should be exactly 8000 (saturated)
-        self.assertGreater(len(captured), 0)
-        if len(captured) >= 5:
-            self.assertEqual(captured[-1], 8000)
+
+        self.assertEqual(len(prompts), 20)
+        for index, prompt in enumerate(prompts, start=1):
+            ids = re.findall(r'"id":\s*"([^"\\]+)"', prompt)
+            self.assertEqual(ids, [f"r{index}"] if index == 1 else [f"r{index - 1}", f"r{index}"])
+            if index > 1:
+                self.assertIn(f'"translation": "English {index - 1}"', prompt)
 
 
 if __name__ == "__main__":

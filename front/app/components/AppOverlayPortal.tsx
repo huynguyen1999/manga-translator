@@ -14,7 +14,6 @@ function lockApplication(): () => void {
     if (appRoot) appRoot.inert = true;
   }
   activeOverlays += 1;
-
   return () => {
     activeOverlays -= 1;
     if (activeOverlays !== 0) return;
@@ -36,5 +35,6 @@ export const AppOverlayPortal: React.FC<{ children: React.ReactNode }> = ({ chil
     return lockApplication();
   }, [target]);
 
+  if (typeof document === "undefined") return <>{children}</>;
   return target ? createPortal(children, target) : null;
 };

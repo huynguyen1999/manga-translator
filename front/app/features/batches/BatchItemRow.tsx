@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Icon } from "@iconify/react";
 import type { FinishedImage, QueuedImage, TranslationSettings } from "@/types";
+import { apiUrl } from "@/utils/api";
 import { formatStage, formatStageElapsed, jobThumbnailCandidates, resultFor } from "@/utils/serverBatches";
 import { RenderProfiler } from "@/utils/renderPerformance";
 
@@ -112,12 +113,10 @@ export const ItemRow: React.FC<{
     onOpenLightbox && previewSource && (isFinished ? result : item.status === "queued" || isProcessing),
   );
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [originalDownloadUrl, setOriginalDownloadUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    if (typeof result === "string") {
-      setDownloadUrl(result);
-      return;
-    }
+    if (typeof result === "string") { setDownloadUrl(result); return; }
     if (result instanceof Blob) {
       const url = URL.createObjectURL(result);
       setDownloadUrl(url);
@@ -125,6 +124,17 @@ export const ItemRow: React.FC<{
     }
     setDownloadUrl(null);
   }, [result]);
+
+  useEffect(() => {
+    const original = item.inputUrl || (item.file.size > 0 ? item.file : null);
+    if (typeof original === "string") { setOriginalDownloadUrl(apiUrl(original)); return; }
+    if (original instanceof Blob) {
+      const url = URL.createObjectURL(original);
+      setOriginalDownloadUrl(url);
+      return () => URL.revokeObjectURL(url);
+    }
+    setOriginalDownloadUrl(null);
+  }, [item.file, item.inputUrl]);
 
   return (
   <RenderProfiler id={`JobItem:${item.id}`}>
@@ -276,14 +286,14 @@ export const ItemRow: React.FC<{
           </>
         )}
         {isFinished && downloadUrl && (
-          <a
-            href={downloadUrl}
-            download={`${sourceType === "original" ? "original" : "translated"}_${item.file.name}`}
+          <a href={downloadUrl} download={`${sourceType === "original" ? "original" : "translated"}_${item.file.name}`}
             className="inline-flex size-8 items-center justify-center rounded-lg text-zinc-600 hover:bg-zinc-200 hover:text-indigo-600 dark:text-zinc-400 dark:hover:bg-zinc-600 dark:hover:text-indigo-300"
-            title={`Download ${sourceType === "original" ? "original" : "translated"} page`}
-          >
-            <Icon icon="carbon:download" className="h-4 w-4" />
-          </a>
+            title={`Download ${sourceType === "original" ? "original" : "translated"} page`}><Icon icon="carbon:download" className="h-4 w-4" /></a>
+        )}
+        {originalDownloadUrl && (
+          <a href={originalDownloadUrl} download={item.file.name} aria-label={`Download original image ${item.file.name}`}
+            className="inline-flex size-8 items-center justify-center rounded-lg text-zinc-600 hover:bg-zinc-200 hover:text-indigo-600 dark:text-zinc-400 dark:hover:bg-zinc-600 dark:hover:text-indigo-300"
+            title="Download original image"><Icon icon="carbon:download" className="h-4 w-4" /></a>
         )}
         {needsReview && downloadUrl && (onOpenPageEdit || onOpenLightbox) && (
           <button

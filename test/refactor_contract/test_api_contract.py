@@ -189,3 +189,47 @@ def test_rerun_routes_keep_the_missing_selection_error():
 
         assert response.status_code == 400
         assert response.json() == {"detail": "pageIds or groupId is required"}
+
+
+def test_rerun_pipeline_creates_batch_id_with_secrets(monkeypatch, tmp_path):
+    client = TestClient(main.app)
+
+    fake_folder = "test_folder_1"
+    folder_dir = tmp_path / fake_folder
+    folder_dir.mkdir(parents=True, exist_ok=True)
+    (folder_dir / "input.png").write_bytes(b"PNG")
+
+    class FakeStore:
+        async def page_detail(self, page_id):
+            return {
+                "id": page_id,
+                "folder": fake_folder,
+                "originalName": "page1.png",
+                "sourceType": "translated",
+                "hasTextRegions": True,
+                "pageOrder": 1,
+                "settings": {},
+                "mangaTitle": "Test Manga",
+                "groupId": "group1",
+            }
+
+    class FakeBatchStore:
+        async def put_batch(self, batch_id, manifest, files):
+            return {"id": batch_id, **manifest}
+
+    class FakeScheduler:
+        def wake(self):
+            pass
+
+    monkeypatch.setattr(main, "_postgres", lambda: FakeStore())
+    monkeypatch.setattr(main, "RESULT_ROOT", tmp_path)
+    monkeypatch.setattr(main, "batch_store", FakeBatchStore())
+    monkeypatch.setattr(main, "batch_scheduler", FakeScheduler())
+
+    response = client.post("/api/results/rerun", json={"pageIds": ["page-1"], "mode": "full"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"].startswith("rerun-")
+    assert len(data["items"]) == 1
+    assert data["items"][0]["id"].startswith("page-0-")
+

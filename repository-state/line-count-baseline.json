@@ -211,7 +211,6 @@
     "manga_translator/inpainting/common.py": 41,
     "manga_translator/inpainting/guided_ldm_inpainting.py": 254,
     "manga_translator/inpainting/inpainting_aot.py": 281,
-    "manga_translator/inpainting/inpainting_lama.py": 688,
     "manga_translator/inpainting/inpainting_lama_mpe.py": 899,
     "manga_translator/inpainting/inpainting_sd.py": 140,
     "manga_translator/inpainting/none.py": 12,

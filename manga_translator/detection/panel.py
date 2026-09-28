@@ -133,12 +133,82 @@ def resolve_model_checkpoint(model: str) -> Path:
     return target
 
 
+def suppress_overlapping_panels(
+    panels: list[PanelDetection],
+    image_shape: tuple[int, ...] | None = None,
+    min_ios_threshold: float = 0.80,
+    max_page_coverage: float = 0.92,
+) -> list[PanelDetection]:
+    """Suppress redundant overlapping, compound, or near-full-page panel detections."""
+    if not panels or len(panels) <= 1:
+        return list(panels or [])
+
+    img_area = None
+    if image_shape is not None and len(image_shape) >= 2:
+        img_area = float(image_shape[0] * image_shape[1])
+    else:
+        max_x = max(p.xyxy[2] for p in panels)
+        max_y = max(p.xyxy[3] for p in panels)
+        if max_x > 0 and max_y > 0:
+            img_area = float(max_x * max_y)
+
+    candidates: list[PanelDetection] = []
+    for p in panels:
+        x1, y1, x2, y2 = p.xyxy
+        area = max(0, x2 - x1) * max(0, y2 - y1)
+        if img_area and img_area > 0 and (area / img_area) >= max_page_coverage and len(panels) > 1:
+            continue
+        candidates.append(p)
+
+    if not candidates:
+        return [panels[0]]
+
+    # Sort by confidence descending
+    sorted_candidates = sorted(candidates, key=lambda p: float(p.confidence), reverse=True)
+    survivors: list[PanelDetection] = []
+
+    for cand in sorted_candidates:
+        cx1, cy1, cx2, cy2 = cand.xyxy
+        c_area = max(0, cx2 - cx1) * max(0, cy2 - cy1)
+        if c_area <= 0:
+            continue
+
+        suppress = False
+        for surv in survivors:
+            sx1, sy1, sx2, sy2 = surv.xyxy
+            s_area = max(0, sx2 - sx1) * max(0, sy2 - sy1)
+            if s_area <= 0:
+                continue
+
+            ix1, iy1 = max(cx1, sx1), max(cy1, sy1)
+            ix2, iy2 = min(cx2, sx2), min(cy2, sy2)
+            iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+            inter = iw * ih
+
+            if inter > 0:
+                ios = inter / min(c_area, s_area)
+                if ios >= min_ios_threshold:
+                    suppress = True
+                    break
+
+        if not suppress:
+            survivors.append(cand)
+
+    return survivors
+
+
 def sort_panel_detections_reading_order(
     panels: list[PanelDetection],
     rtl: bool = True,
     row_tolerance_px: float = 80.0,
+    image_shape: tuple[int, ...] | None = None,
+    suppress_overlap: bool = True,
 ) -> list[PanelDetection]:
     """Sort panels into natural reading order (RTL for Manga, LTR for Western Comics)."""
+    if not panels:
+        return []
+    if suppress_overlap and len(panels) > 1:
+        panels = suppress_overlapping_panels(panels, image_shape=image_shape)
     if not panels:
         return []
 

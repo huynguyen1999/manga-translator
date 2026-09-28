@@ -2,6 +2,74 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-29 — Panel detection overlap suppression and smallest-enclosure region assignment
+
+- Reason: Multi-class neural panel detection occasionally predicts overlapping bounding boxes, spurious whole-page boxes, and compound macro-panels alongside granular sub-panels. Downstream greedy assignment caused the first/macro panel to swallow all text regions, depriving actual sub-panels of their text and cluttering UI overlays.
+- Added `suppress_overlapping_panels` in `manga_translator/detection/panel.py`, filtering out near-full-page false positives ($\ge 92\%$ page coverage when $\ge 2$ panels exist) and applying Intersection-over-Smaller ($\text{IoS} \ge 0.80$) suppression to eliminate redundant compound and duplicate panel detections.
+- Integrated overlap suppression into `sort_panel_detections_reading_order` and `BubbleDetector._read_result` in `manga_translator/detection/bubble.py`.
+- Updated `assign_regions_to_panels` (`manga_translator/professional_panels.py`) and `_assign_regions_to_panels` (`manga_translator/utils/sort.py`) to assign text regions to the smallest enclosing panel (most specific containment).
+- Added unit tests in `test/test_joint_bubble_panel_detection.py` and `test/test_professional_panels.py`.
+
+## 2026-09-29 — Remove dormant LaMa implementation and share translator key pools
+
+- Reason: An unregistered 688-line LaMa implementation had no in-repo callers, and Groq/Gemini repeated key parsing and pool-selection logic.
+- Removed the dormant implementation, consolidated common key/model parsing, pool metadata, and round-robin selection, and reused filesystem argument converters across both CLIs.
+- Removed unused rectangle-distance helpers and the CustomOpenAI override already inherited from `ConfigGPT`.
+
+## 2026-09-28 — Detailed review reasons and yellow review bubble UI inspection
+
+- Reason: The review reason `"render_suppressed"` was ambiguous and did not explain why rendering failed or how to fix it. Additionally, review-required speech bubbles in the image overlay were visually indistinguishable from normal bubbles, and selecting them did not show why manual review was flagged.
+- Centralized review reason code mapping and resolution in `front/app/utils/reviewReasons.ts` with descriptive labels and actionable remediation guidance for all standard codes (`text_does_not_fit`, `font_below_readability_floor`, `emergency_word_split`, `render_suppressed`, etc.) and dynamic prefixes (`no_valid_layout:*`, `missing_glyph:*`, `duplicate render ownership:*`, `final layout collides with region*`).
+- Highlighted speech bubbles requiring review with yellow borders (`border-yellow-400`), warning icon badges, and yellow selection rings in `PreviewOverlay.tsx` and `EditorCanvasStage.tsx`.
+- Added a dedicated yellow review status banner in `BlockInspectionCard.tsx` that surfaces the exact failure reason and actionable guidance when inspecting a flagged bubble.
+- Updated backend review reason resolution in `manga_translator/rendering/layout/render_status.py` to preserve specific layout and render failure details instead of falling back to generic suppression strings.
+- Added unit tests in `front/app/components/PreviewImage.test.ts`.
+
+## 2026-09-28 — App settings for pipeline retry and settings source selection for pipeline rerun
+
+- Reason: When retrying a failed or finished pipeline from Page Detail, users expect the retry to run with active Studio application settings (translator, OCR, font, inpainter, upscaler). When triggering a pipeline rerun, users should have explicit control over whether to apply active application settings or preserve saved page snapshot parameters.
+- Updated `retryFinishedPage` (`front/app/features/batches/retryFinishedPage.ts`) and `retryFinishedImage` (`front/app/App.tsx`) to pass `currentSettings: getCurrentSettings()` as `settingsOverrides` to `/results/rerun`.
+- Added `settingsSource` selection ("Current App Settings" vs "Page Snapshot Settings") to `PipelineRerunDialog` (`front/app/components/PipelineRerunDialog.tsx`) initialized with `appSettings`.
+- Extracted `PRESETS` into `front/app/components/pipelineRerunPresets.ts` and mode overrides into `front/app/components/PipelineRerunOverrides.tsx`, maintaining ratcheted line limits.
+- Added unit tests in `front/app/components/PipelineRerunDialog.test.ts` and updated `front/app/features/batches/retryFinishedPage.test.ts`.
+
+## 2026-09-28 — Resilient pipeline retry and fallback for Page Detail modal
+
+- Reason: The "Retry pipeline" action in Page Detail previously threw an error ("This image is not linked to a retryable translation batch.") for any page that was not loaded in client batch memory (e.g. from gallery or database), causing "Retry failed" to display. Additionally, `/results/rerun` failed with `NameError: name 'secrets' is not defined`.
+- Extracted `retryFinishedPage` helper (`front/app/features/batches/retryFinishedPage.ts`) supporting active batch item retries and fallback to `rerunPipeline` (`/api/results/rerun`) for standalone/gallery pages.
+- Added `import secrets` to `server/api/routes/pipeline_reruns.py`.
+- Added stage-to-mode mapping (`resolveRerunModeForStage`) so stage retries from TimingTab map to appropriate `PipelineRerunMode` (`typesetting`, `translation_typesetting`, `reprocess_text`, `full`).
+- Added unit tests in `front/app/features/batches/retryFinishedPage.test.ts`, `front/app/components/PageDetailModal.test.ts`, and `test/refactor_contract/test_api_contract.py`.
+
+## 2026-09-28 — Prevent premature "Rerun queued" button state on pipeline rerun modal trigger
+
+- Reason: Clicking "Rerun pipeline" in `PageDetailHeader` opens the `PipelineRerunDialog` where the user chooses stages and overrides; it does not queue a rerun until submitted. Previously, `handleRerender` immediately set `rerenderStatus('queued')`, disabling the button and displaying "Rerun queued" before submission.
+- Updated `usePageDetailActions` (`front/app/features/page-detail/usePageDetailActions.ts`) to execute `onRerender(image)` without setting `rerenderStatus('queued')`.
+- Added `cursor-pointer` to `PageDetailHeader` rerun button and added characterization assertions in `front/app/components/PageDetailModal.test.ts`.
+
+## 2026-09-28 — Single-hyphen emergency split fallback for tight boundary constraints
+
+- Reason: When narrow comic panel or slot constraints are narrower than an oversized word's fragments (e.g. word width > slot width even after split), hyphenation previously aborted and left words unhyphenated because neither half met `width <= width_limit`, causing typography candidate generation to fail with `no_valid_layout`.
+- Updated `_single_hyphen_split` (`manga_translator/rendering/layout/readable_text.py`) to maintain the 1-hyphen-per-token limit while allowing emergency split fallback to the most balanced 2-fragment split when fragments exceed `width_limit`.
+- Updated `_free_text_wrap_candidate` (`manga_translator/rendering/layout/free_text_typography.py`) and `explicit_break_candidate` (`manga_translator/rendering/layout/hard_line_break_layout.py`) to permit isolated single-token lines when a word/fragment exceeds `max_line_width`.
+- Added unit test `test_single_hyphen_split_fallback_when_exceeding_width_limit` in `test/test_readable_text.py`.
+
+## 2026-09-28 — Support non-LLM and offline models (Sugoi) in Professional Translation Mode
+
+- Reason: Professional mode should still work when its main translator is a non-LLM, MT, or offline model such as Sugoi V4.0; these backends translate text blocks directly while LLM story analysis is skipped. The legacy `draft_translator` setting remains accepted for saved-config compatibility but no longer selects a separate pass.
+- Updated `ProfessionalTranslator` (`manga_translator/professional_translation.py`):
+  - Removed strict `GPT_TRANSLATORS` restrictions on `primary` and `draft_translator`.
+  - Professional translation now uses the configured primary translator for its single translation pass.
+  - Added direct text block translation dispatch (`_translate_direct` / `_dispatch_one`) for non-LLM / offline primary translators, bypassing chat prompt construction.
+  - Non-LLM `analyze` returns default or manual story boundaries without raising exceptions or attempting JSON prompts.
+- Removed the First Draft Engine control from Web Studio because Professional mode no longer has a separate draft pass.
+
+## 2026-09-28 — Translate professional chunks in one context-aware pass
+
+- Reason: A separate draft and editor request doubled LLM calls and split translation from the story-wide style guidance. A single final-translation request can apply clarity, grammar, flow, concision, meaning, voice, and terminology together.
+- Professional LLM prompts now include the story analysis on every chunk and the immediately preceding chunk's Japanese and English transcript after the first chunk; chunk and story boundaries remain unchanged.
+- Removed the separate editor request and draft/editor progress states. Professional audit details now show the source and final translation.
+
 ## 2026-09-28 — Layout step behavior contract and rule documentation sync
 
 - Reason: Layout algorithms, free-text candidate footprint validation, early fast-gate acceptance, bubble DP backpointers, spiral block centering, dictionary hyphenation rescue, and joint panel constraints received refinements across recent updates that needed to be reflected in the repository state compatibility contract.
@@ -1431,3 +1499,11 @@ Record new features and large changes here. Keep implementation detail in code, 
 ## 2026-09-29 — Show speech-bubble boxes in Page Detail by default
 
 - Translated results now open with the Bubbles overlay enabled, including when navigating between pages. Original-only pages keep it disabled so detected-text overlays remain opt-in.
+
+## 2026-09-29 — Download original images from batch rows
+
+- Batch item rows now expose the original upload alongside the translated image download.
+
+## 2026-09-29 — Default fresh studio users to ALL CAPS lettering
+
+- New users now start with ALL CAPS lettering; previously remembered settings still override the default.

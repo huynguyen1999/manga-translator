@@ -38,15 +38,11 @@ def _assign_regions_to_panels(regions: List[TextBlock], panels: List[Tuple[int, 
     for r in regions:
         cx, cy = r.center
         r.panel_index = -1
-        for idx, (x1, y1, x2, y2) in enumerate(panels):
-            if x1 <= cx <= x2 and y1 <= cy <= y2:
-                r.panel_index = idx
-                break
-        if r.panel_index < 0:
-            dists = [
-                ((max(x1 - cx, 0, cx - x2)) ** 2 + (max(y1 - cy, 0, cy - y2)) ** 2, i)
-                for i, (x1, y1, x2, y2) in enumerate(panels)
-            ]
+        inside = [(i, (x2 - x1) * (y2 - y1)) for i, (x1, y1, x2, y2) in enumerate(panels) if x1 <= cx <= x2 and y1 <= cy <= y2]
+        if inside:
+            r.panel_index = min(inside, key=lambda it: it[1])[0]
+        else:
+            dists = [(((max(x1 - cx, 0, cx - x2)) ** 2 + (max(y1 - cy, 0, cy - y2)) ** 2), i) for i, (x1, y1, x2, y2) in enumerate(panels)]
             if dists:
                 r.panel_index = min(dists)[1]
 

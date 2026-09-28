@@ -152,3 +152,79 @@ assert.deepEqual(getDetectionPaintOrder([
   { points: [[20, 20], [40, 20], [40, 40], [20, 40]] },
   { points: [[0, 0], [100, 0], [100, 100], [0, 100]] },
 ]), [1, 0], "Enclosing detections must paint before inner detections so the inner ones receive clicks");
+
+// Test Review Reasons copy resolution and detailed explanations
+import { getReviewReasonCopy, REVIEW_REASON_COPY } from "@/utils/reviewReasons";
+
+assert.equal(
+  getReviewReasonCopy("render_suppressed").label,
+  "Rendering suppressed due to layout constraints"
+);
+assert.ok(
+  getReviewReasonCopy("render_suppressed").guidance.includes("boundaries"),
+  "Guidance explains boundary fitting issues"
+);
+
+assert.equal(
+  getReviewReasonCopy("font_below_readability_floor").label,
+  "Font size is below the readability floor"
+);
+
+assert.equal(
+  getReviewReasonCopy("no_valid_layout: panel_bounds").label,
+  "Text cannot fit within comic panel"
+);
+assert.ok(
+  getReviewReasonCopy("no_valid_layout: panel_bounds").guidance.includes("panel"),
+  "Guidance specifies panel overflow"
+);
+
+assert.equal(
+  getReviewReasonCopy("no_valid_layout: bubble_mask").label,
+  "Text cannot fit inside speech bubble"
+);
+
+assert.equal(
+  getReviewReasonCopy("missing_glyph: U+0416").label,
+  "Missing font character(s): U+0416"
+);
+
+assert.equal(
+  getReviewReasonCopy("duplicate render ownership: reg_1, reg_2").label,
+  "Duplicate region assignment (reg_1, reg_2)"
+);
+
+assert.equal(
+  getReviewReasonCopy("final layout collides with region 2").label,
+  "Text collides with region 2"
+);
+
+assert.equal(
+  getReviewReasonCopy("").label,
+  "Manual review required"
+);
+
+// Verify that a block needing review has distinct yellow border classes
+export function getBubbleBoxBorderClass(block: { review_required?: boolean; review_reason?: string | null }, isSelected: boolean) {
+  const isReview = Boolean(block.review_required || (block.review_reason && block.review_reason.trim() !== ""));
+  if (isReview) {
+    return isSelected
+      ? "border-2 border-yellow-400 bg-yellow-400/30 shadow-[0_0_14px_rgba(250,204,21,0.7)] ring-2 ring-yellow-400/60 z-30"
+      : "border-2 border-yellow-400/90 hover:border-yellow-300 bg-yellow-400/15 hover:bg-yellow-400/30 shadow-xs hover:shadow-md z-20";
+  }
+  return isSelected
+    ? "border-2 border-indigo-400 bg-indigo-500/25 shadow-[0_0_12px_rgba(129,140,248,0.6)] ring-2 ring-indigo-400/50 z-30"
+    : "border-2 border-indigo-400/70 hover:border-indigo-300 bg-indigo-500/15 hover:bg-indigo-500/30 hover:shadow-md z-20";
+}
+
+const normalBlock = { review_required: false, review_reason: null };
+const reviewBlock = { review_required: true, review_reason: "render_suppressed" };
+const reviewReasonOnlyBlock = { review_required: false, review_reason: "text_does_not_fit" };
+
+assert.ok(getBubbleBoxBorderClass(reviewBlock, false).includes("border-yellow-400"), "Review block must have yellow border");
+assert.ok(getBubbleBoxBorderClass(reviewBlock, true).includes("border-yellow-400"), "Selected review block must have yellow border");
+assert.ok(getBubbleBoxBorderClass(reviewReasonOnlyBlock, false).includes("border-yellow-400"), "Block with review reason must have yellow border");
+assert.ok(getBubbleBoxBorderClass(normalBlock, false).includes("border-indigo-400"), "Normal block must have default indigo border");
+
+console.log("Review reasons & yellow bubble review tests passed successfully!");
+

@@ -374,11 +374,11 @@ class TranslatorConfig(BaseModel):
     target_lang: str = 'ENG' #todo: validate VALID_LANGUAGES #todo: convert to enum
     """Destination language"""
     draft_translator: Optional[Translator] = None
-    """First draft translator to use in professional mode (defaults to main translator if unset)"""
+    """Legacy saved setting; accepted for compatibility but unused by professional mode."""
     translation_quality: str = 'fast'
     """Translation workflow: fast or professional."""
     translation_batch_size: int = 20
-    """Maximum number of pages per Professional draft/editor request."""
+    """Maximum number of pages per professional story translation request."""
     story_page_ranges: Optional[str] = None
     """Optional one-based story ranges, for example 1-12,13-24."""
     story_plan: Optional[dict[str, Any]] = None

@@ -1,6 +1,7 @@
 import React from "react";
 import { Icon } from "@iconify/react";
 import type { EditableTextBlock } from "@/types";
+import { getReviewReasonCopy } from "@/utils/reviewReasons";
 
 interface BlockInspectionCardProps {
   block: EditableTextBlock;
@@ -26,6 +27,9 @@ export const BlockInspectionCard: React.FC<BlockInspectionCardProps> = ({
     ? Math.max(20, Math.min(80, ((block.x + block.width / 2) / imageCoordinateSize.width) * 100))
     : 50;
 
+  const isReview = Boolean(block.review_required || (block.review_reason && block.review_reason.trim() !== ""));
+  const reasonCopy = isReview ? getReviewReasonCopy(block.review_reason) : null;
+
   return (
     <div
       className="absolute pointer-events-auto z-40 w-72 sm:w-84 max-w-[90vw] rounded-xl border border-zinc-700 bg-zinc-900/95 p-3.5 text-zinc-100 shadow-2xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-150"
@@ -41,7 +45,13 @@ export const BlockInspectionCard: React.FC<BlockInspectionCardProps> = ({
       <div className="flex items-center justify-between border-b border-zinc-700/80 pb-2 mb-2">
         <div className="flex items-center gap-2">
           <span className="font-mono text-xs font-bold text-amber-400">#{index + 1}</span>
-          <span className="text-xs font-semibold text-zinc-200 truncate max-w-40">{block.id}</span>
+          <span className="text-xs font-semibold text-zinc-200 truncate max-w-36">{block.id}</span>
+          {isReview && (
+            <span className="flex items-center gap-1 rounded-full bg-yellow-500/20 border border-yellow-500/40 px-1.5 py-0.2 text-[10px] font-semibold text-yellow-300">
+              <Icon icon="carbon:warning-alt" className="h-2.5 w-2.5 text-yellow-400" />
+              <span>Review</span>
+            </span>
+          )}
           <button
             type="button"
             onClick={() => void onCopy(block.id, "id")}
@@ -62,6 +72,20 @@ export const BlockInspectionCard: React.FC<BlockInspectionCardProps> = ({
       </div>
 
       <div className="space-y-2.5 text-xs">
+        {isReview && reasonCopy && (
+          <div
+            role="status"
+            className="rounded-lg border border-yellow-500/40 bg-yellow-950/40 p-2.5 text-xs text-yellow-100 shadow-inner"
+          >
+            <div className="flex items-center gap-1.5 font-semibold text-yellow-300">
+              <Icon icon="carbon:warning-alt" className="h-3.5 w-3.5 shrink-0 text-yellow-400" />
+              <span>Review reason: {reasonCopy.label}</span>
+            </div>
+            <p className="mt-1 text-[11px] text-yellow-100/90 leading-relaxed">
+              {reasonCopy.guidance}
+            </p>
+          </div>
+        )}
         {block.original_text && (
           <div>
             <div className="flex items-center justify-between text-[10px] uppercase font-bold tracking-wider text-zinc-400 mb-1">

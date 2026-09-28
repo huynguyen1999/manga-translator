@@ -358,7 +358,7 @@ export const PageDetailHeader: React.FC<PageDetailHeaderProps> = ({
                   type="button"
                   onClick={() => void handleRerender()}
                   disabled={isRerendering || rerenderStatus === "queued"}
-                  className="flex min-h-8 items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/15 px-2.5 text-xs font-semibold text-indigo-200 transition-colors hover:bg-indigo-500/25 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-300 disabled:cursor-wait disabled:opacity-70"
+                  className="flex min-h-8 items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/15 px-2.5 text-xs font-semibold text-indigo-200 transition-colors hover:bg-indigo-500/25 hover:text-white focus-visible:outline-2 focus-visible:outline-indigo-300 disabled:cursor-wait disabled:opacity-70 cursor-pointer"
                   aria-busy={isRerendering}
                   title="Rerun pipeline stages (typesetting, retranslation, reprocess text, or full)"
                 >

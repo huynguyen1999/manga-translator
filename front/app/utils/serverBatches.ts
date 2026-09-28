@@ -142,10 +142,11 @@ export const getBatchKind = (batch: { id: string; kind?: TranslationBatchKind | 
 
 export const formatStage = (step?: string): string => {
   if (!step) return "Starting";
-  const professionalChunk = /^(drafting|editing):(\d+)\/(\d+):(\d+)\/(\d+)$/.exec(step);
+  const professionalChunk = /^(drafting|editing|translating):(\d+)\/(\d+):(\d+)\/(\d+)$/.exec(step);
   if (professionalChunk) {
     const [, phase, storyIndex, storyCount, chunkIndex, chunkCount] = professionalChunk;
-    return `${phase === "drafting" ? "First draft" : "Editor pass"} · Story ${storyIndex}/${storyCount} · Chunk ${chunkIndex}/${chunkCount}`;
+    const label = phase === "translating" ? "Translating" : phase === "drafting" ? "First draft" : "Editor pass";
+    return `${label} · Story ${storyIndex}/${storyCount} · Chunk ${chunkIndex}/${chunkCount}`;
   }
   switch (step) {
     case "awaiting_translation":

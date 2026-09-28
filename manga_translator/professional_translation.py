@@ -1,7 +1,6 @@
 import json
 import re
 import uuid
-from difflib import SequenceMatcher
 from typing import Any, Awaitable, Callable
 
 from omegaconf import OmegaConf
@@ -17,10 +16,9 @@ from .professional_prompts import (
     REFUSAL_MARKERS,
     build_analysis_consolidation_prompt,
     build_analysis_prompt,
-    build_draft_prompt,
-    build_editor_prompt,
+    build_translation_prompt,
 )
-from .translators import GPT_TRANSLATORS, get_translator
+from .translators import GPT_TRANSLATORS, _dispatch_one, get_translator
 from .utils import is_preserved_region
 
 
@@ -151,26 +149,36 @@ class ProfessionalTranslator:
             raise ValueError("Professional translation currently supports Japanese to English only")
         self.config = config
         self.primary = config.translator
-        if self.primary not in GPT_TRANSLATORS:
-            raise ValueError("Professional translation requires an AI translator")
-        self.draft_translator = config.draft_translator if (config.draft_translator and config.draft_translator != Translator.none) else self.primary
-        if self.draft_translator not in GPT_TRANSLATORS:
-            raise ValueError(f"Draft translator '{self.draft_translator}' is not a valid AI translator for professional mode")
         self.provenance: list[dict[str, str]] = []
         self._last_model: str | None = None
         self._progress = progress
 
-    def _get_translator_for_stage(self, stage: str) -> Translator:
-        if stage == "editing":
-            return self.primary
-        return self.draft_translator
+    async def _translate_direct(self, key: Translator, queries: list[str]) -> list[str]:
+        indices = [i for i, q in enumerate(queries) if q and q.strip()]
+        if not indices:
+            return ["" for _ in queries]
+        ctx_args: dict[str, Any] = {}
+        sub = await _dispatch_one(key, self.config.target_lang, [queries[i] for i in indices], self.config, False, ctx_args, "cpu")
+        model = ctx_args.get("offline_model") or ctx_args.get("gemini_model") or ctx_args.get("translator_model")
+        self._last_model = str(model) if model else None
+        results = ["" for _ in queries]
+        for idx, trans in zip(indices, sub):
+            results[idx] = trans
+        return results
+
+    @staticmethod
+    def _fallback_values(expected: list[dict[str, Any]], reason: str) -> dict[str, dict[str, Any]]:
+        return {item["id"]: {
+            "translation": str(item.get("source") or item.get("japanese") or getattr(item.get("region"), "text", "") or ""),
+            "confidence": 0.0, "review_reasons": [reason],
+        } for item in expected}
 
     async def _report(self, state: str) -> None:
         if self._progress is not None:
             await self._progress(state)
 
     async def _request(self, stage: str, prompt: str) -> tuple[str, str]:
-        target = self._get_translator_for_stage(stage)
+        target = self.primary
         try:
             raw = await self._request_with(target, prompt, stage)
             if _is_refusal(raw):
@@ -184,7 +192,7 @@ class ProfessionalTranslator:
                 raise PermissionError(raw)
             return raw, _provider_name(Translator.deepseek)
 
-    async def _request_with(self, key: Translator, prompt: str, stage: str = "draft") -> str:
+    async def _request_with(self, key: Translator, prompt: str, stage: str = "translation") -> str:
         translator = get_translator(key)
         translator.parse_args(self.config)
         request = getattr(translator, "_request_translation", None)
@@ -222,7 +230,7 @@ class ProfessionalTranslator:
                 translator._canUseCache = original_cache_flag
 
     async def _json_request(self, stage: str, prompt: str) -> tuple[dict[str, Any], str]:
-        target = self._get_translator_for_stage(stage)
+        target = self.primary
         last_error: Exception | None = None
         for _ in range(2):
             try:
@@ -276,6 +284,16 @@ class ProfessionalTranslator:
                 manual_ranges = [(1, len(pages))]
         else:
             manual_ranges = parse_story_ranges(override, len(pages))
+
+        if self.primary not in GPT_TRANSLATORS:
+            expected = manual_ranges or [(1, len(pages))]
+            return {
+                "stories": [
+                    {"start_page": start, "end_page": end, "confidence": 1.0}
+                    for start, end in expected
+                ]
+            }
+
         page_blocks = [
             format_page_transcript_for_analysis(
                 build_page_panel_structure(page["number"], page["regions"], page.get("panels"))
@@ -373,111 +391,76 @@ class ProfessionalTranslator:
         chunk_count = (len(pages) + chunk_size - 1) // chunk_size
         for offset in range(0, len(pages), chunk_size):
             chunk_index = offset // chunk_size + 1
-            await self._report(f"drafting:{story_index}/{story_count}:{chunk_index}/{chunk_count}")
+            await self._report(f"translating:{story_index}/{story_count}:{chunk_index}/{chunk_count}")
             chunk = pages[offset:offset + chunk_size]
             payload = [
-                build_page_panel_structure(page["number"], page["regions"], page.get("panels"), include_draft=False)
+                build_page_panel_structure(page["number"], page["regions"], page.get("panels"))
                 for page in chunk
             ]
             expected = [item for page in chunk for item in page["regions"]]
             if not expected:
                 continue
-            prompt = build_draft_prompt(payload, guide, previous)
             values: dict[str, dict[str, Any]] = {}
-            provider = _provider_name(self.draft_translator)
-            draft_failed = False
-            try:
-                data, provider = await self._json_request("draft", prompt)
-                values = self._regions(data, expected)
-            except ValueError as exc:
-                if "Missing region ids" not in str(exc) or len(chunk) <= 1:
-                    # Not a missing-ID error, or already at single-page granularity — fall back.
-                    draft_failed = True
-                    provider = _provider_name(Translator.deepseek)
-                    values = {item["id"]: {
-                        "translation": item["japanese"], "confidence": 0.0,
-                        "review_reasons": [f"unresolved_translation: {exc}"],
-                    } for item in expected}
-                else:
-                    # Retry each page individually to rescue as many regions as possible.
-                    for sub_page in chunk:
-                        sub_payload = [
-                            build_page_panel_structure(sub_page["number"], sub_page["regions"], sub_page.get("panels"), include_draft=False)
-                        ]
-                        sub_expected = sub_page["regions"]
-                        if not sub_expected:
-                            continue
-                        sub_prompt = build_draft_prompt(sub_payload, guide, previous)
-                        try:
-                            sub_data, sub_provider = await self._json_request("draft", sub_prompt)
-                            sub_values = self._regions(sub_data, sub_expected)
-                            provider = sub_provider
-                            values.update(sub_values)
-                        except Exception as sub_exc:
-                            draft_failed = True
-                            for item in sub_expected:
-                                values[item["id"]] = {
-                                    "translation": item["japanese"], "confidence": 0.0,
-                                    "review_reasons": [f"unresolved_translation: {sub_exc}"],
-                                }
-            except Exception as exc:
-                draft_failed = True
-                provider = _provider_name(Translator.deepseek)
-                values = {item["id"]: {
-                    "translation": item["japanese"], "confidence": 0.0,
-                    "review_reasons": [f"unresolved_translation: {exc}"],
-                } for item in expected}
-            for page in chunk:
-                for item in page["regions"]:
-                    item["draft"] = values[item["id"]]["translation"]
-                    item["confidence"] = values[item["id"]]["confidence"]
-                    item["review_reasons"] = values[item["id"]]["review_reasons"]
-                    item["draft_provider"] = provider
-                    item["draft_failed"] = draft_failed
-            previous = (previous + "\n" + "\n".join(values[item["id"]]["translation"] for item in expected))[-8000:]
+            provider = _provider_name(self.primary)
 
-    async def edit_story(
-        self,
-        story: dict[str, Any],
-        pages: list[dict[str, Any]],
-        story_index: int = 1,
-        story_count: int = 1,
-    ) -> None:
-        previous = ""
-        guide = json.dumps(story, ensure_ascii=False)
-        chunk_size = max(1, int(self.config.translation_batch_size))
-        chunk_count = (len(pages) + chunk_size - 1) // chunk_size
-        for offset in range(0, len(pages), chunk_size):
-            chunk_index = offset // chunk_size + 1
-            await self._report(f"editing:{story_index}/{story_count}:{chunk_index}/{chunk_count}")
-            chunk = pages[offset:offset + chunk_size]
-            payload = [
-                build_page_panel_structure(page["number"], page["regions"], page.get("panels"), include_draft=True)
-                for page in chunk
-            ]
-            expected = [item for page in chunk for item in page["regions"]]
-            if not expected:
-                continue
-            prompt = build_editor_prompt(payload, guide, previous)
-            try:
-                data, provider = await self._json_request("editing", prompt)
-                values = self._regions(data, expected)
-            except Exception as exc:
-                provider = "draft"
-                values = {item["id"]: {
-                    "translation": item["draft"], "confidence": 0.0,
-                    "review_reasons": [f"editor_failed: {exc}"],
-                } for item in expected}
+            if self.primary in GPT_TRANSLATORS:
+                prompt = build_translation_prompt(payload, guide, previous)
+                try:
+                    data, provider = await self._json_request("translation", prompt)
+                    values = self._regions(data, expected)
+                except ValueError as exc:
+                    if "Missing region ids" not in str(exc) or len(chunk) <= 1:
+                        values = self._fallback_values(expected, f"unresolved_translation: {exc}")
+                    else:
+                        for sub_page in chunk:
+                            sub_payload = [build_page_panel_structure(sub_page["number"], sub_page["regions"], sub_page.get("panels"))]
+                            sub_expected = sub_page["regions"]
+                            if not sub_expected:
+                                continue
+                            try:
+                                sub_data, sub_provider = await self._json_request(
+                                    "translation", build_translation_prompt(sub_payload, guide, previous)
+                                )
+                                values.update(self._regions(sub_data, sub_expected))
+                                provider = sub_provider
+                            except Exception as sub_exc:
+                                values.update(self._fallback_values(sub_expected, f"unresolved_translation: {sub_exc}"))
+                except Exception as exc:
+                    values = self._fallback_values(expected, f"unresolved_translation: {exc}")
+            else:
+                queries = [str(item.get("source") or item.get("japanese") or (getattr(item.get("region"), "text", None) or "")) for item in expected]
+                try:
+                    translated_texts = await self._translate_direct(self.primary, queries)
+                    if len(translated_texts) != len(expected):
+                        raise ValueError(f"Expected {len(expected)} translations, got {len(translated_texts)}")
+                    for item, trans in zip(expected, translated_texts):
+                        clean_trans = (trans or "").strip()
+                        src_text = str(item.get("source") or item.get("japanese") or (getattr(item.get("region"), "text", None) or ""))
+                        values[item["id"]] = {
+                            "translation": clean_trans if clean_trans else src_text,
+                            "confidence": 0.8 if clean_trans else 0.0,
+                            "review_reasons": [] if clean_trans else ["empty_translation"],
+                        }
+                    provenance = {"stage": "translation", "provider": provider}
+                    if self._last_model:
+                        provenance["model"] = self._last_model
+                    self.provenance.append(provenance)
+                except Exception as exc:
+                    values = self._fallback_values(expected, f"translation_failed: {exc}")
+
             for page in chunk:
                 for item in page["regions"]:
-                    edited = values[item["id"]]
-                    item["final"] = edited["translation"]
-                    item["confidence"] = min(item["confidence"], edited["confidence"])
-                    item["review_reasons"].extend(edited["review_reasons"])
-                    if not item.get("draft_failed") and SequenceMatcher(None, item["draft"].casefold(), item["final"].casefold()).ratio() < 0.55:
-                        item["review_reasons"].append("substantial_editor_rewrite")
-                    item["editor_provider"] = provider
-            previous = (previous + "\n" + "\n".join(values[item["id"]]["translation"] for item in expected))[-8000:]
+                    translated = values[item["id"]]
+                    item["final"] = translated["translation"]
+                    item["confidence"] = translated["confidence"]
+                    item["review_reasons"] = translated["review_reasons"]
+                    item["translation_provider"] = provider
+            previous = json.dumps([
+                build_page_panel_structure(
+                    page["number"], page["regions"], page.get("panels"), include_translation=True
+                )
+                for page in chunk
+            ], ensure_ascii=False)
 
     @staticmethod
     def _regions(data: dict[str, Any], expected: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
@@ -502,7 +485,7 @@ class ProfessionalTranslator:
                 expected_by_id = {item["id"]: item for item in expected}
                 for region_id in missing:
                     src = expected_by_id.get(region_id, {})
-                    fallback = src.get("draft") or src.get("japanese") or region_id
+                    fallback = src.get("source") or src.get("japanese") or region_id
                     found[region_id] = {
                         "translation": fallback,
                         "confidence": 0.0,
@@ -531,7 +514,6 @@ async def translate_professionally(
             item = {"id": region.region_id, "source": region.text, "region": region, "panel_index": getattr(region, "panel_index", -1)}
             if is_preserved_region(region):
                 item.update(
-                    draft=region.text,
                     final=region.text,
                     confidence=1.0,
                     review_reasons=[],
@@ -549,7 +531,6 @@ async def translate_professionally(
     for story_index, story in enumerate(analysis["stories"]):
         story_pages = pages[int(story["start_page"]) - 1:int(story["end_page"])]
         await engine.localize_story(story, story_pages, story_index + 1, story_count)
-        await engine.edit_story(story, story_pages, story_index + 1, story_count)
         for page in story_pages:
             page["story_index"] = story_index
             if float(story.get("confidence", 0.0)) < 0.7:

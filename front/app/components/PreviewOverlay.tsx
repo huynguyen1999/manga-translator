@@ -5,6 +5,7 @@ import type { DetectedBubbleRegion, DetectedRegionLine } from "@/utils/textRegio
 import type { DetectedPanelRegion } from "@/utils/panelRegions";
 import { getConfidenceStyle, getDetectionPaintOrder } from "./PreviewImage";
 import { BlockInspectionCard } from "./BlockInspectionCard";
+import { getReviewReasonCopy } from "@/utils/reviewReasons";
 
 interface PreviewOverlayProps {
   imageCoordinateSize: { width: number; height: number };
@@ -343,6 +344,8 @@ export const PreviewOverlay: React.FC<PreviewOverlayProps> = ({
       {/* 4. Text Region Blocks / Typeset Boxes */}
       {showBubbleBoxes && effectiveBlocks.map((block, idx) => {
         const isSelected = selectedBlockId === block.id;
+        const isReview = Boolean(block.review_required || (block.review_reason && block.review_reason.trim() !== ""));
+        const reasonCopy = isReview ? getReviewReasonCopy(block.review_reason) : null;
         const leftPct = (block.x / imageCoordinateSize.width) * 100;
         const topPct = (block.y / imageCoordinateSize.height) * 100;
         const widthPct = (block.width / imageCoordinateSize.width) * 100;
@@ -353,10 +356,14 @@ export const PreviewOverlay: React.FC<PreviewOverlayProps> = ({
             key={block.id || idx}
             role="button"
             tabIndex={0}
-            aria-label={`Text region ${block.id}`}
+            aria-label={`Text region ${block.id}${isReview ? ` (Needs review: ${reasonCopy?.label})` : ""}`}
             className={`absolute pointer-events-auto rounded cursor-pointer transition-all duration-150 ${
-              isSelected
-                ? "border-2 border-amber-400 bg-amber-400/25 shadow-[0_0_12px_rgba(251,191,36,0.6)] ring-2 ring-amber-400/50 z-30"
+              isReview
+                ? isSelected
+                  ? "border-2 border-yellow-400 bg-yellow-400/30 shadow-[0_0_14px_rgba(250,204,21,0.7)] ring-2 ring-yellow-400/60 z-30"
+                  : "border-2 border-yellow-400/90 hover:border-yellow-300 bg-yellow-400/15 hover:bg-yellow-400/30 shadow-xs hover:shadow-md z-20"
+                : isSelected
+                ? "border-2 border-indigo-400 bg-indigo-500/25 shadow-[0_0_12px_rgba(129,140,248,0.6)] ring-2 ring-indigo-400/50 z-30"
                 : "border-2 border-indigo-400/70 hover:border-indigo-300 bg-indigo-500/15 hover:bg-indigo-500/30 hover:shadow-md z-20"
             }`}
             style={{ left: `${leftPct}%`, top: `${topPct}%`, width: `${widthPct}%`, height: `${heightPct}%` }}
@@ -374,13 +381,20 @@ export const PreviewOverlay: React.FC<PreviewOverlayProps> = ({
                 onSelectBlockId(isSelected ? null : block.id);
               }
             }}
-            title={`Text region ${block.id}: Click to inspect original & translated text`}
+            title={`Text region ${block.id}${isReview ? ` [Review: ${reasonCopy?.label}]` : ""}: Click to inspect original & translated text`}
           >
-            {isSelected && (
-              <span className="absolute -top-2.5 -left-1 max-w-28 truncate text-[9px] font-mono font-bold px-1 rounded shadow-xs select-none bg-amber-400 text-black">
+            {isSelected ? (
+              <span className={`absolute -top-2.5 -left-1 max-w-36 truncate text-[9px] font-mono font-bold px-1 rounded shadow-xs select-none ${
+                isReview ? "bg-yellow-400 text-black" : "bg-indigo-500 text-white"
+              }`}>
                 {block.id}
               </span>
-            )}
+            ) : isReview ? (
+              <span className="absolute -top-2 -right-1 flex h-4 items-center gap-0.5 rounded bg-yellow-400 px-1 text-[8px] font-bold text-black shadow-xs select-none">
+                <Icon icon="carbon:warning-filled" className="h-2.5 w-2.5" />
+                <span>Review</span>
+              </span>
+            ) : null}
           </div>
         );
       })}

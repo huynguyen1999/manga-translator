@@ -43,6 +43,22 @@ class TestProfessionalPanels(unittest.TestCase):
         self.assertEqual([r["id"] for r in grouped[1]], ["r2"])
         self.assertEqual([r["id"] for r in unassigned], ["r3", "r4"])
 
+    def test_assign_regions_to_nested_panels_chooses_smallest_enclosure(self):
+        # Panel 0: Large container panel (0, 0, 500, 500)
+        # Panel 1: Inset sub-panel (100, 100, 200, 200)
+        panels = [
+            {"xyxy": [0, 0, 500, 500]},
+            {"xyxy": [100, 100, 200, 200]},
+        ]
+        regions = [
+            {"id": "r_inset", "xywh": [120, 120, 40, 40]},  # inside both, but Panel 1 is smaller
+            {"id": "r_outer", "xywh": [10, 10, 40, 40]},     # inside Panel 0 only
+        ]
+        grouped, unassigned = assign_regions_to_panels(regions, panels)
+        self.assertEqual([r["id"] for r in grouped[0]], ["r_outer"])
+        self.assertEqual([r["id"] for r in grouped[1]], ["r_inset"])
+        self.assertEqual(unassigned, [])
+
     def test_build_page_panel_structure_without_panels(self):
         regions = [{"id": "r1", "source": "こんにちは"}]
         res = build_page_panel_structure(1, regions, panels=None)
@@ -52,19 +68,19 @@ class TestProfessionalPanels(unittest.TestCase):
         self.assertEqual(res["regions"][0]["id"], "r1")
         self.assertEqual(res["regions"][0]["japanese"], "こんにちは")
 
-    def test_build_page_panel_structure_with_panels_and_draft(self):
+    def test_build_page_panel_structure_with_panels_and_translation(self):
         panels = [{"xyxy": [0, 0, 100, 100], "order": 1}]
         regions = [
-            {"id": "r1", "panel_index": 0, "source": "テスト", "draft": "Test"},
-            {"id": "r2", "source": "外", "draft": "Outside"},
+            {"id": "r1", "panel_index": 0, "source": "テスト", "final": "Test"},
+            {"id": "r2", "source": "外", "final": "Outside"},
         ]
-        res = build_page_panel_structure(2, regions, panels=panels, include_draft=True)
+        res = build_page_panel_structure(2, regions, panels=panels, include_translation=True)
         self.assertEqual(res["page"], 2)
         self.assertEqual(len(res["panels"]), 1)
         self.assertEqual(res["panels"][0]["panel_id"], "p2_01")
-        self.assertEqual(res["panels"][0]["regions"][0]["draft"], "Test")
+        self.assertEqual(res["panels"][0]["regions"][0]["translation"], "Test")
         self.assertEqual(len(res["unassigned_regions"]), 1)
-        self.assertEqual(res["unassigned_regions"][0]["draft"], "Outside")
+        self.assertEqual(res["unassigned_regions"][0]["translation"], "Outside")
 
     def test_format_page_transcript_for_analysis_with_panels(self):
         page_data = {

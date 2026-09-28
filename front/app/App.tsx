@@ -52,6 +52,7 @@ import { useStudioInitialization } from "@/features/studio/useStudioInitializati
 import { useAppPersistence } from "@/features/studio/useAppPersistence";
 import { useStudioLightbox } from "@/features/studio/useStudioLightbox";
 import { usePipelineRerunActions } from "@/features/batches/usePipelineRerunActions";
+import { retryFinishedPage } from "@/features/batches/retryFinishedPage";
 
 // Manga Translation Studio Application Main Component
 export const App: React.FC = () => {
@@ -601,17 +602,16 @@ export const App: React.FC = () => {
     resumeStudioMangaUpload,
   });
 
-  const retryFinishedImage = (image: FinishedImage, fromStage?: string) => {
-    const match = image.folder
-      ? translationBatches
-          .flatMap((batch) => batch.items.map((item) => ({ batch, item })))
-          .find(({ item }) => item.folder === image.folder)
-      : undefined;
-    if (!match) {
-      throw new Error("This image is not linked to a retryable translation batch.");
-    }
-    return retryTranslationItem(match.batch.id, match.item.id, false, fromStage);
-  };
+  const retryFinishedImage = useCallback((image: FinishedImage, fromStage?: string) => (
+    retryFinishedPage({
+      image,
+      fromStage,
+      translationBatches,
+      setTranslationBatches,
+      retryTranslationItem,
+      currentSettings: getCurrentSettings(),
+    })
+  ), [getCurrentSettings, retryTranslationItem, setTranslationBatches, translationBatches]);
 
   const {
     pipelineRerunState,
@@ -620,7 +620,6 @@ export const App: React.FC = () => {
     handleExecutePipelineRerun,
     rerenderImages,
   } = usePipelineRerunActions({ setTranslationBatches });
-
 
   const handleCloseJobs = useCallback(() => setIsJobsOpen(false), []);
 
@@ -924,6 +923,7 @@ export const App: React.FC = () => {
         <PipelineRerunDialog
           images={pipelineRerunState.images}
           mangaTitle={pipelineRerunState.mangaTitle}
+          appSettings={getCurrentSettings()}
           onClose={() => setPipelineRerunState(null)}
           onSubmit={handleExecutePipelineRerun}
         />

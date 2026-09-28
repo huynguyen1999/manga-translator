@@ -32,7 +32,6 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
   summaryModel,
   targetLanguage,
   translationQuality,
-  draftTranslator = "",
   inpaintingSize,
   customUnclipRatio,
   customBoxThreshold,
@@ -61,7 +60,6 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
   setSummaryModel,
   setTargetLanguage,
   setTranslationQuality,
-  setDraftTranslator,
   setInpaintingSize,
   setCustomUnclipRatio,
   setCustomBoxThreshold,
@@ -93,7 +91,6 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
     setSummaryModel("deepseek-flash");
     setTargetLanguage("ENG");
     setTranslationQuality("fast");
-    setDraftTranslator?.("");
     setInpaintingSize("2048");
     setCustomUnclipRatio(2.3);
     setCustomBoxThreshold(0.45);
@@ -210,7 +207,7 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
             />
           </div>
 
-          <div className={`grid grid-cols-1 gap-3 ${translationQuality === "professional" ? "sm:grid-cols-2" : "sm:grid-cols-1"}`}>
+          <div className="grid grid-cols-1 gap-3">
             <LabeledSelect
               id="translationQuality"
               label="Translation Quality"
@@ -226,29 +223,9 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
                 { value: "fast", label: "Fast" },
                 { value: "professional", label: "Professional localization" },
               ]}
-              tooltip="Professional mode reads the complete batch, translates sequentially, and performs an editor pass"
+              tooltip="Professional LLMs use story and prior-chunk context for each chunk; offline engines translate directly"
             />
 
-            {translationQuality === "professional" && (
-              <LabeledSelect
-                id="draftTranslator"
-                label="First Draft Engine"
-                icon="carbon:document-edit"
-                title="First draft translation engine"
-                value={draftTranslator}
-                onChange={(val) => setDraftTranslator?.(val as TranslatorKey | "")}
-                options={[
-                  { value: "", label: "Default (Use Main Engine)" },
-                  { value: "deepseek", label: "DeepSeek (API)" },
-                  { value: "gemini", label: "Gemini (Google API)" },
-                  { value: "openai", label: "ChatGPT (OpenAI API)" },
-                  { value: "groq", label: "Groq (API)" },
-                  { value: "openrouter", label: "OpenRouter (API)" },
-                  { value: "custom_openai", label: "Custom OpenAI / Ollama (Local)" },
-                ]}
-                tooltip="Specific AI translator for first pass translation draft (defaults to main engine if unset)"
-              />
-            )}
           </div>
         </div>
 

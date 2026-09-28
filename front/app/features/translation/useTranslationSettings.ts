@@ -15,7 +15,7 @@ export const useTranslationSettings = () => {
   const [ocr, setOcr] = useState("48px");
   const [renderFont, setRenderFont] = useState("wildwords");
   const [renderTextDirection, setRenderTextDirection] = useState("auto");
-  const [letterCase, setLetterCase] = useState<"none" | "uppercase" | "lowercase">("none");
+  const [letterCase, setLetterCase] = useState<"none" | "uppercase" | "lowercase">("uppercase");
   const [translator, setTranslator] = useState<TranslatorKey>("deepseek");
   const [summaryModel, setSummaryModel] = useState("deepseek-flash");
   const [targetLanguage, setTargetLanguage] = useState("ENG");

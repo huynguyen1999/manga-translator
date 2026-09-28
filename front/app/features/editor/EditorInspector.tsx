@@ -5,58 +5,11 @@ import { EditorTextTab } from "@/features/editor/EditorTextTab";
 import { EditorStyleTab } from "@/features/editor/EditorStyleTab";
 import { EditorLayoutTab } from "@/features/editor/EditorLayoutTab";
 
+import { getReviewReasonCopy } from "@/utils/reviewReasons";
+
 export type EditorTab = "text" | "style" | "layout";
 
-const REVIEW_REASON_COPY: Record<string, { label: string; guidance: string }> =
-  {
-    text_does_not_fit: {
-      label: "Translation does not fit the bubble",
-      guidance:
-        "Shorten the translation or resize the box, then replace the preserved original.",
-    },
-    uncertain_cleanup: {
-      label: "Original lettering could not be safely cleared",
-      guidance:
-        "Check the background before replacing it, or accept the preserved original.",
-    },
-    uncertain_boundary: {
-      label: "Bubble boundary is uncertain",
-      guidance:
-        "Reposition the box to align with the speech bubble, then replace the preserved original.",
-    },
-    translation_validation_failed: {
-      label: "Translation failed validation",
-      guidance:
-        "Edit the translation until it is complete and readable, then replace the preserved original.",
-    },
-    low_confidence_story_boundary: {
-      label: "Story boundary confidence is low",
-      guidance:
-        "Check this page against the surrounding pages before replacing the preserved original.",
-    },
-    response_truncated: {
-      label: "Translation response was cut off",
-      guidance:
-        "The AI hit its output limit mid-response. This region was not translated in that batch. Edit the translation manually, then replace the preserved original.",
-    },
-  };
-
-export function getReviewReasonCopy(reason?: string | null): {
-  label: string;
-  guidance: string;
-} {
-  if (reason && REVIEW_REASON_COPY[reason]) return REVIEW_REASON_COPY[reason];
-  const label = reason
-    ? reason
-        .replace(/[:_]+/g, " ")
-        .replace(/\b\w/g, (character) => character.toUpperCase())
-    : "Manual review required";
-  return {
-    label,
-    guidance:
-      "Check the preserved original and either replace it with this translation or accept the original.",
-  };
-}
+export { getReviewReasonCopy, type ReviewReasonCopy, REVIEW_REASON_COPY } from "@/utils/reviewReasons";
 
 interface EditorInspectorProps {
   selectedBlock: EditableTextBlock | null;

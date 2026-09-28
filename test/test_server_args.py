@@ -1,8 +1,29 @@
+import argparse
+from pathlib import Path
+import tempfile
+from urllib.parse import quote
 import unittest
-from server.args import parse_arguments
+
+from server.args import dir_path, file_path, parse_arguments, path, url_decode
 
 
 class TestServerArgs(unittest.TestCase):
+    def test_shared_path_converters(self):
+        with tempfile.TemporaryDirectory() as root:
+            existing_file = Path(root) / "page 1.png"
+            existing_file.touch()
+            file_url = f"file://{quote(str(existing_file))}"
+
+            self.assertEqual(url_decode(file_url), str(existing_file))
+            self.assertEqual(path(file_url), str(existing_file))
+            self.assertEqual(file_path(file_url), str(existing_file))
+            self.assertEqual(dir_path(root), root)
+            self.assertEqual(path(""), "")
+            self.assertEqual(file_path(""), "")
+            self.assertEqual(dir_path(""), "")
+            with self.assertRaisesRegex(argparse.ArgumentTypeError, "No such file:"):
+                file_path(str(Path(root) / "missing.png"))
+
     def test_default_arguments(self):
         args = parse_arguments([])
         self.assertEqual(args.host, '0.0.0.0')

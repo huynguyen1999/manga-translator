@@ -106,13 +106,15 @@ def assign_regions_to_panels(
         center = _extract_region_center(item)
         if center is not None:
             cx, cy = center
-            matched = False
-            for idx, box in enumerate(panel_boxes):
-                if box is not None and box[0] <= cx <= box[2] and box[1] <= cy <= box[3]:
-                    panels_grouped[idx].append(item)
-                    matched = True
-                    break
-            if not matched:
+            inside = [
+                (idx, max(0, box[2] - box[0]) * max(0, box[3] - box[1]))
+                for idx, box in enumerate(panel_boxes)
+                if box is not None and box[0] <= cx <= box[2] and box[1] <= cy <= box[3]
+            ]
+            if inside:
+                best_idx = min(inside, key=lambda it: it[1])[0]
+                panels_grouped[best_idx].append(item)
+            else:
                 unassigned.append(item)
         else:
             unassigned.append(item)
@@ -120,13 +122,13 @@ def assign_regions_to_panels(
     return panels_grouped, unassigned
 
 
-def _format_region_dict(item: dict[str, Any], include_draft: bool = False) -> dict[str, Any]:
+def _format_region_dict(item: dict[str, Any], include_translation: bool = False) -> dict[str, Any]:
     formatted: dict[str, Any] = {
         "id": str(item.get("id", "")),
         "japanese": str(item.get("source") or item.get("japanese") or item.get("text", "")),
     }
-    if include_draft and "draft" in item:
-        formatted["draft"] = str(item["draft"])
+    if include_translation and "final" in item:
+        formatted["translation"] = str(item["final"])
     return formatted
 
 
@@ -134,7 +136,7 @@ def build_page_panel_structure(
     page_number: int,
     regions: list[dict[str, Any]],
     panels: list[Any] | None = None,
-    include_draft: bool = False,
+    include_translation: bool = False,
 ) -> dict[str, Any]:
     """Construct structured page payload.
 
@@ -145,7 +147,7 @@ def build_page_panel_structure(
         return {
             "page": page_number,
             "regions": [
-                _format_region_dict(r, include_draft) for r in regions
+                _format_region_dict(r, include_translation) for r in regions
             ],
         }
 
@@ -164,7 +166,7 @@ def build_page_panel_structure(
                 "panel_id": panel_id,
                 "panel_order": order,
                 "regions": [
-                    _format_region_dict(r, include_draft)
+                    _format_region_dict(r, include_translation)
                     for r in p_regions
                 ],
             })
@@ -173,7 +175,7 @@ def build_page_panel_structure(
         return {
             "page": page_number,
             "regions": [
-                _format_region_dict(r, include_draft)
+                _format_region_dict(r, include_translation)
                 for r in unassigned
             ],
         }
@@ -184,7 +186,7 @@ def build_page_panel_structure(
     }
     if unassigned:
         page_dict["unassigned_regions"] = [
-            _format_region_dict(r, include_draft)
+            _format_region_dict(r, include_translation)
             for r in unassigned
         ]
     return page_dict

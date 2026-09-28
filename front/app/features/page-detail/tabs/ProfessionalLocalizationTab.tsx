@@ -15,7 +15,7 @@ export const ProfessionalLocalizationTab: React.FC<ProfessionalLocalizationTabPr
                                   <Icon icon="carbon:translate" className="h-4 w-4 text-amber-300" />
                                   Professional localization
                                 </h3>
-                                <span className="text-[10px] text-amber-200/80">Source · Draft · Final</span>
+                                <span className="text-[10px] text-amber-200/80">Source · Translation</span>
                               </div>
                               <div className="space-y-2 pr-1">
                                 {professionalAudit.regions.map((region, index) => {
@@ -30,11 +30,7 @@ export const ProfessionalLocalizationTab: React.FC<ProfessionalLocalizationTabPr
                                           <dd className="whitespace-pre-wrap text-zinc-300">{region.source || "—"}</dd>
                                         </div>
                                         <div>
-                                          <dt className="text-amber-300/80">First draft</dt>
-                                          <dd className="whitespace-pre-wrap text-amber-100">{region.draft || "—"}</dd>
-                                        </div>
-                                        <div>
-                                          <dt className="text-emerald-300/80">Editor pass</dt>
+                                          <dt className="text-emerald-300/80">Final translation</dt>
                                           <dd className="whitespace-pre-wrap text-emerald-100">{region.final || "—"}</dd>
                                         </div>
                                       </dl>

@@ -26,7 +26,7 @@ from manga_translator.rendering.layout.solver import _shared_bubble_groups
 from manga_translator.utils import Context, TextBlock
 
 
-def _region(text="THIS MEAT IS DELICIOUS!", translation=None, region_id="region-a"):
+def _region(text="THIS MEAT IS TASTY!", translation=None, region_id="region-a"):
     return TextBlock(
         lines=np.array([[[90, 105], [230, 105], [230, 150], [90, 150]]], dtype=np.int32),
         texts=[text],

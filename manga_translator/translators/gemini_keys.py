@@ -1,16 +1,12 @@
 import asyncio
-import json
 import logging
-import re
-import threading
 import time
 from contextvars import ContextVar
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from manga_translator.key_pool import KeyInfo, KeyModelPool, ModelInfo, mask_key, parse_pool_values
 
 logger = logging.getLogger("gemini_keys")
-
-T = TypeVar("T")
-
 
 class GeminiRetryExhausted(RuntimeError):
     """A Gemini page reached a terminal retry-policy failure."""
@@ -66,180 +62,20 @@ def get_current_retry_budget() -> GeminiRequestBudget:
     return budget
 
 
-def mask_key(key: str) -> str:
-    """
-    Mask an API key for safe logging (e.g., 'AIzaSy...4x9Z').
-    """
-    if not key:
-        return ""
-    key = str(key).strip()
-    if len(key) <= 8:
-        return key[:2] + "..." + key[-2:] if len(key) > 4 else "***"
-    return f"{key[:6]}...{key[-4:]}"
-
-
 def parse_gemini_keys(val: Any) -> List[str]:
-    """
-    Parses a string, list, or JSON structure containing one or more Gemini API keys.
-    Supports:
-    - List or tuple of strings: ['key1', 'key2']
-    - Delimited string: 'key1, key2', 'key1; key2', 'key1\\nkey2'
-    - JSON list string: '["key1", "key2"]'
-    - Single key string: 'AIzaSy...'
-
-    Returns a deduplicated list of non-empty API keys preserving the original order.
-    """
-    if not val:
-        return []
-
-    raw_candidates: List[str] = []
-
-    if isinstance(val, (list, tuple, set)):
-        for item in val:
-            if isinstance(item, str):
-                raw_candidates.extend(parse_gemini_keys(item))
-            elif item is not None:
-                raw_candidates.append(str(item).strip())
-    elif isinstance(val, str):
-        cleaned = val.strip()
-        if not cleaned:
-            return []
-        # Check if it's a JSON array
-        if cleaned.startswith("[") and cleaned.endswith("]"):
-            try:
-                parsed_json = json.loads(cleaned)
-                if isinstance(parsed_json, list):
-                    return parse_gemini_keys(parsed_json)
-            except Exception:
-                pass
-
-        # Split by comma, semicolon, newline, or whitespace
-        parts = re.split(r"[\r\n,;\s]+", cleaned)
-        for part in parts:
-            part = part.strip().strip("'\"")
-            if part:
-                raw_candidates.append(part)
-    else:
-        raw_candidates.append(str(val).strip())
-
-    # Deduplicate while preserving order
-    seen = set()
-    result = []
-    for k in raw_candidates:
-        k = k.strip().strip("'\"")
-        if k and k not in seen:
-            seen.add(k)
-            result.append(k)
-
-    return result
+    return parse_pool_values(val)
 
 
 def parse_gemini_models(val: Any) -> List[str]:
-    """
-    Parses a string, list, or JSON structure containing one or more Gemini model names.
-    Supports:
-    - Space-separated string: 'gemini-3.5-flash-lite gemini-3.1-flash-lite'
-    - Delimited string: 'gemini-1.5-flash-002, gemini-3.5-flash-lite', '...; ...'
-    - List or tuple of strings: ['gemini-1.5-flash-002', 'gemini-3.5-flash-lite']
-    - JSON list string: '["gemini-1.5-flash-002", "gemini-3.5-flash-lite"]'
-    - Normalizes by stripping 'models/' prefix and quotes/whitespace.
-
-    Returns a deduplicated list of non-empty model names preserving the original order.
-    """
-    if not val:
-        return []
-
-    raw_candidates: List[str] = []
-
-    if isinstance(val, (list, tuple, set)):
-        for item in val:
-            if isinstance(item, str):
-                raw_candidates.extend(parse_gemini_models(item))
-            elif item is not None:
-                raw_candidates.append(str(item).strip())
-    elif isinstance(val, str):
-        cleaned = val.strip()
-        if not cleaned:
-            return []
-        if cleaned.startswith("[") and cleaned.endswith("]"):
-            try:
-                parsed_json = json.loads(cleaned)
-                if isinstance(parsed_json, list):
-                    return parse_gemini_models(parsed_json)
-            except Exception:
-                pass
-
-        # Split by comma, semicolon, newline, or whitespace
-        parts = re.split(r"[\r\n,;\s]+", cleaned)
-        for part in parts:
-            part = part.strip().strip("'\"")
-            if part:
-                raw_candidates.append(part)
-    else:
-        raw_candidates.append(str(val).strip())
-
-    seen = set()
-    result = []
-    for m in raw_candidates:
-        m = m.strip().strip("'\"")
-        if m.startswith("models/"):
-            m = m[len("models/"):]
-        if m and m not in seen:
-            seen.add(m)
-            result.append(m)
-
-    return result
+    return parse_pool_values(val, strip_prefix="models/")
 
 
-class GeminiKeyInfo:
-    """Tracks state and metrics for a single API key."""
-
-    def __init__(self, key: str):
-        self.key: str = key
-        self.masked: str = mask_key(key)
-        self.is_valid: bool = True
-        self.cooldown_until: float = 0.0
-        self.fail_count: int = 0
-        self.success_count: int = 0
-        self.last_used: float = 0.0
-        self.last_error: str = ""
-
-    def is_cooling_down(self) -> bool:
-        return self.is_valid and time.time() < self.cooldown_until
-
-    def is_available(self) -> bool:
-        return self.is_valid and time.time() >= self.cooldown_until
-
-    def remaining_cooldown(self) -> float:
-        return max(0.0, self.cooldown_until - time.time())
-
-    def __repr__(self) -> str:
-        return f"<GeminiKeyInfo {self.masked} valid={self.is_valid} cooldown={self.remaining_cooldown():.1f}s>"
+class GeminiKeyInfo(KeyInfo):
+    pass
 
 
-class GeminiModelInfo:
-    """Tracks state and metrics for a single model name."""
-
-    def __init__(self, model: str):
-        self.model: str = model.strip()
-        self.is_valid: bool = True
-        self.cooldown_until: float = 0.0
-        self.fail_count: int = 0
-        self.success_count: int = 0
-        self.last_used: float = 0.0
-        self.last_error: str = ""
-
-    def is_cooling_down(self) -> bool:
-        return self.is_valid and time.time() < self.cooldown_until
-
-    def is_available(self) -> bool:
-        return self.is_valid and time.time() >= self.cooldown_until
-
-    def remaining_cooldown(self) -> float:
-        return max(0.0, self.cooldown_until - time.time())
-
-    def __repr__(self) -> str:
-        return f"<GeminiModelInfo {self.model} valid={self.is_valid} cooldown={self.remaining_cooldown():.1f}s>"
+class GeminiModelInfo(ModelInfo):
+    pass
 
 
 DEFAULT_GEMINI_MODELS = [
@@ -247,11 +83,16 @@ DEFAULT_GEMINI_MODELS = [
 ]
 
 
-class GeminiKeyManager:
-    """
-    Manages a pool of Gemini API keys and models with round-robin rotation,
-    rate-limit failover across keys and models, client caching, and per-target context caching.
-    """
+class GeminiKeyManager(KeyModelPool):
+    """Manages Gemini pools, API clients, and per-target context caches."""
+
+    provider_name = "Gemini"
+    pool_logger = logger
+    key_info_type = GeminiKeyInfo
+    model_info_type = GeminiModelInfo
+    key_parser = staticmethod(parse_gemini_keys)
+    model_parser = staticmethod(parse_gemini_models)
+    default_models = DEFAULT_GEMINI_MODELS
 
     def __init__(
         self,
@@ -260,256 +101,11 @@ class GeminiKeyManager:
         logger_instance: Optional[logging.Logger] = None,
         default_cooldown: float = 60.0,
     ):
-        self.logger = logger_instance or logger
-        self.default_cooldown = default_cooldown
-        self._lock = threading.Lock()
-
-        # Key pool
-        self._key_infos: List[GeminiKeyInfo] = []
-        self._key_map: Dict[str, GeminiKeyInfo] = {}
-        self._current_key_index: int = -1
-        self._current_index: int = -1  # Backward compatibility alias
-
-        # Model pool
-        self._model_infos: List[GeminiModelInfo] = []
-        self._model_map: Dict[str, GeminiModelInfo] = {}
-        self._current_model_index: int = -1
-        self._current_target_index: int = -1
-
-        # Specific (key, model) pair cooldowns: (key, model) -> cooldown_until float
-        self._pair_cooldowns: Dict[Tuple[str, str], float] = {}
-
-        # Client pools
+        self._current_index = -1  # Backward compatibility alias
         self._genai_clients: Dict[str, Any] = {}
         self._openai_clients: Dict[Tuple[str, str], Any] = {}
-
-        # Context cache storage per (key, model) or key: (key, model) -> CachedContent
         self._cached_contents: Dict[Any, Any] = {}
-
-        if keys:
-            self.add_keys(keys)
-        if models:
-            self.add_models(models)
-        elif not self._model_infos:
-            self.add_models(DEFAULT_GEMINI_MODELS)
-
-    def add_keys(self, keys: Any) -> int:
-        """Add new keys to the manager. Returns count of newly added keys."""
-        parsed = parse_gemini_keys(keys)
-        added = 0
-        with self._lock:
-            for k in parsed:
-                if k not in self._key_map:
-                    info = GeminiKeyInfo(k)
-                    self._key_infos.append(info)
-                    self._key_map[k] = info
-                    added += 1
-        if added > 0:
-            self.logger.debug(f"Added {added} Gemini API key(s) to pool. Total keys: {len(self._key_infos)}")
-        return added
-
-    def add_models(self, models: Any) -> int:
-        """Add new models to the manager. Returns count of newly added models."""
-        parsed = parse_gemini_models(models)
-        added = 0
-        with self._lock:
-            for m in parsed:
-                if m not in self._model_map:
-                    info = GeminiModelInfo(m)
-                    self._model_infos.append(info)
-                    self._model_map[m] = info
-                    added += 1
-        if added > 0:
-            self.logger.debug(f"Added {added} Gemini model(s) to pool. Total models: {len(self._model_infos)}")
-        return added
-
-    @property
-    def total_keys(self) -> int:
-        with self._lock:
-            return len(self._key_infos)
-
-    @property
-    def valid_keys_count(self) -> int:
-        with self._lock:
-            return sum(1 for k in self._key_infos if k.is_valid)
-
-    @property
-    def available_keys_count(self) -> int:
-        with self._lock:
-            return sum(1 for k in self._key_infos if k.is_available())
-
-    @property
-    def total_models(self) -> int:
-        with self._lock:
-            return len(self._model_infos)
-
-    @property
-    def valid_models_count(self) -> int:
-        with self._lock:
-            return sum(1 for m in self._model_infos if m.is_valid)
-
-    @property
-    def available_models_count(self) -> int:
-        with self._lock:
-            return sum(1 for m in self._model_infos if m.is_available())
-
-    @property
-    def valid_targets_count(self) -> int:
-        with self._lock:
-            v_keys = sum(1 for k in self._key_infos if k.is_valid)
-            v_models = sum(1 for m in self._model_infos if m.is_valid)
-            return max(v_keys, 1) * max(v_models, 1)
-
-    def get_all_keys(self) -> List[str]:
-        with self._lock:
-            return [info.key for info in self._key_infos]
-
-    def get_all_models(self) -> List[str]:
-        with self._lock:
-            return [info.model for info in self._model_infos]
-
-    @property
-    def current_model(self) -> Optional[str]:
-        with self._lock:
-            if 0 <= self._current_model_index < len(self._model_infos):
-                return self._model_infos[self._current_model_index].model
-            valid = [m.model for m in self._model_infos if m.is_valid]
-            return valid[0] if valid else None
-
-    def get_next_key(self, allow_cooldown: bool = False) -> Optional[str]:
-        """
-        Get the next key using round-robin rotation among available (non-cooling) keys.
-        If all valid keys are cooling down and allow_cooldown=True, returns the key
-        with the shortest remaining cooldown.
-        """
-        with self._lock:
-            if not self._key_infos:
-                return None
-
-            valid_keys = [k for k in self._key_infos if k.is_valid]
-            if not valid_keys:
-                return None
-
-            # First priority: find available (not cooling down)
-            n = len(self._key_infos)
-            for i in range(1, n + 1):
-                idx = (self._current_key_index + i) % n
-                candidate = self._key_infos[idx]
-                if candidate.is_available():
-                    self._current_key_index = idx
-                    self._current_index = idx
-                    candidate.last_used = time.time()
-                    return candidate.key
-
-            # If no key is completely available right now:
-            if allow_cooldown:
-                best = min(valid_keys, key=lambda k: k.cooldown_until)
-                self._current_key_index = self._key_infos.index(best)
-                self._current_index = self._current_key_index
-                best.last_used = time.time()
-                return best.key
-
-            return None
-
-    def get_next_model(self, allow_cooldown: bool = False) -> Optional[str]:
-        """
-        Get the next model using round-robin rotation among available (non-cooling) models.
-        """
-        with self._lock:
-            if not self._model_infos:
-                return None
-
-            valid_models = [m for m in self._model_infos if m.is_valid]
-            if not valid_models:
-                return None
-
-            n = len(self._model_infos)
-            for i in range(1, n + 1):
-                idx = (self._current_model_index + i) % n
-                candidate = self._model_infos[idx]
-                if candidate.is_available():
-                    self._current_model_index = idx
-                    candidate.last_used = time.time()
-                    return candidate.model
-
-            if allow_cooldown:
-                best = min(valid_models, key=lambda m: m.cooldown_until)
-                self._current_model_index = self._model_infos.index(best)
-                best.last_used = time.time()
-                return best.model
-
-            return None
-
-    def get_next_target(self, allow_cooldown: bool = False) -> Tuple[Optional[str], Optional[str]]:
-        """
-        Get the next (key, model) target using round-robin rotation among available
-        key/model pairs.
-        If all pairs are in cooldown and allow_cooldown=True, returns the pair
-        with the shortest remaining cooldown.
-        """
-        with self._lock:
-            valid_keys = [k for k in self._key_infos if k.is_valid]
-            valid_models = [m for m in self._model_infos if m.is_valid]
-            if not valid_keys or not valid_models:
-                return None, None
-
-            # Construct interleaved pair candidates
-            num_keys = len(valid_keys)
-            num_models = len(valid_models)
-            total = max(num_keys, num_models) * 2
-
-            ordered_pairs: List[Tuple[GeminiKeyInfo, GeminiModelInfo]] = []
-            seen_pairs = set()
-
-            # First interleave (key_i, model_i)
-            for i in range(num_keys * num_models):
-                k = valid_keys[i % num_keys]
-                m = valid_models[i % num_models]
-                pair_tuple = (k.key, m.model)
-                if pair_tuple not in seen_pairs:
-                    seen_pairs.add(pair_tuple)
-                    ordered_pairs.append((k, m))
-
-            # Ensure all Cartesian products are present
-            for k in valid_keys:
-                for m in valid_models:
-                    pair_tuple = (k.key, m.model)
-                    if pair_tuple not in seen_pairs:
-                        seen_pairs.add(pair_tuple)
-                        ordered_pairs.append((k, m))
-
-            n = len(ordered_pairs)
-            now = time.time()
-            for i in range(1, n + 1):
-                idx = (self._current_target_index + i) % n
-                cand_k, cand_m = ordered_pairs[idx]
-                pair_cd = self._pair_cooldowns.get((cand_k.key, cand_m.model), 0.0)
-                if cand_k.is_available() and cand_m.is_available() and pair_cd <= now:
-                    self._current_target_index = idx
-                    self._current_key_index = self._key_infos.index(cand_k)
-                    self._current_index = self._current_key_index
-                    self._current_model_index = self._model_infos.index(cand_m)
-                    cand_k.last_used = now
-                    cand_m.last_used = now
-                    return cand_k.key, cand_m.model
-
-            if allow_cooldown:
-                def pair_rem_cd(p):
-                    k, m = p
-                    k_cd = max(0.0, k.cooldown_until - now)
-                    m_cd = max(0.0, m.cooldown_until - now)
-                    p_cd = max(0.0, self._pair_cooldowns.get((k.key, m.model), 0.0) - now)
-                    return max(k_cd, m_cd, p_cd)
-
-                best_k, best_m = min(ordered_pairs, key=pair_rem_cd)
-                self._current_key_index = self._key_infos.index(best_k)
-                self._current_index = self._current_key_index
-                self._current_model_index = self._model_infos.index(best_m)
-                best_k.last_used = now
-                best_m.last_used = now
-                return best_k.key, best_m.model
-
-            return None, None
+        super().__init__(keys, models, logger_instance, default_cooldown)
 
     def get_target_cooldown(self, key: str, model: str) -> float:
         """Get remaining cooldown seconds for a (key, model) target."""
@@ -595,53 +191,6 @@ class GeminiKeyManager:
                     f"Gemini API key [{mask_key(key)}] hit rate limit or quota exceeded. "
                     f"Cooling down for {cooldown:.0f}s. Remaining active keys: {avail}/{len(self._key_infos)}"
                 )
-
-    def mark_invalid(self, key: str, reason: str = "") -> None:
-        """
-        Permanently mark a key as invalid for this session (e.g. 400 API_KEY_INVALID, 403 Forbidden).
-        """
-        with self._lock:
-            info = self._key_map.get(key)
-            if info:
-                info.is_valid = False
-                info.last_error = reason or "Invalid API Key"
-                avail = sum(1 for k in self._key_infos if k.is_available())
-                self.logger.error(
-                    f"Gemini API key [{info.masked}] is invalid ({reason or 'unauthorized'}). "
-                    f"Disabling key. Remaining valid keys: {avail}/{len(self._key_infos)}"
-                )
-
-    def mark_model_invalid(self, model: str, reason: str = "") -> None:
-        """
-        Permanently mark a model as invalid for this session (e.g. 404 NOT_FOUND, unsupported model).
-        """
-        with self._lock:
-            info = self._model_map.get(model)
-            if info:
-                info.is_valid = False
-                info.last_error = reason or "Model not found / unsupported"
-                avail = sum(1 for m in self._model_infos if m.is_valid)
-                self.logger.warning(
-                    f"Gemini model [{model}] is invalid or not available ({reason or 'not found'}). "
-                    f"Disabling model for session. Remaining valid models: {avail}/{len(self._model_infos)}"
-                )
-
-    def mark_success(self, key: str, model: Optional[str] = None) -> None:
-        """Record successful request for a key and optional model."""
-        with self._lock:
-            info_key = self._key_map.get(key)
-            if info_key:
-                info_key.success_count += 1
-                info_key.fail_count = 0
-                info_key.cooldown_until = 0.0
-
-            if model:
-                info_model = self._model_map.get(model)
-                if info_model:
-                    info_model.success_count += 1
-                    info_model.fail_count = 0
-                    info_model.cooldown_until = 0.0
-                self._pair_cooldowns[(key, model)] = 0.0
 
     def get_genai_client(self, key: Optional[str] = None) -> Any:
         """

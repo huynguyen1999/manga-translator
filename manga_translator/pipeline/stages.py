@@ -196,7 +196,7 @@ def _stage(stage: str | PipelineStage) -> PipelineStage:
 def stage_from_progress(state: str) -> PipelineStage | None:
     """Map existing translator progress messages to the canonical stage IDs."""
     value = str(state).lower()
-    if value.startswith(("drafting:", "editing:")):
+    if value.startswith(("drafting:", "editing:", "translating:")):
         return PipelineStage.TRANSLATION
     return _PROGRESS_STAGE.get(value)
 

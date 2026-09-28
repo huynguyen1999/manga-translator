@@ -136,7 +136,11 @@ export const EditorCanvasStage: React.FC<EditorCanvasStageProps> = ({
                   }
                   className={`absolute cursor-move transition-shadow ${
                     isSelected
-                      ? "ring-2 ring-indigo-500 ring-offset-2 ring-offset-zinc-950 bg-indigo-500/10 z-20"
+                      ? block.review_required
+                        ? "ring-2 ring-yellow-400 ring-offset-2 ring-offset-zinc-950 bg-yellow-400/10 z-20"
+                        : "ring-2 ring-indigo-500 ring-offset-2 ring-offset-zinc-950 bg-indigo-500/10 z-20"
+                      : block.review_required
+                      ? "border border-yellow-400/80 hover:ring-1 hover:ring-yellow-300 hover:bg-yellow-400/10 z-10"
                       : "hover:ring-1 hover:ring-indigo-400/50 hover:bg-indigo-500/5 z-10"
                   }`}
                   style={{
@@ -158,7 +162,7 @@ export const EditorCanvasStage: React.FC<EditorCanvasStageProps> = ({
                   )}
                   {block.review_required &&
                     (segmentIndex === undefined || segmentIndex === 0) && (
-                      <span className="absolute -top-6 left-0 whitespace-nowrap rounded bg-amber-950 px-2 py-1 text-xs text-amber-100">
+                      <span className="absolute -top-6 left-0 whitespace-nowrap rounded bg-yellow-950 border border-yellow-600/50 px-2 py-0.5 text-xs font-semibold text-yellow-200 shadow-xs">
                         Needs editing
                       </span>
                     )}
@@ -234,54 +238,22 @@ export const EditorCanvasStage: React.FC<EditorCanvasStageProps> = ({
                   {isSelected && (
                     <>
                       {/* 8 Resize Points */}
-                      <div
-                        onPointerDown={(e) =>
-                          handlePointerDown(e, block, "nw", segmentIndex)
-                        }
-                        className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-nwse-resize z-30"
-                      />
-                      <div
-                        onPointerDown={(e) =>
-                          handlePointerDown(e, block, "n", segmentIndex)
-                        }
-                        className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-ns-resize z-30"
-                      />
-                      <div
-                        onPointerDown={(e) =>
-                          handlePointerDown(e, block, "ne", segmentIndex)
-                        }
-                        className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-nesw-resize z-30"
-                      />
-                      <div
-                        onPointerDown={(e) =>
-                          handlePointerDown(e, block, "e", segmentIndex)
-                        }
-                        className="absolute top-1/2 -right-1.5 -translate-y-1/2 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-ew-resize z-30"
-                      />
-                      <div
-                        onPointerDown={(e) =>
-                          handlePointerDown(e, block, "se", segmentIndex)
-                        }
-                        className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-nwse-resize z-30"
-                      />
-                      <div
-                        onPointerDown={(e) =>
-                          handlePointerDown(e, block, "s", segmentIndex)
-                        }
-                        className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-ns-resize z-30"
-                      />
-                      <div
-                        onPointerDown={(e) =>
-                          handlePointerDown(e, block, "sw", segmentIndex)
-                        }
-                        className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-nesw-resize z-30"
-                      />
-                      <div
-                        onPointerDown={(e) =>
-                          handlePointerDown(e, block, "w", segmentIndex)
-                        }
-                        className="absolute top-1/2 -left-1.5 -translate-y-1/2 w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs cursor-ew-resize z-30"
-                      />
+                      {([
+                        ["nw", "-top-1.5 -left-1.5 cursor-nwse-resize"],
+                        ["n", "-top-1.5 left-1/2 -translate-x-1/2 cursor-ns-resize"],
+                        ["ne", "-top-1.5 -right-1.5 cursor-nesw-resize"],
+                        ["e", "top-1/2 -right-1.5 -translate-y-1/2 cursor-ew-resize"],
+                        ["se", "-bottom-1.5 -right-1.5 cursor-nwse-resize"],
+                        ["s", "-bottom-1.5 left-1/2 -translate-x-1/2 cursor-ns-resize"],
+                        ["sw", "-bottom-1.5 -left-1.5 cursor-nesw-resize"],
+                        ["w", "top-1/2 -left-1.5 -translate-y-1/2 cursor-ew-resize"],
+                      ] as const).map(([dir, classes]) => (
+                        <div
+                          key={dir}
+                          onPointerDown={(e) => handlePointerDown(e, block, dir, segmentIndex)}
+                          className={`absolute w-3 h-3 bg-white border-2 border-indigo-600 rounded-xs z-30 ${classes}`}
+                        />
+                      ))}
 
                       {/* Quick Delete Bubble Icon */}
                       <button

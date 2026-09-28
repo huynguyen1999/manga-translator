@@ -397,9 +397,70 @@ const originalImage: FinishedImage = {
 const originalMarkup = renderHeader(originalImage, () => {});
 assert.doesNotMatch(originalMarkup, /Edit \/ Typeset/);
 
-// Completed translated image without onEdit -> No edit button
-const noEditCallbackMarkup = renderHeader(completedTranslatedImage, undefined);
-assert.doesNotMatch(noEditCallbackMarkup, /Edit \/ Typeset/);
+// Completed translated image with onRerender -> Rerun button rendered as "Rerun pipeline"
+const defaultRerenderMarkup = renderToStaticMarkup(
+  React.createElement(MemoryRouter, null,
+    React.createElement(PageDetailHeader, {
+      ...baseHeaderProps,
+      image: completedTranslatedImage,
+      isOriginal: false,
+      onRerender: async () => {},
+      rerenderStatus: null,
+      isRerendering: false,
+    }),
+  ),
+);
+assert.match(defaultRerenderMarkup, />Rerun pipeline<\/span>/);
+assert.doesNotMatch(defaultRerenderMarkup, />Rerun queued<\/span>/);
+
+// Completed translated image with onRetry -> Retry button rendered as "Retry pipeline"
+const defaultRetryMarkup = renderToStaticMarkup(
+  React.createElement(MemoryRouter, null,
+    React.createElement(PageDetailHeader, {
+      ...baseHeaderProps,
+      image: completedTranslatedImage,
+      isOriginal: false,
+      onRetry: async () => {},
+      retryStatus: null,
+      isRetrying: false,
+    }),
+  ),
+);
+assert.match(defaultRetryMarkup, />Retry pipeline<\/span>/);
+assert.doesNotMatch(defaultRetryMarkup, />Retry queued<\/span>/);
+assert.doesNotMatch(defaultRetryMarkup, />Retry failed<\/span>/);
+
+// When retryStatus is "queued" -> shows "Retry queued"
+const queuedRetryMarkup = renderToStaticMarkup(
+  React.createElement(MemoryRouter, null,
+    React.createElement(PageDetailHeader, {
+      ...baseHeaderProps,
+      image: completedTranslatedImage,
+      isOriginal: false,
+      onRetry: async () => {},
+      retryStatus: "queued",
+      isRetrying: false,
+    }),
+  ),
+);
+assert.match(queuedRetryMarkup, />Retry queued<\/span>/);
+assert.doesNotMatch(queuedRetryMarkup, />Retry pipeline<\/span>/);
+
+// When retryStatus is "error" -> shows "Retry failed"
+const errorRetryMarkup = renderToStaticMarkup(
+  React.createElement(MemoryRouter, null,
+    React.createElement(PageDetailHeader, {
+      ...baseHeaderProps,
+      image: completedTranslatedImage,
+      isOriginal: false,
+      onRetry: async () => {},
+      retryStatus: "error",
+      isRetrying: false,
+    }),
+  ),
+);
+assert.match(errorRetryMarkup, />Retry failed<\/span>/);
 
 console.log("PageDetailModal unit tests passed successfully!");
+
 
