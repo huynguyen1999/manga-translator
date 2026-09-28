@@ -1427,3 +1427,7 @@ Record new features and large changes here. Keep implementation detail in code, 
 ## 2026-09-28 — Reduce repeated free-text layout preparation
 
 - Reused source ownership maps for damage assignment, limited scope dilation to its padded source region, and shared ink measurements between scoring and candidate diagnostics. The measured maps and masks preserve their existing ownership and placement semantics.
+
+## 2026-09-29 — Show speech-bubble boxes in Page Detail by default
+
+- Translated results now open with the Bubbles overlay enabled, including when navigating between pages. Original-only pages keep it disabled so detected-text overlays remain opt-in.

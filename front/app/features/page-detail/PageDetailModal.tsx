@@ -73,7 +73,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
 }) => {
   const [zoomLevel, setZoomLevel] = useState(1);
   const [viewMode, setViewMode] = useState<PageDetailViewMode>("translated");
-  const [showBubbleBoxes, setShowBubbleBoxes] = useState(false);
+  const [showBubbleBoxes, setShowBubbleBoxes] = useState(image.sourceType !== "original");
   const [showOriginalRegions, setShowOriginalRegions] = useState(false);
   const [isHoldingOriginal, setIsHoldingOriginal] = useState(false);
   const [copyLinkStatus, setCopyLinkStatus] = useState<"copied" | "error" | null>(null);
@@ -128,7 +128,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   useEffect(() => {
     setZoomLevel(1);
     setViewMode(image.sourceType === "original" ? "original" : "translated");
-    setShowBubbleBoxes(false);
+    setShowBubbleBoxes(image.sourceType !== "original");
     setShowOriginalRegions(false);
     setIsHoldingOriginal(false);
     setBubbleCount(null);

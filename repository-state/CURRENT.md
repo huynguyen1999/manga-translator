@@ -328,6 +328,7 @@ Manga Image Translator translates text in manga and other images through a pipel
 - Dropping or uploading loose image files loads them directly into the studio cards list without intermediate staging, while multi-archive drops retain volume arrangement before extraction. Manga detail gallery supports smooth proximity-accelerated vertical auto-scrolling when dragging pages near viewport edges during page reordering. Selecting multiple pages or multiple manga cards supports batch deletion with confirmation prompts and atomic cache and state invalidation.
 - Translated text lettering case can be configured to original (mixed case), ALL CAPS (uppercase), or lowercase across CLI arguments (`--uppercase`, `--lowercase`, `--letter-case`) and server batches/Web Studio options; English typesetting segmenters preserve original case without hardcoded upper-casing.
 - Page Detail region overlays reveal IDs on selection, provide copy-ID controls for translated text, original detector, and speech-bubble regions, reuse loaded speech-bubble detections across view toggles, and only offer image retry after a failed load.
+- Page Detail opens translated results with speech-bubble boxes visible by default; original-only pages keep the overlay off.
 
 ## Project references
 
