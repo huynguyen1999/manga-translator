@@ -523,7 +523,7 @@ class OcrConfig(BaseModel):
 class BubbleDetectionConfig(BaseModel):
     enabled: bool = True
     """Use the optional speech-bubble segmenter."""
-    model: str = "yolov8m"
+    model: str = "shadowb_manga109"
     confidence: float = 0.25
     mask_threshold: float = 0.5
     image_size: int = 512

@@ -5,6 +5,7 @@ Last reviewed: 2026-09-28
 The behavior-preserving contract for OCR text-line merge, nested/adjacent free-text coalescing, layout ownership, hard placement constraints, and final raster validation is recorded in `repository-state/LAYOUT_AND_TEXT_MERGE_RULES.md`. Changes to those rules must update the contract and characterization tests together.
 
 ## Active architecture migration — behavior-preserving extraction
+- Multi-class neural segmentation for speech bubbles and manga panels lives in `manga_translator/detection/panel.py` and `manga_translator/detection/bubble.py`, supporting simultaneous frame and balloon instance segmentation (`ShadowB/Manga109-panel-balloon-text-yolov26-segmentation`) with reading-order sorting, `panel_detections.json` serialization, layout panel constraints, and interactive cyan overlay rendering in `front/app/components/PreviewOverlay.tsx` / `PreviewImage.tsx`.
 - The standalone MangaStudio window now composes settings, translator-settings, queue, visual-test, pipeline, theme, and API mixins from `MangaStudio_Data/app/ui/main_window_*`; `TranslatorStudioApp` retains its original entry point and signals.
 - DDPM model implementations are split between `ddpm_core.py` and `ddpm_variants.py`; `ddpm.py` re-exports the original class paths and module names.
 - DPM-Solver noise schedules, model wrapping, and tensor helpers live in `dpm_solver_utils.py`; the original `dpm_solver` module re-exports them.

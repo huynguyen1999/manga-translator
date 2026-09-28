@@ -2,6 +2,13 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-28 — Render integrity check failed on hyphenated words
+
+- Symptom: Running pipeline render validation with `--solver-report` failed with `Non-bubble render integrity failed: final draw text differs from layout input text` on words broken across lines.
+- Root cause: Text layout solver inserted line-break hyphens in `_draw_operations` (e.g. `superi-` / `ority.`), which caused whitespace-stripped string comparison against `_layout_input_text` (`superiority.`) to mismatch.
+- Fix: Reconstruct draw operations text by checking if trailing hyphens were inserted during line wrapping vs natural word hyphens before validating text equality against layout input text.
+- Prevention: Account for wrap-inserted hyphens when validating multi-line draw operations against input layout strings.
+
 ## 2026-09-28 — PostgreSQL manga search did not reliably match split query words
 
 - Symptom: Gallery manga search could return no result for words present in a title when the query used independent terms.

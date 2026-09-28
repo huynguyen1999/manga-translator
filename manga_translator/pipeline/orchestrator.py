@@ -13,6 +13,7 @@ from ..colorization import is_image_colored, prepare as prepare_colorization
 from ..config import Colorizer, Config
 from ..detection import prepare as prepare_detection
 from ..detection.bubble import serialize_bubble_detections
+from ..detection.panel import serialize_panel_detections
 from ..geometry.bubbles import prepare_page_geometry
 from ..ocr import prepare as prepare_ocr
 from ..pipeline.run import serialize_regions
@@ -225,37 +226,29 @@ async def translate_until_translation(
     if prepare_canvas and ctx.text_regions:
         merged = serialize_regions(ctx.text_regions)
         ctx.result_documents['text_regions_merged.json'] = merged
-        bubble_documents = serialize_bubble_detections(
-            getattr(ctx, 'bubble_detections', None) or []
-        )
+        bubble_documents = serialize_bubble_detections(getattr(ctx, 'bubble_detections', None) or [])
+        panel_documents = serialize_panel_detections(getattr(ctx, 'panel_detections', None) or [], ctx.img_rgb.shape[:2] if ctx.img_rgb is not None else None)
         ctx.result_documents['bubble_detections.json'] = bubble_documents
+        ctx.result_documents['panel_detections.json'] = panel_documents
         if translator._current_image_context:
-            await translator._async_imwrite(
-                translator._result_path('original_canvas.png'),
-                cv2.cvtColor(ctx.img_rgb, cv2.COLOR_RGB2BGR),
-            )
+            await translator._async_imwrite(translator._result_path('original_canvas.png'), cv2.cvtColor(ctx.img_rgb, cv2.COLOR_RGB2BGR))
             if ctx.bubble_mask is not None:
                 await translator._async_imwrite(translator._result_path('bubble_mask.png'), ctx.bubble_mask)
             if getattr(ctx, 'bubble_detections', None):
-                bd_path = translator._result_path('bubble_detections.json')
-                with open(bd_path, 'w', encoding='utf-8') as f:
-                    json.dump(serialize_bubble_detections(ctx.bubble_detections), f, indent=2)
+                with open(translator._result_path('bubble_detections.json'), 'w', encoding='utf-8') as f:
+                    json.dump(bubble_documents, f, indent=2)
+            if getattr(ctx, 'panel_detections', None):
+                with open(translator._result_path('panel_detections.json'), 'w', encoding='utf-8') as f:
+                    json.dump(panel_documents, f, indent=2)
         ctx.mask = None
         ctx.inpaint_mask = None
-        saved_docs = {
-            'text_regions_merged.json': merged,
-            'bubble_detections.json': bubble_documents,
-        }
+        saved_docs = {'text_regions_merged.json': merged, 'bubble_detections.json': bubble_documents, 'panel_detections.json': panel_documents}
         if translator._pipeline_run is not None:
             for name, document in saved_docs.items():
                 translator._pipeline_run.write_json(name, document)
             await translator._pipeline_run.checkpoint()
         elif translator._current_image_context:
-            await save_documents_fn(
-                translator._current_image_context['subfolder'],
-                saved_docs,
-                translator.result_root,
-            )
+            await save_documents_fn(translator._current_image_context['subfolder'], saved_docs, translator.result_root)
         await translator._report_progress('awaiting_translation')
 
     # 保存当前图片上下文到ctx中，用于并发翻译时的路径管理

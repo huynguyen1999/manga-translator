@@ -309,12 +309,27 @@ def _validate_render_integrity(ctx: Context, strict: bool = False) -> List[str]:
                         if cov_ratio < 0.90:
                             issues.append(f"{rid}: source geometry not covered by inpaint mask ({cov_ratio:.1%})")
 
-                # Invariant: final draw text == layout input text
+                # Invariant: final draw text == layout input text (accounting for hyphenation line breaks)
                 draw_ops = getattr(region, "_draw_operations", None)
-                if draw_ops:
-                    combined_draw_text = "".join("".join(op.get("text", "").split()) for op in draw_ops)
-                    if layout_text and combined_draw_text != "".join(layout_text.split()):
-                        issues.append(f"{rid}: final draw text differs from layout input text")
+                if draw_ops and layout_text:
+                    layout_clean = "".join(layout_text.split())
+                    exact_joined = "".join("".join(op.get("text", "").split()) for op in draw_ops)
+                    if exact_joined != layout_clean:
+                        # Reconstruct text by checking if trailing hyphens were inserted during line wrapping
+                        reconstructed_lines = [op.get("text", "").strip() for op in draw_ops]
+                        reconstructed = ""
+                        for i, line in enumerate(reconstructed_lines):
+                            if line.endswith("-") and i < len(reconstructed_lines) - 1:
+                                clean_without = (reconstructed + line[:-1]).replace(" ", "")
+                                clean_with = (reconstructed + line).replace(" ", "")
+                                if layout_clean.startswith(clean_without) and not layout_clean.startswith(clean_with):
+                                    reconstructed += line[:-1]
+                                else:
+                                    reconstructed += line
+                            else:
+                                reconstructed += line
+                        if "".join(reconstructed.split()) != layout_clean:
+                            issues.append(f"{rid}: final draw text differs from layout input text")
 
     ctx._layout_integrity_issues = issues
     for region in regions:

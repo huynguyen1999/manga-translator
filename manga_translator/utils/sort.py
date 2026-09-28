@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -8,20 +8,29 @@ from .textblock import TextBlock
 
 
 def sort_regions(
-        regions: List[TextBlock],
-        right_to_left: bool = True,
-        img: np.ndarray = None,
-        force_simple_sort: bool = False
+    regions: List[TextBlock],
+    right_to_left: bool = True,
+    img: np.ndarray = None,
+    force_simple_sort: bool = False,
+    panel_detections: Optional[List[Any]] = None,
 ) -> List[TextBlock]:
     if not regions:
         return []
-
     if force_simple_sort:
         return _simple_sort(regions, right_to_left)
-
+    if panel_detections:
+        panels = [tuple(p.xyxy) for p in panel_detections if getattr(p, "xyxy", None) and len(p.xyxy) == 4]
+        if panels:
+            _assign_regions_to_panels(regions, panels)
+            grouped: dict[int, list[TextBlock]] = {}
+            for r in regions:
+                grouped.setdefault(r.panel_index, []).append(r)
+            sorted_all = []
+            for pi in sorted(grouped.keys()):
+                sorted_all += sort_regions(grouped[pi], right_to_left, img=None, force_simple_sort=False)
+            return sorted_all
     if img is not None:
         return _sort_regions_by_panel(regions, right_to_left, img)
-
     return _sort_regions_by_dispersion(regions, right_to_left)
 
 
@@ -42,26 +51,17 @@ def _assign_regions_to_panels(regions: List[TextBlock], panels: List[Tuple[int, 
                 r.panel_index = min(dists)[1]
 
 
-def _sort_regions_by_panel(
-    regions: List[TextBlock],
-    right_to_left: bool,
-    img: np.ndarray
-) -> List[TextBlock]:
+def _sort_regions_by_panel(regions: List[TextBlock], right_to_left: bool, img: np.ndarray) -> List[TextBlock]:
     try:
         panels_raw = get_panels_from_array(img, rtl=right_to_left)
-        panels = [(x, y, x + w, y + h) for x, y, w, h in panels_raw]
-        panels = _sort_panels_fill(panels, right_to_left)
-
+        panels = _sort_panels_fill([(x, y, x + w, y + h) for x, y, w, h in panels_raw], right_to_left)
         _assign_regions_to_panels(regions, panels)
-
-        grouped = {}
+        grouped: dict[int, list[TextBlock]] = {}
         for r in regions:
             grouped.setdefault(r.panel_index, []).append(r)
-
         sorted_all = []
         for pi in sorted(grouped.keys()):
-            panel_sorted = sort_regions(grouped[pi], right_to_left, img=None, force_simple_sort=False)
-            sorted_all += panel_sorted
+            sorted_all += sort_regions(grouped[pi], right_to_left, img=None, force_simple_sort=False)
         return sorted_all
 
     except (cv2.error, MemoryError, Exception) as e:

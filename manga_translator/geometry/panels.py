@@ -42,32 +42,21 @@ def _source_mask(region: Any, shape: Tuple[int, int]) -> np.ndarray:
 
 def _detect_boundaries(image: np.ndarray, regions: Iterable[Any]) -> List[_Boundary]:
     height, width = image.shape[:2]
-    if image.ndim == 2:
-        gray = image
-    elif image.shape[2] == 1:
-        gray = image[:, :, 0]
-    else:
-        gray = cv2.cvtColor(image[..., :3], cv2.COLOR_RGB2GRAY)
+    gray = image if image.ndim == 2 else (image[:, :, 0] if image.shape[2] == 1 else cv2.cvtColor(image[..., :3], cv2.COLOR_RGB2GRAY))
     otsu, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
-    threshold = int(np.clip(otsu, 65, 105))
-    dark = (gray <= threshold).astype(np.uint8)
-
+    dark = (gray <= int(np.clip(otsu, 65, 105))).astype(np.uint8)
     excluded = np.zeros((height, width), dtype=np.uint8)
     for region in regions:
         excluded |= _source_mask(region, (height, width))
         for name in ("_bubble_mask", "_bubble_interior"):
             bubble = getattr(region, name, None)
-            if bubble is None:
-                continue
-            bubble = np.asarray(bubble)
-            if bubble.shape[:2] != (height, width):
-                bubble = cv2.resize(
-                    bubble.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST
-                )
-            excluded |= (bubble > 0).astype(np.uint8)
+            if bubble is not None:
+                b_arr = np.asarray(bubble)
+                if b_arr.shape[:2] != (height, width):
+                    b_arr = cv2.resize(b_arr.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST)
+                excluded |= (b_arr > 0).astype(np.uint8)
     if np.any(excluded):
-        excluded = cv2.dilate(excluded, np.ones((5, 5), np.uint8))
-        dark[excluded > 0] = 0
+        dark[cv2.dilate(excluded, np.ones((5, 5), np.uint8)) > 0] = 0
 
     boundaries: List[_Boundary] = []
     for axis, dimension, kernel_size in (
@@ -171,28 +160,40 @@ def infer_panel_constraints(
     image: np.ndarray,
     regions: Iterable[Any],
     other_regions: Iterable[Any] | None = None,
+    panel_detections: Iterable[Any] | None = None,
 ) -> Dict[int, PanelConstraint]:
     """Infer one conservative frame envelope per source region, using source geometry only."""
     regions = list(regions or [])
     if image is None or image.ndim < 2:
         return {}
-    excluded_regions = list(other_regions or [])
-    if not excluded_regions:
-        excluded_regions = regions
-    else:
-        excluded_ids = {id(region) for region in excluded_regions}
-        excluded_regions.extend(region for region in regions if id(region) not in excluded_ids)
-    boundaries = _detect_boundaries(image, excluded_regions)
-    shape = image.shape[:2]
-    return {id(region): _constraint_for_region(region, shape, boundaries) for region in regions}
+    shape, res, remaining = image.shape[:2], {}, []
+    for region in regions:
+        if panel_detections:
+            ys, xs = np.nonzero(_source_mask(region, shape))
+            if len(xs):
+                cx, cy = float(xs.mean()), float(ys.mean())
+                m = [p for p in panel_detections if getattr(p, "xyxy", None) and p.xyxy[0] <= cx <= p.xyxy[2] and p.xyxy[1] <= cy <= p.xyxy[3]]
+                if m:
+                    fs = max(1, int(getattr(region, "font_size", 12) or 12))
+                    res[id(region)] = PanelConstraint(f"ml:{getattr(m[0], 'order_index', 0)}", tuple(m[0].xyxy), confidence=float(getattr(m[0], "confidence", 0.9)), source="ml", margin=max(2, min(12, int(round(fs * 0.2)))))
+                    continue
+        remaining.append(region)
+    if remaining:
+        excluded = list(other_regions or [])
+        excluded = regions if not excluded else excluded + [r for r in regions if id(r) not in {id(x) for x in excluded}]
+        boundaries = _detect_boundaries(image, excluded)
+        for r in remaining:
+            res[id(r)] = _constraint_for_region(r, shape, boundaries)
+    return res
 
 
 def infer_panel_constraint(
     image: np.ndarray,
     region: Any,
     other_regions: Iterable[Any] | None = None,
+    panel_detections: Iterable[Any] | None = None,
 ) -> PanelConstraint:
     """Infer a panel envelope for one region without consulting translated geometry."""
-    return infer_panel_constraints(image, [region], other_regions).get(
+    return infer_panel_constraints(image, [region], other_regions, panel_detections=panel_detections).get(
         id(region), PanelConstraint("page", (0, 0, image.shape[1], image.shape[0]))
     )

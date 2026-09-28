@@ -1,11 +1,9 @@
 """Canonical PostgreSQL pipeline-state and artifact repository."""
-
 from __future__ import annotations
 
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
-
 from manga_translator.pipeline.stages import PipelineStage, StageStatus
 from server.postgres_common import _json_dump, _json_load
 
@@ -14,6 +12,7 @@ _PIPELINE_DOCUMENT_TYPES = {
     "detection.json": ("detection", "regions"),
     "ocr.json": ("ocr", "regions"),
     "bubble_detections.json": ("bubble_detection", "detections"),
+    "panel_detections.json": ("bubble_detection", "panels"),
     "text_regions_merged.json": ("text_grouping", "regions"),
     "translations.json": ("translation", "translations"),
     "professional_translation.json": ("translation", "professional_result"),

@@ -2,6 +2,15 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-28 — Multi-class joint speech bubble and panel detection with interactive web visualization
+
+- Integrated multi-class neural segmentation (`ShadowB/Manga109-panel-balloon-text-yolov26-segmentation`) to replace the single-class speech bubble detector, detecting speech bubbles/balloons and manga panels/frames simultaneously in a single model forward pass.
+- Added `PanelDetection` data model and Hugging Face checkpoint resolver in `manga_translator/detection/panel.py` with Ultralytics YOLO26 head/loss shims (`Segment26`, `Proto26`, `E2ELoss`) and RTL reading-order geometric sorting (`sort_panel_detections_reading_order`).
+- Extended `BubbleDetector` in `manga_translator/detection/bubble.py` to support joint inference (`detect_joint`, `dispatch_joint`, `dispatch_batch_joint`), preserving backward-compatible single-class outputs for classic callers.
+- Wired detected panels (`ctx.panel_detections`) through pipeline orchestration (`manga_translator/pipeline/run.py` and `orchestrator.py`), serializing `panel_detections.json` artifacts in result folders and server API routes (`server/pipeline_repository.py`, `server/api/routes/pipeline_case_data.py`).
+- Integrated detected panels into reading order region sorting (`manga_translator/utils/sort.py`) and layout panel constraints (`manga_translator/geometry/panels.py`).
+- Added frontend panel detection parser (`front/app/utils/panelRegions.ts`), reusable overlay renderer (`front/app/components/PreviewOverlay.tsx` and `BlockInspectionCard.tsx`), and a "Panels" toggle in the interactive image preview floating toolbar (`front/app/components/PreviewImage.tsx`), rendering cyan polygon boundaries, `#1, #2` sequence order badges, and panel dimension/order inspector badges.
+
 ## 2026-09-28 — Web Studio Options Panel compact hierarchy & structured redesign
 
 - Redesigned the Web Studio `OptionsPanel` (`front/app/components/OptionsPanel.tsx`) into a high-density, 4-tier structured layout to resolve clutter, reduce cognitive load, and eliminate grid shifting when toggling quality modes or pipeline add-ons.

@@ -2,7 +2,7 @@ import type { EditableTextBlock } from "@/types";
 
 type RawRegion = Record<string, unknown>;
 
-const numberValue = (value: unknown): number | null => {
+export const numberValue = (value: unknown): number | null => {
   const number = typeof value === "number" ? value : Number(value);
   return Number.isFinite(number) ? number : null;
 };
@@ -15,7 +15,7 @@ const pointsFrom = (value: unknown): Array<[number, number]> => {
   return value.flatMap(pointsFrom);
 };
 
-const linesFrom = (value: unknown): Array<Array<[number, number]>> => {
+export const linesFrom = (value: unknown): Array<Array<[number, number]>> => {
   if (!Array.isArray(value) || value.length === 0) return [];
   const rawLines = Array.isArray(value[0]) && Array.isArray(value[0][0]) ? value : [value];
   return rawLines.flatMap((rawLine) => {
@@ -190,3 +190,5 @@ export const parseBubbleDetections = (data: unknown): DetectedBubbleRegion[] => 
     }];
   });
 };
+
+export { type DetectedPanelRegion, parsePanelDetections } from "./panelRegions";

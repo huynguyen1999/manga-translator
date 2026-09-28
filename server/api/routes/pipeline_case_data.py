@@ -10,6 +10,7 @@ _JSON_DOCUMENTS = (
     "detection.json",
     "ocr.json",
     "bubble_detections.json",
+    "panel_detections.json",
     "text_regions_merged.json",
     "translations.json",
     "translation_remap.json",

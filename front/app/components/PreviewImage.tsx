@@ -1,8 +1,18 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Icon } from "@iconify/react";
 import { apiUrl } from "@/utils/api";
-import { countOriginalTextRegions, parseBubbleDetections, parseDetectionRegions, parseTextRegions, type DetectedBubbleRegion, type DetectedRegionLine } from "@/utils/textRegions";
+import {
+  countOriginalTextRegions,
+  parseBubbleDetections,
+  parseDetectionRegions,
+  parsePanelDetections,
+  parseTextRegions,
+  type DetectedBubbleRegion,
+  type DetectedPanelRegion,
+  type DetectedRegionLine,
+} from "@/utils/textRegions";
 import type { EditableTextBlock } from "@/types";
+import { PreviewOverlay } from "./PreviewOverlay";
 
 interface PreviewImageProps {
   file: Blob | string | null;
@@ -13,8 +23,10 @@ interface PreviewImageProps {
   textRegions?: EditableTextBlock[] | null;
   showBubbleBoxes?: boolean;
   showBubbleRegions?: boolean;
+  showPanels?: boolean;
   showOriginalRegions?: boolean;
   onToggleBubbleBoxes?: (show: boolean) => void;
+  onTogglePanels?: (show: boolean) => void;
   isHoldingOriginal?: boolean;
   onHoldOriginalChange?: (holding: boolean) => void;
   showFloatingToolbar?: boolean;
@@ -73,8 +85,10 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     textRegions,
     showBubbleBoxes: controlledShowBubbleBoxes,
     showBubbleRegions = false,
+    showPanels: controlledShowPanels,
     showOriginalRegions = false,
     onToggleBubbleBoxes,
+    onTogglePanels,
     isHoldingOriginal: controlledIsHoldingOriginal,
     onHoldOriginalChange,
     showFloatingToolbar = true,
@@ -115,18 +129,23 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       onHoldOriginalChange?.(holding);
     };
 
-    // Bubble detection & text inspection state
+    // Bubble, panel detection & text inspection state
     const [internalTextRegions, setInternalTextRegions] = useState<EditableTextBlock[]>([]);
     const [detectedTextLines, setDetectedTextLines] = useState<DetectedRegionLine[] | null>(null);
     const [detectedBubbleRegions, setDetectedBubbleRegions] = useState<DetectedBubbleRegion[]>([]);
     const [bubbleRegionsStatus, setBubbleRegionsStatus] = useState<"idle" | "loading" | "loaded" | "error">("idle");
     const bubbleRegionsLoadedForRef = useRef<string | null>(null);
+    const [detectedPanelRegions, setDetectedPanelRegions] = useState<DetectedPanelRegion[]>([]);
+    const [panelRegionsStatus, setPanelRegionsStatus] = useState<"idle" | "loading" | "loaded" | "error">("idle");
+    const panelRegionsLoadedForRef = useRef<string | null>(null);
     const [isLoadingRegions, setIsLoadingRegions] = useState(false);
     const [internalShowBubbleBoxes, setInternalShowBubbleBoxes] = useState(false);
+    const [internalShowPanels, setInternalShowPanels] = useState(false);
     const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
     const [hoveredRegionIndex, setHoveredRegionIndex] = useState<number | null>(null);
     const [selectedRegionIndex, setSelectedRegionIndex] = useState<number | null>(null);
     const [selectedBubbleId, setSelectedBubbleId] = useState<string | null>(null);
+    const [selectedPanelId, setSelectedPanelId] = useState<string | null>(null);
     const [copiedKind, setCopiedKind] = useState<"original" | "translation" | "id" | null>(null);
 
     // Image measurement state for precise overlay anchoring
@@ -149,6 +168,15 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       onToggleBubbleBoxes?.(show);
       if (!show) {
         setSelectedBlockId(null);
+      }
+    };
+
+    const showPanels = controlledShowPanels ?? internalShowPanels;
+    const setShowPanels = (show: boolean) => {
+      setInternalShowPanels(show);
+      onTogglePanels?.(show);
+      if (!show) {
+        setSelectedPanelId(null);
       }
     };
 
@@ -214,7 +242,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       setResultUrl(null);
     }, [result, retryCount]);
 
-    // Warm the browser cache and bitmap decoder before a mode switch.
+    // Warm browser cache and bitmap decoder before mode switch.
     useEffect(() => {
       if (!preloadImages) return;
       const urls = [originalUrl, resultUrl, inpaintedUrl].filter(
@@ -245,7 +273,6 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     const effectiveResultUrl = useFullResolution || previewFallbacks.result ? retryFullResultUrl ?? resultUrl : resultUrl;
     const effectiveInpaintedUrl = useFullResolution || previewFallbacks.inpainted ? fullInpainted ? apiUrl(fullInpainted) : inpaintedUrl : inpaintedUrl;
     const hasMultiple = [effectiveOriginalUrl, effectiveResultUrl, effectiveInpaintedUrl].filter(Boolean).length >= 2;
-    const hasBoth = Boolean(effectiveOriginalUrl && effectiveResultUrl);
 
     useEffect(() => {
       if (!effectiveResultUrl || !resultPlaceholder || resultLoaded || resultLoadFailed) return;
@@ -292,7 +319,6 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       setSliderPos(percentage);
     };
 
-    // Cache layout once per drag and update the visual directly at frame rate.
     const updateSliderFromPointer = (clientX: number) => {
       const rect = dragRectRef.current;
       if (!rect || rect.width <= 0) return;
@@ -341,6 +367,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
         }));
       });
     }, [effectiveBlocks]);
+
     const originalTextLines: DetectedRegionLine[] = detectedTextLines ?? fallbackOriginalTextLines;
     const sourceCoordinateSize = coordinateSize ?? naturalSize;
     const imageCoordinateSize = sourceCoordinateSize && workingCoordinateSize
@@ -349,6 +376,8 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       ? workingCoordinateSize : sourceCoordinateSize;
     const detectionCoordinateSize = (detectedTextLines ? workingCoordinateSize : null) ?? imageCoordinateSize ?? { width: 1, height: 1 };
     const bubbleCoordinateSize = detectedBubbleRegions.find((region) => region.imageSize)?.imageSize
+      ?? workingCoordinateSize ?? imageCoordinateSize;
+    const panelCoordinateSize = detectedPanelRegions.find((region) => region.imageSize)?.imageSize
       ?? workingCoordinateSize ?? imageCoordinateSize;
     const originalRegionCount = detectedTextLines?.length ?? countOriginalTextRegions(effectiveBlocks);
     const hasOriginalRegionData = originalRegionCount > 0;
@@ -443,6 +472,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       };
     }, [folder, onOriginalRegionCountLoaded]);
 
+    // Load Speech Bubbles
     useEffect(() => {
       if (!showBubbleRegions || (bubbleRegionsStatus === "loaded" && bubbleRegionsLoadedForRef.current === folder)) return;
       if (!folder) {
@@ -476,6 +506,39 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
         isMounted = false;
       };
     }, [folder, showBubbleRegions]);
+
+    // Load Panels
+    useEffect(() => {
+      if (!showPanels && panelRegionsStatus !== "idle" && panelRegionsLoadedForRef.current === folder) return;
+      if (!folder) {
+        setDetectedPanelRegions([]);
+        setPanelRegionsStatus("idle");
+        return;
+      }
+
+      let isMounted = true;
+      setPanelRegionsStatus("loading");
+      fetch(apiUrl(`/api/result/${encodeURIComponent(folder)}/panel_detections.json`))
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then((data) => {
+          if (!isMounted) return;
+          setDetectedPanelRegions(parsePanelDetections(data));
+          panelRegionsLoadedForRef.current = folder;
+          setPanelRegionsStatus("loaded");
+        })
+        .catch((error) => {
+          if (!isMounted) return;
+          setDetectedPanelRegions([]);
+          setPanelRegionsStatus("error");
+        });
+
+      return () => {
+        isMounted = false;
+      };
+    }, [folder, showPanels]);
 
     // Measure rendered image rect within container
     const updateImageRect = useCallback(() => {
@@ -570,15 +633,16 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
 
     useEffect(() => {
       const handleKeyDown = (e: KeyboardEvent) => {
-        if (e.key === "Escape" && (selectedBlockId || selectedRegionIndex !== null || selectedBubbleId)) {
+        if (e.key === "Escape" && (selectedBlockId || selectedRegionIndex !== null || selectedBubbleId || selectedPanelId)) {
           setSelectedBlockId(null);
           setSelectedRegionIndex(null);
           setSelectedBubbleId(null);
+          setSelectedPanelId(null);
         }
       };
       window.addEventListener("keydown", handleKeyDown);
       return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [selectedBlockId, selectedRegionIndex, selectedBubbleId]);
+    }, [selectedBlockId, selectedRegionIndex, selectedBubbleId, selectedPanelId]);
 
     const hasBubbleData = effectiveBlocks.length > 0 || isLoadingRegions || Boolean(effectiveTextRegionsUrl);
     const handleSourceError = (kind: "original" | "result" | "inpainted") => {
@@ -591,7 +655,6 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       }
     };
 
-    // If only one image is available AND no comparison/bubble controls needed, render cleanly
     if (!showComparisonControls || (!hasMultiple && !hasBubbleData)) {
       return (
         <div className={`relative flex items-center justify-center w-full h-full ${className}`}>
@@ -620,7 +683,6 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       );
     }
 
-    // Multiple image states available or bubble data present: show comparison viewer
     const effectiveShowOriginal = isHoldingOriginal || (viewMode === "original" && Boolean(effectiveOriginalUrl));
     const effectiveShowInpainted = !isHoldingOriginal && viewMode === "inpainted" && Boolean(effectiveInpaintedUrl);
     const effectiveShowTranslated = !isHoldingOriginal && !effectiveShowInpainted && (viewMode === "translated" || !effectiveOriginalUrl);
@@ -631,15 +693,6 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
       ? "inpainted"
       : "translated";
 
-    const selectedBlockIndex = selectedBlockId ? effectiveBlocks.findIndex((b) => b.id === selectedBlockId) : -1;
-    const selectedBlock = selectedBlockIndex !== -1 ? effectiveBlocks[selectedBlockIndex] : null;
-    const isCardNearBottom = selectedBlock && imageCoordinateSize && imageCoordinateSize.height > 0
-      ? (selectedBlock.y + selectedBlock.height) / imageCoordinateSize.height > 0.62
-      : false;
-    const clampedCardXPct = selectedBlock && imageCoordinateSize && imageCoordinateSize.width > 0
-      ? Math.max(20, Math.min(80, ((selectedBlock.x + selectedBlock.width / 2) / imageCoordinateSize.width) * 100))
-      : 50;
-
     return (
       <div
         ref={containerRef}
@@ -648,7 +701,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
-        onClick={() => { setSelectedBlockId(null); setSelectedRegionIndex(null); setSelectedBubbleId(null); }}
+        onClick={() => { setSelectedBlockId(null); setSelectedRegionIndex(null); setSelectedBubbleId(null); setSelectedPanelId(null); }}
       >
         {!effectiveShowOriginal && !effectiveShowInpainted && resultFeedback}
         {showBubbleRegions && bubbleRegionsStatus !== "idle" && (
@@ -662,13 +715,24 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
               : "No saved speech bubble regions"}
           </div>
         )}
+        {showPanels && panelRegionsStatus !== "idle" && (
+          <div role="status" className="absolute bottom-10 left-1/2 z-30 -translate-x-1/2 rounded-md border border-cyan-300/20 bg-zinc-950/90 px-2.5 py-1 text-xs text-cyan-200 shadow-lg">
+            {panelRegionsStatus === "loading"
+              ? "Loading panels…"
+              : panelRegionsStatus === "error"
+              ? "Saved panel regions unavailable"
+              : detectedPanelRegions.length > 0
+              ? `${detectedPanelRegions.length} panels detected`
+              : "No saved panel regions"}
+          </div>
+        )}
         {effectiveBlocks.some(block => block.review_required) && (
           <div role="status" className="absolute bottom-3 left-3 z-30 rounded bg-amber-950 px-3 py-2 text-sm text-amber-100">
             Needs editing · {effectiveBlocks.filter(block => block.review_required).length} preserved bubble(s)
           </div>
         )}
 
-        {/* Toggle / View Mode Controls Bar - Anchored on top of the image */}
+        {/* Toggle / View Mode Controls Bar */}
         {showComparisonControls && showFloatingToolbar && (
           <div
             className="absolute z-30 flex items-center space-x-0.5 rounded-md bg-black/80 p-0.5 text-white opacity-95 shadow-xl backdrop-blur-md border border-white/10 transition-all duration-150 select-none hover:opacity-100"
@@ -695,9 +759,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                   setViewMode("split");
                 }}
                 className={`rounded px-1.5 py-0.5 text-xs font-medium transition-colors ${
-                  viewMode === "split"
-                    ? "bg-indigo-600 text-white"
-                    : "text-zinc-300 hover:text-white"
+                  viewMode === "split" ? "bg-indigo-600 text-white" : "text-zinc-300 hover:text-white"
                 }`}
                 title="Split comparison slider"
               >
@@ -712,9 +774,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                   setViewMode("translated");
                 }}
                 className={`rounded px-1.5 py-0.5 text-xs font-medium transition-colors ${
-                  viewMode === "translated"
-                    ? "bg-indigo-600 text-white"
-                    : "text-zinc-300 hover:text-white"
+                  viewMode === "translated" ? "bg-indigo-600 text-white" : "text-zinc-300 hover:text-white"
                 }`}
                 title={`Show ${resultLabel}`}
               >
@@ -729,9 +789,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                   setViewMode("inpainted");
                 }}
                 className={`px-2 py-1 text-xs rounded font-medium transition-colors ${
-                  viewMode === "inpainted"
-                    ? "bg-emerald-600 text-white"
-                    : "text-zinc-300 hover:text-white"
+                  viewMode === "inpainted" ? "bg-emerald-600 text-white" : "text-zinc-300 hover:text-white"
                 }`}
                 title={`Show ${inpaintedLabel} (clean artwork)`}
               >
@@ -746,9 +804,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                   setViewMode("original");
                 }}
                 className={`px-2 py-1 text-xs rounded font-medium transition-colors ${
-                  viewMode === "original"
-                    ? "bg-indigo-600 text-white"
-                    : "text-zinc-300 hover:text-white"
+                  viewMode === "original" ? "bg-indigo-600 text-white" : "text-zinc-300 hover:text-white"
                 }`}
                 title={`Show ${originalLabel}`}
               >
@@ -769,7 +825,43 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                 Hold Peek
               </button>
             )}
-            {/* Toggle Speech Bubble Detection Boxes */}
+            {/* Toggle Panels Overlay */}
+            {(detectedPanelRegions.length > 0 || panelRegionsStatus === "loading" || folder) && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowPanels(!showPanels);
+                }}
+                className={`ml-0.5 flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium transition-colors ${
+                  showPanels ? "bg-cyan-700 text-white shadow-xs" : "text-zinc-300 hover:text-white"
+                }`}
+                title={
+                  panelRegionsStatus === "loading"
+                    ? "Loading panels…"
+                    : showPanels
+                    ? "Hide panels"
+                    : "Show panels"
+                }
+              >
+                {panelRegionsStatus === "loading" ? (
+                  <Icon icon="carbon:circle-dash" className="w-3.5 h-3.5 animate-spin text-cyan-300" />
+                ) : (
+                  <Icon icon="carbon:grid" className="w-3.5 h-3.5" />
+                )}
+                <span>Panels</span>
+                {detectedPanelRegions.length > 0 && (
+                  <span
+                    className={`text-[10px] px-1 py-0.2 rounded-full ${
+                      showPanels ? "bg-cyan-800 text-white" : "bg-zinc-800 text-zinc-300"
+                    }`}
+                  >
+                    {detectedPanelRegions.length}
+                  </span>
+                )}
+              </button>
+            )}
+            {/* Toggle Speech Bubble Boxes */}
             {hasBubbleData && (
               <button
                 type="button"
@@ -778,9 +870,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
                   setShowBubbleBoxes(!showBubbleBoxes);
                 }}
                 className={`ml-0.5 flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium transition-colors ${
-                  showBubbleBoxes
-                    ? "bg-amber-600 text-white shadow-xs"
-                    : "text-zinc-300 hover:text-white"
+                  showBubbleBoxes ? "bg-amber-600 text-white shadow-xs" : "text-zinc-300 hover:text-white"
                 }`}
                 title={
                   isLoadingRegions
@@ -810,7 +900,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
           </div>
         )}
 
-        {/* Only the selected view is mounted; split mode needs both sources. */}
+        {/* View mode image render */}
         <div className="relative h-full w-full">
           {effectiveShowOriginal && effectiveOriginalUrl && (
             <img
@@ -836,45 +926,54 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
               draggable={false}
             />
           )}
-          {(effectiveShowTranslated || (isSplitView && Boolean(effectiveResultUrl))) && effectiveResultUrl && (
+          {(effectiveShowTranslated || (isSplitView && effectiveResultUrl)) && effectiveResultUrl && (
             <img
               ref={activeImage === "translated" ? imgRef : undefined}
               key={`${effectiveResultUrl}-${retryCount}`}
               src={effectiveResultUrl}
               loading={loading}
               onLoad={handleImageLoad}
+              onError={() => handleSourceError("result")}
               alt={`${fileName} (${resultLabel})`}
               className="absolute inset-0 m-auto max-h-full max-w-full rounded-lg object-contain"
               draggable={false}
-              onError={() => handleSourceError("result")}
             />
           )}
-
-          {isSplitView && effectiveOriginalUrl && (
+          {isSplitView && (
             <>
               <div
-                className="pointer-events-none absolute inset-0 flex items-center justify-center"
-                style={{ clipPath: "inset(0 calc(100% - var(--slider-pos)) 0 0)" }}
+                className="absolute inset-0 overflow-hidden"
+                style={{ clipPath: "polygon(0 0, var(--slider-pos) 0, var(--slider-pos) 100%, 0 100%)" }}
               >
-                <img
+                {effectiveOriginalUrl ? (
+                  <img
                     src={effectiveOriginalUrl}
                     loading={loading}
-                    alt=""
-                    aria-hidden="true"
+                    onLoad={handleImageLoad}
                     onError={() => handleSourceError("original")}
-                    className="max-h-full max-w-full rounded-lg object-contain"
+                    alt={`${fileName} (${originalLabel})`}
+                    className="absolute inset-0 m-auto max-h-full max-w-full rounded-lg object-contain"
                     draggable={false}
                   />
+                ) : effectiveInpaintedUrl ? (
+                  <img
+                    src={effectiveInpaintedUrl}
+                    loading={loading}
+                    onLoad={handleImageLoad}
+                    onError={() => handleSourceError("inpainted")}
+                    alt={`${fileName} (${inpaintedLabel})`}
+                    className="absolute inset-0 m-auto max-h-full max-w-full rounded-lg object-contain"
+                    draggable={false}
+                  />
+                ) : null}
               </div>
               <div
-                className="absolute bottom-0 top-0 z-10 flex cursor-ew-resize items-center justify-center -translate-x-1/2"
+                className="absolute inset-y-0 w-0.5 bg-white shadow-[0_0_8px_rgba(0,0,0,0.8)] cursor-ew-resize z-20 touch-none"
                 style={{ left: "var(--slider-pos)" }}
                 onPointerDown={handlePointerDown}
-                onClick={(e) => e.stopPropagation()}
               >
-                <div className="h-full w-0.5 bg-white shadow-[0_0_8px_rgba(0,0,0,0.6)]" />
-                <div className="absolute top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full border-2 border-indigo-600 bg-white text-indigo-600 shadow-lg transition-transform hover:scale-110 active:scale-95 dark:bg-zinc-900 dark:text-indigo-400">
-                  <Icon icon="carbon:arrows-horizontal" className="h-4 w-4" />
+                <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-6 h-6 rounded-full bg-white shadow-md flex items-center justify-center text-zinc-700 hover:scale-110 active:scale-95 transition-transform">
+                  <Icon icon="carbon:arrows-horizontal" className="w-3.5 h-3.5" />
                 </div>
               </div>
               <div ref={sliderBadgeRef} className="pointer-events-none absolute bottom-2 left-2 rounded bg-black/60 px-2 py-0.5 text-[11px] text-white backdrop-blur-xs select-none">
@@ -887,8 +986,8 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
           )}
         </div>
 
-        {/* Text Region Overlays & Interactive Bubble Inspector Layer */}
-        {(showBubbleRegions || showBubbleBoxes || (showOriginalRegions && hasOriginalRegionData)) && imageRect && imageCoordinateSize && imageCoordinateSize.width > 0 && imageCoordinateSize.height > 0 && (
+        {/* Text Region Overlays & Interactive Panel / Bubble Inspector Layer */}
+        {(showBubbleRegions || showPanels || showBubbleBoxes || (showOriginalRegions && hasOriginalRegionData)) && imageRect && imageCoordinateSize && imageCoordinateSize.width > 0 && imageCoordinateSize.height > 0 && (
           <div
             className="absolute pointer-events-none z-20"
             style={{
@@ -898,352 +997,33 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
               height: `${imageRect.height}px`,
             }}
           >
-            {showBubbleRegions && detectedBubbleRegions.length > 0 && (
-              <svg
-                role="img"
-                aria-label={`${detectedBubbleRegions.length} detected speech bubbles`}
-                className="absolute inset-0 h-full w-full pointer-events-none"
-                viewBox={`0 0 ${bubbleCoordinateSize?.width ?? imageCoordinateSize.width} ${bubbleCoordinateSize?.height ?? imageCoordinateSize.height}`}
-                preserveAspectRatio="none"
-              >
-                {detectedBubbleRegions.flatMap((region) => region.polygons.map((polygon, polygonIdx) => {
-                  const labelX = Math.min(...polygon.map(([x]) => x));
-                  const labelY = Math.max(16, Math.min(...polygon.map(([, y]) => y)) - 5);
-                  return (
-                    <g key={`${region.id}-${polygonIdx}`}>
-                      <polygon
-                        points={polygon.map(([x, y]) => `${x},${y}`).join(" ")}
-                        fill="#a78bfa"
-                        fillOpacity={selectedBubbleId === region.id ? 0.22 : 0.04}
-                        stroke="#c084fc"
-                        strokeOpacity={selectedBubbleId === region.id ? 1 : 0.65}
-                        strokeWidth={selectedBubbleId === region.id ? 3 : 1.5}
-                        vectorEffect="non-scaling-stroke"
-                        pointerEvents="all"
-                        role="button"
-                        tabIndex={0}
-                        aria-label={`Speech bubble ${region.id}`}
-                        className="cursor-pointer"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setSelectedBubbleId(selectedBubbleId === region.id ? null : region.id);
-                          setSelectedRegionIndex(null);
-                          setSelectedBlockId(null);
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter" || event.key === " ") {
-                            event.preventDefault();
-                            setSelectedBubbleId(selectedBubbleId === region.id ? null : region.id);
-                            setSelectedRegionIndex(null);
-                            setSelectedBlockId(null);
-                          }
-                        }}
-                      >
-                        <title>{region.id}</title>
-                      </polygon>
-                      {selectedBubbleId === region.id && <text x={labelX} y={labelY} fill="white" stroke="#18181b" strokeWidth={4}
-                        paintOrder="stroke" fontSize={18} fontWeight={700} fontFamily="monospace">{region.id}</text>}
-                    </g>
-                  );
-                }))}
-              </svg>
-            )}
-
-            {showOriginalRegions && hasOriginalRegionData && (
-              <>
-                <svg
-                  aria-hidden="true"
-                  className="absolute inset-0 h-full w-full pointer-events-none"
-                  viewBox={`0 0 ${detectionCoordinateSize.width} ${detectionCoordinateSize.height}`}
-                  preserveAspectRatio="none"
-                >
-                  {getDetectionPaintOrder(originalTextLines).map((lineIdx) => {
-                    const region = originalTextLines[lineIdx];
-                    const line = region.points;
-                    if (line.length < 3) return null;
-                    const confStyle = getConfidenceStyle(region.confidence);
-                    const isHovered = hoveredRegionIndex === lineIdx || selectedRegionIndex === lineIdx;
-                    const labelX = Math.min(...line.map(([x]) => x));
-                    const labelY = Math.max(16, Math.min(...line.map(([, y]) => y)) - 5);
-
-                    return (
-                      <g key={`source-${region.id}-${lineIdx}`}>
-                        <polygon
-                          points={line.map(([x, y]) => `${x},${y}`).join(" ")}
-                          fill={isHovered ? confStyle.fill : "transparent"}
-                          fillOpacity={isHovered ? 0.25 : 0}
-                          stroke={confStyle.stroke}
-                          strokeDasharray={isHovered ? "none" : "6 4"}
-                          strokeOpacity={isHovered ? 1 : 0.75}
-                          strokeWidth={isHovered ? 2.5 : 1.5}
-                          vectorEffect="non-scaling-stroke"
-                          pointerEvents="all"
-                          role="button"
-                          tabIndex={0}
-                          aria-label={`Original region ${region.id}`}
-                          className="pointer-events-auto cursor-pointer transition-all duration-150"
-                          onMouseEnter={() => setHoveredRegionIndex(lineIdx)}
-                          onMouseLeave={() => setHoveredRegionIndex(null)}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setSelectedRegionIndex(selectedRegionIndex === lineIdx ? null : lineIdx);
-                            setSelectedBubbleId(null);
-                            setSelectedBlockId(null);
-                          }}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter" || event.key === " ") {
-                              event.preventDefault();
-                              setSelectedRegionIndex(selectedRegionIndex === lineIdx ? null : lineIdx);
-                              setSelectedBubbleId(null);
-                              setSelectedBlockId(null);
-                            }
-                          }}
-                        />
-                        {selectedRegionIndex === lineIdx && <text x={labelX} y={labelY} fill="white" stroke="#18181b" strokeWidth={4}
-                          paintOrder="stroke" fontSize={18} fontWeight={700} fontFamily="monospace">{region.id}</text>}
-                      </g>
-                    );
-                  })}
-                </svg>
-
-                {/* Floating tooltip displayed only on hover for the active region */}
-                {selectedRegionIndex !== null && (() => {
-                  const region = originalTextLines[selectedRegionIndex];
-                  if (!region || region.points.length < 3) return null;
-                  const xs = region.points.map(([x]) => x);
-                  const ys = region.points.map(([, y]) => y);
-                  const minX = Math.min(...xs);
-                  const minY = Math.min(...ys);
-                  const maxX = Math.max(...xs);
-                  const midX = (minX + maxX) / 2;
-                  const leftPct = (midX / detectionCoordinateSize.width) * 100;
-                  const topPct = (minY / detectionCoordinateSize.height) * 100;
-                  const conf = region.confidence;
-                  const confStyle = getConfidenceStyle(conf);
-                  const hasConf = typeof conf === "number" && !isNaN(conf);
-
-                  return (
-                    <div
-                      key={`selected-region-${selectedRegionIndex}`}
-                      className="absolute pointer-events-auto select-none z-30 animate-in fade-in zoom-in-95 duration-100"
-                      style={{
-                        left: `${leftPct}%`,
-                        top: `${topPct}%`,
-                        transform: "translate(-50%, -100%) translateY(-6px)",
-                      }}
-                    >
-                      <div className="flex items-center gap-1.5 rounded-md bg-zinc-950/95 border border-zinc-700/80 px-2 py-1 text-[11px] font-medium text-zinc-100 shadow-xl backdrop-blur-md whitespace-nowrap">
-                        <span className={`w-2 h-2 rounded-full shrink-0 ${confStyle.dot}`} />
-                        <span className="text-zinc-400 font-mono text-[10px]">{region.id}</span>
-                        {hasConf ? (
-                          <span className="font-mono font-bold text-white">
-                            {(conf * 100).toFixed(conf * 100 % 1 === 0 ? 0 : 1)}%
-                          </span>
-                        ) : (
-                          <span className="text-zinc-300">Detected</span>
-                        )}
-                        <span className="text-zinc-500 text-[10px] capitalize">({confStyle.tier})</span>
-                        <button type="button" className="ml-1 text-zinc-300 hover:text-white" title="Copy region ID" onClick={(event) => { event.stopPropagation(); void handleCopy(region.id, "id"); }}>
-                          <Icon icon={copiedKind === "id" ? "carbon:checkmark" : "carbon:copy"} className="h-3 w-3" />
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })()}
-              </>
-            )}
-
-            {showBubbleBoxes && effectiveBlocks.map((block, idx) => {
-              const isSelected = selectedBlockId === block.id;
-              const leftPct = (block.x / imageCoordinateSize.width) * 100;
-              const topPct = (block.y / imageCoordinateSize.height) * 100;
-              const widthPct = (block.width / imageCoordinateSize.width) * 100;
-              const heightPct = (block.height / imageCoordinateSize.height) * 100;
-
-              return (
-                <div
-                  key={block.id || idx}
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`Text region ${block.id}`}
-                  className={`absolute pointer-events-auto rounded cursor-pointer transition-all duration-150 ${
-                    isSelected
-                      ? "border-2 border-amber-400 bg-amber-400/25 shadow-[0_0_12px_rgba(251,191,36,0.6)] ring-2 ring-amber-400/50 z-30"
-                      : "border-2 border-indigo-400/70 hover:border-indigo-300 bg-indigo-500/15 hover:bg-indigo-500/30 hover:shadow-md z-20"
-                  }`}
-                  style={{
-                    left: `${leftPct}%`,
-                    top: `${topPct}%`,
-                    width: `${widthPct}%`,
-                    height: `${heightPct}%`,
-                  }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSelectedBlockId(isSelected ? null : block.id);
-                    setSelectedRegionIndex(null);
-                    setSelectedBubbleId(null);
-                    setCopiedKind(null);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setSelectedBlockId(isSelected ? null : block.id);
-                      setSelectedRegionIndex(null);
-                      setSelectedBubbleId(null);
-                      setCopiedKind(null);
-                    }
-                  }}
-                  title={`Text region ${block.id}: Click to inspect original & translated text`}
-                >
-                  {/* Keep IDs out of the way until a region is selected. */}
-                  {isSelected && <span
-                    className={`absolute -top-2.5 -left-1 max-w-28 truncate text-[9px] font-mono font-bold px-1 rounded shadow-xs select-none ${
-                      isSelected
-                        ? "bg-amber-400 text-black"
-                        : "bg-indigo-600 text-white"
-                    }`}
-                  >
-                    {block.id}
-                  </span>}
-                </div>
-              );
-            })}
-
-            {(selectedRegionIndex !== null || selectedBubbleId !== null) && (() => {
-              const source = selectedRegionIndex !== null
-                ? originalTextLines[selectedRegionIndex]
-                : null;
-              const bubble = selectedBubbleId
-                ? detectedBubbleRegions.find((region) => region.id === selectedBubbleId)
-                : null;
-              const id = source?.id ?? bubble?.id;
-              if (!id) return null;
-              const confidence = source?.confidence ?? bubble?.confidence;
-              const label = source ? "Original region" : "Speech bubble";
-              return (
-                <div className="absolute left-2 top-2 z-40 flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-950/95 px-3 py-2 text-xs text-white shadow-xl pointer-events-auto">
-                  <span>{label}</span>
-                  <code className="font-mono text-zinc-300">{id}</code>
-                  {typeof confidence === "number" && <span>{Math.round(confidence * 100)}%</span>}
-                  <button type="button" className="flex items-center gap-1 text-zinc-300 hover:text-white" title="Copy ID" onClick={() => void handleCopy(id, "id")}>
-                    <Icon icon={copiedKind === "id" ? "carbon:checkmark" : "carbon:copy"} className="h-3.5 w-3.5" />
-                    <span>{copiedKind === "id" ? "Copied" : "Copy ID"}</span>
-                  </button>
-                  <button type="button" aria-label="Close region details" onClick={() => { setSelectedRegionIndex(null); setSelectedBubbleId(null); }}>
-                    <Icon icon="carbon:close" className="h-4 w-4" />
-                  </button>
-                </div>
-              );
-            })()}
-
-            {/* Inspection Card for Selected Bubble */}
-            {showBubbleBoxes && selectedBlock && selectedBlockIndex !== -1 && (
-              <div
-                className="absolute pointer-events-auto z-40 w-72 sm:w-84 max-w-[90vw] rounded-xl border border-zinc-700 bg-zinc-900/95 p-3.5 text-zinc-100 shadow-2xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-150"
-                style={{
-                  left: `${clampedCardXPct}%`,
-                  transform: "translateX(-50%)",
-                  ...(isCardNearBottom
-                    ? { bottom: `calc(${100 - (selectedBlock.y / imageCoordinateSize.height) * 100}% + 8px)` }
-                    : { top: `calc(${((selectedBlock.y + selectedBlock.height) / imageCoordinateSize.height) * 100}% + 8px)` }),
-                }}
-                onClick={(e) => e.stopPropagation()}
-              >
-                {/* Header */}
-                <div className="mb-3 flex items-center justify-between gap-2 border-b border-zinc-800 pb-2.5">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="shrink-0 text-sm font-semibold text-zinc-100">Text region</span>
-                    <code className="min-w-0 truncate rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300" title={selectedBlock.id}>
-                      {selectedBlock.id}
-                    </code>
-                    <button
-                      type="button"
-                      onClick={() => void handleCopy(selectedBlock.id, "id")}
-                      className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                      aria-label={copiedKind === "id" ? "Region ID copied" : "Copy region ID"}
-                      title="Copy region ID"
-                    >
-                      <Icon icon={copiedKind === "id" ? "carbon:checkmark" : "carbon:copy"} className={`h-3.5 w-3.5 ${copiedKind === "id" ? "text-emerald-400" : ""}`} />
-                      <span>{copiedKind === "id" ? "Copied" : "Copy ID"}</span>
-                    </button>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedBlockId(null)}
-                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                    aria-label="Close text region details"
-                    title="Close (Esc)"
-                  >
-                    <Icon icon="carbon:close" className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {/* Original Text */}
-                <div className="mb-3">
-                  <div className="mb-1.5 flex items-center justify-between text-[11px] text-zinc-400">
-                    <span className="flex items-center gap-1.5 font-semibold uppercase tracking-wider text-amber-300">
-                      <Icon icon="carbon:character-patterns" className="h-3.5 w-3.5" />
-                      Original
-                    </span>
-                    {selectedBlock.original_text && (
-                      <button
-                        type="button"
-                        onClick={() => handleCopy(selectedBlock.original_text || "", "original")}
-                        className="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                        aria-label={copiedKind === "original" ? "Original text copied" : "Copy original text"}
-                        title="Copy original text"
-                      >
-                        <Icon
-                          icon={copiedKind === "original" ? "carbon:checkmark" : "carbon:copy"}
-                          className={`w-3 h-3 ${copiedKind === "original" ? "text-emerald-400" : ""}`}
-                        />
-                        <span>{copiedKind === "original" ? "Copied" : "Copy"}</span>
-                      </button>
-                    )}
-                  </div>
-                  <div className="max-h-28 select-text overflow-y-auto break-words whitespace-pre-wrap rounded-lg border border-zinc-800 bg-black/40 px-3 py-2.5 font-sans text-sm leading-relaxed text-zinc-100">
-                    {selectedBlock.original_text ? (
-                      selectedBlock.original_text
-                    ) : (
-                      <span className="italic text-zinc-500">No original text detected</span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Translated Text */}
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between text-[11px] text-zinc-400">
-                    <span className="flex items-center gap-1.5 font-semibold uppercase tracking-wider text-indigo-300">
-                      <Icon icon="carbon:translate" className="h-3.5 w-3.5" />
-                      Translated
-                    </span>
-                    {selectedBlock.translation && (
-                      <button
-                        type="button"
-                        onClick={() => handleCopy(selectedBlock.translation || "", "translation")}
-                        className="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium text-zinc-400 transition-colors hover:bg-indigo-900/50 hover:text-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
-                        aria-label={copiedKind === "translation" ? "Translated text copied" : "Copy translated text"}
-                        title="Copy translated text"
-                      >
-                        <Icon
-                          icon={copiedKind === "translation" ? "carbon:checkmark" : "carbon:copy"}
-                          className={`w-3 h-3 ${copiedKind === "translation" ? "text-emerald-400" : ""}`}
-                        />
-                        <span>{copiedKind === "translation" ? "Copied" : "Copy"}</span>
-                      </button>
-                    )}
-                  </div>
-                  <div className="max-h-32 select-text overflow-y-auto break-words whitespace-pre-wrap rounded-lg border border-indigo-800/70 bg-indigo-950/25 px-3 py-2.5 font-sans text-sm leading-relaxed text-zinc-50">
-                    {selectedBlock.translation ? (
-                      selectedBlock.translation
-                    ) : (
-                      <span className="italic text-zinc-500">No translation available</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
+            <PreviewOverlay
+              imageCoordinateSize={imageCoordinateSize}
+              bubbleCoordinateSize={bubbleCoordinateSize}
+              panelCoordinateSize={panelCoordinateSize}
+              detectionCoordinateSize={detectionCoordinateSize}
+              showBubbleRegions={showBubbleRegions}
+              detectedBubbleRegions={detectedBubbleRegions}
+              selectedBubbleId={selectedBubbleId}
+              onSelectBubbleId={setSelectedBubbleId}
+              showPanels={showPanels}
+              detectedPanelRegions={detectedPanelRegions}
+              selectedPanelId={selectedPanelId}
+              onSelectPanelId={setSelectedPanelId}
+              showOriginalRegions={showOriginalRegions}
+              hasOriginalRegionData={hasOriginalRegionData}
+              originalTextLines={originalTextLines}
+              hoveredRegionIndex={hoveredRegionIndex}
+              onHoverRegionIndex={setHoveredRegionIndex}
+              selectedRegionIndex={selectedRegionIndex}
+              onSelectRegionIndex={setSelectedRegionIndex}
+              showBubbleBoxes={showBubbleBoxes}
+              effectiveBlocks={effectiveBlocks}
+              selectedBlockId={selectedBlockId}
+              onSelectBlockId={setSelectedBlockId}
+              copiedKind={copiedKind}
+              onCopy={handleCopy}
+            />
           </div>
         )}
       </div>
