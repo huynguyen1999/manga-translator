@@ -2,11 +2,39 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import List, Optional, Tuple
 
 from .geometry import BubbleGeometry
 from .models import BandSlot, PlacedLine, PlacementTarget
-from .validation import _bbox_validate
+
+
+@lru_cache(maxsize=16)
+def _relative_search_offsets(max_search_radius: int) -> Tuple[Tuple[int, int], ...]:
+    offsets = (
+        (x, y)
+        for radius in range(0, max_search_radius + 1, 2)
+        for x in range(-radius, radius + 1, 2)
+        for y in range(-radius, radius + 1, 2)
+        if max(abs(x), abs(y)) == radius
+    )
+    return tuple(sorted(offsets, key=lambda offset: offset[0] ** 2 + offset[1] ** 2))
+
+
+def _translation_fits_safe_mask(lines: List[PlacedLine], dx: int, dy: int, safe, shape) -> bool:
+    h, w = shape
+    for line in lines:
+        x, y, width, height = line.x + dx, line.y + dy, line.width, line.height
+        if x < 0 or y < 0 or x + width > w or y + height > h:
+            return False
+        for sx, sy in (
+            (x, y), (x + width - 1, y), (x, y + height - 1), (x + width - 1, y + height - 1),
+            (x + width // 2, y + height // 2), (x + width // 4, y + height // 2),
+            (x + 3 * width // 4, y + height // 2),
+        ):
+            if not safe[max(0, min(h - 1, sy)), max(0, min(w - 1, sx))]:
+                return False
+    return True
 
 
 def _center_layout_block(
@@ -44,58 +72,28 @@ def _center_layout_block(
     min_dx = sx1 - block_left
     max_dx = sx2 - block_right
 
-    # Generate search offsets sorted by Euclidean distance from (ideal_dx, ideal_dy)
-    offsets: List[Tuple[int, int]] = []
-    seen = set()
-
-    for r in range(0, max_search_radius + 1, 2):
-        for step_x in range(-r, r + 1, 2):
-            for step_y in range(-r, r + 1, 2):
-                if max(abs(step_x), abs(step_y)) == r:
-                    cand_dx = ideal_dx + step_x
-                    cand_dy = ideal_dy + step_y
-                    if min_dx <= cand_dx <= max_dx and min_dy <= cand_dy <= max_dy:
-                        if (cand_dx, cand_dy) not in seen:
-                            seen.add((cand_dx, cand_dy))
-                            offsets.append((cand_dx, cand_dy))
-
-    offsets.sort(key=lambda off: (off[0] - ideal_dx) ** 2 + (off[1] - ideal_dy) ** 2)
-
     h, w = geom.shape
-    best_translated: Optional[List[PlacedLine]] = None
-
-    for dx, dy in offsets:
-        # Check overall block bounds first
-        new_left = block_left + dx
-        new_right = block_right + dx
-        new_top = block_top + dy
-        new_bottom = block_bottom + dy
-        if new_left < 0 or new_top < 0 or new_right > w or new_bottom > h:
+    safe = None
+    for offset_x, offset_y in _relative_search_offsets(max_search_radius):
+        dx, dy = ideal_dx + offset_x, ideal_dy + offset_y
+        if not (min_dx <= dx <= max_dx and min_dy <= dy <= max_dy):
+            continue
+        if (block_left + dx < 0 or block_top + dy < 0
+                or block_right + dx > w or block_bottom + dy > h):
             continue
 
-        translated = [
-            PlacedLine(
-                text=ln.text,
-                y=ln.y + dy,
-                x=ln.x + dx,
-                width=ln.width,
-                height=ln.height,
-                slot=BandSlot(
-                    left=ln.slot.left + dx,
-                    right=ln.slot.right + dx,
-                    y_start=ln.slot.y_start + dy,
-                    y_end=ln.slot.y_end + dy,
-                ),
-            )
-            for ln in lines
-        ]
+        if safe is None:
+            safe = geom.safe_pixels(font_size, stroke_width, margin)
+        if not _translation_fits_safe_mask(lines, dx, dy, safe, (h, w)):
+            continue
 
-        valid, _ = _bbox_validate(translated, geom, font_size, stroke_width, margin)
-        if valid:
-            best_translated = translated
-            break
+        return [PlacedLine(
+            text=ln.text, y=ln.y + dy, x=ln.x + dx, width=ln.width, height=ln.height,
+            slot=BandSlot(left=ln.slot.left + dx, right=ln.slot.right + dx,
+                          y_start=ln.slot.y_start + dy, y_end=ln.slot.y_end + dy),
+        ) for ln in lines]
 
-    return best_translated if best_translated is not None else lines
+    return lines
 
 
 def _optimize_x(
@@ -162,5 +160,3 @@ def _x_cost(center_x: float, c: float, c_prev: float, c_next: float,
         + lam2 * (center_x - c_prev) ** 2
         + lam3 * (c_next - 2.0 * center_x + c_prev) ** 2
     )
-
-

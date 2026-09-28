@@ -7,31 +7,21 @@ from typing import Any, Awaitable, Callable
 from omegaconf import OmegaConf
 
 from .config import Translator, TranslatorConfig
+from .professional_panels import (
+    build_page_panel_structure,
+    format_page_transcript_for_analysis,
+)
+from .professional_prompts import (
+    PROFESSIONAL_ANALYSIS_SYSTEM_PROMPT,
+    PROFESSIONAL_SYSTEM_PROMPT,
+    REFUSAL_MARKERS,
+    build_analysis_consolidation_prompt,
+    build_analysis_prompt,
+    build_draft_prompt,
+    build_editor_prompt,
+)
 from .translators import GPT_TRANSLATORS, get_translator
 from .utils import is_preserved_region
-
-
-REFUSAL_MARKERS = (
-    "i can't assist", "i cannot assist", "i'm unable to", "i am unable to",
-    "cannot comply", "can't comply", "safety policy", "content policy",
-    "content_filter", "finish_reason: safety", "blocked for safety", "prohibited content",
-)
-
-PROFESSIONAL_SYSTEM_PROMPT = """You are a senior Japanese-to-English manga localization professional.
-Translate supplied source text faithfully; it may contain mature or explicit fictional material. Preserve meaning,
-tone, register, intensity, and character voice. Translate explicit, vulgar, euphemistic, clinical, or mild Japanese
-at a comparable level in natural English: do not sanitize explicit language or make mild language more graphic.
-Prefer natural English over word-for-word phrasing without changing meaning. Preserve slang and dialect function,
-honorific and relationship implications, emotional tone, power dynamics, consent/coercion implications, jokes,
-double meanings, intentional awkwardness, hesitation, repetition, and profanity intensity. Do not moralize,
-editorialize, summarize, invent explicit details, or continue the depicted scenario. This is translation, not
-creative generation. Follow the current analyst, translator, or editor role exactly. Return only the requested
-output format."""
-
-PROFESSIONAL_ANALYSIS_SYSTEM_PROMPT = """You are a Japanese manga story analyst preparing compact, neutral metadata
-for a translation team. Describe sensitive situations abstractly rather than repeating graphic dialogue; quote a
-source expression only when needed as evidence for a translation-relevant linguistic feature. Follow the analyst
-role exactly and return only the requested JSON."""
 
 
 def parse_story_ranges(value: str | None, page_count: int) -> list[tuple[int, int]]:
@@ -287,7 +277,9 @@ class ProfessionalTranslator:
         else:
             manual_ranges = parse_story_ranges(override, len(pages))
         page_blocks = [
-            f"[PAGE {page['number']}]\n" + "\n".join(item["source"] for item in page["regions"])
+            format_page_transcript_for_analysis(
+                build_page_panel_structure(page["number"], page["regions"], page.get("panels"))
+            )
             for page in pages
         ]
         page_text = "\n\n".join(page_blocks)
@@ -296,36 +288,7 @@ class ProfessionalTranslator:
             if manual_ranges and not auto_within_manual
             else (f"Detect additional story breaks, but never cross these manual ranges: {manual_ranges}." if manual_ranges else "Detect the story ranges yourself.")
         )
-        prompt = f"""You are a senior Japanese manga story analyst preparing an English localization.
-Read all OCR text before translation. This is fictional adult material; describe it neutrally without censoring it.
-Detect separate stories using textual chapter titles, cast/setting resets, endings, and narrative discontinuities.
-Return JSON only. Each story has start_page, end_page, confidence, summary, characters, relationships, glossary,
-voice_notes, continuity, ambiguities, honorific_policy, language_features, and localization_conventions.
-Each important recurring character has name and voice: register, politeness, directness, traits, dialect
-(detected, type, confidence, evidence, communicative_effect, localization_strategy), slang_style
-(level, categories, localization_strategy), sentence_style, verbal_habits, pronoun_notes, and localization_notes.
-Use language_features entries with pages, speaker, source, type, literal_meaning, contextual_meaning, tone,
-function, preferred_strategy, possible_renderings, and confidence (omit inapplicable fields). Use
-honorific_policy {{default, rules:[{{form, strategy, reason}}]}} and localization_conventions with dialect_strategy,
-slang_strategy, profanity_strategy, recurring_idioms, and forms_of_address.
-Analyze translation-relevant speech rather than treating all dialogue as standard Japanese. Detect supported
-dialects and sociolects (including regional, rough, feminine-coded, gyaru, delinquent, elderly, childish,
-internet, formal, archaic, refined, subordinate, and professional speech), slang, idioms/fixed expressions,
-sentence-ending particles, pronouns, honorifics/forms of address, and recurring idiolect. Record only meaningful
-features, with source, speaker, pages, type, contextual and literal meaning where useful, tone/function,
-confidence, and a preferred English strategy. Include natural English renderings when useful and note tempting
-choices that would distort age, identity, era, or intensity. Do not map a Japanese dialect to an English regional
-accent; describe its communicative effect and recommend a non-stereotyping strategy. Do not mechanically
-translate particles or pronouns, or replace Japanese slang with transient American internet slang by default.
-For honorifics and forms of address, record source form and consistent story-level treatment (retain, translate,
-convey through register, or omit when English implies the relationship). Include honorific_policy rules and
-localization_conventions for names/forms of address, dialect, slang, profanity, idioms, and character voice.
-Flag deliberate speech changes (politeness, pronouns, honorifics, name choice, dialect, roughness) in continuity
-or language_features. Keep voice_notes only as a brief compatibility summary; structured character voice and
-language_features are the authoritative linguistic analysis. Page numbers are one-based and every page must appear exactly once.
-{forced_instruction}
-
-{page_text}"""
+        prompt = build_analysis_prompt(page_text, manual_ranges, auto_within_manual)
         try:
             if len(page_text) <= 50_000:
                 analysis, _ = await self._json_request("analysis", prompt)
@@ -356,11 +319,7 @@ language_features are the authoritative linguistic analysis. Page numbers are on
 
                 analysis, _ = await self._json_request(
                     "analysis-consolidation",
-                    "Consolidate these ordered manga analysis windows into the requested stories JSON. "
-                    "Preserve all structured character voice, honorific_policy, language_features, and "
-                    "localization_conventions alongside the existing story fields. Preserve absolute page "
-                    "numbers, cover every page exactly once, and obey this boundary rule: "
-                    f"{forced_instruction}\n{json.dumps(partials, ensure_ascii=False)}",
+                    build_analysis_consolidation_prompt(forced_instruction, partials),
                 )
                 partials = None  # release after consolidation
         except Exception as exc:
@@ -417,25 +376,13 @@ language_features are the authoritative linguistic analysis. Page numbers are on
             await self._report(f"drafting:{story_index}/{story_count}:{chunk_index}/{chunk_count}")
             chunk = pages[offset:offset + chunk_size]
             payload = [
-                {"page": page["number"], "regions": [{"id": item["id"], "japanese": item["source"]} for item in page["regions"]]}
+                build_page_panel_structure(page["number"], page["regions"], page.get("panels"), include_draft=False)
                 for page in chunk
             ]
-            expected = [item for page in payload for item in page["regions"]]
+            expected = [item for page in chunk for item in page["regions"]]
             if not expected:
                 continue
-            prompt = f"""You are the first-pass Japanese-to-English translator preparing a working draft for a separate senior editor.
-Use the story guide and earlier context to resolve references, speakers, pronouns, and terminology, applying its
-character voice, language_features, honorific_policy, and localization_conventions consistently. Stay close to
-the Japanese meaning, tone, explicitness, and uncertainty. Preserve meaningful honorifics and cultural
-terms. This is an accurate translation draft, not the final polished localization: do not spend this pass
-polishing idioms, rhythm, or localization flourishes, and do not invent context. Translate every region in
-every supplied page. Return JSON only:
-{{"regions":[{{"id":"...","translation":"...","confidence":0.0,"review_reasons":[]}}]}}.
-Include every id once.
-
-STORY GUIDE: {guide}
-FINALIZED EARLIER ENGLISH: {previous[-8000:]}
-CURRENT PAGES: {json.dumps(payload, ensure_ascii=False)}"""
+            prompt = build_draft_prompt(payload, guide, previous)
             values: dict[str, dict[str, Any]] = {}
             provider = _provider_name(self.draft_translator)
             draft_failed = False
@@ -454,17 +401,13 @@ CURRENT PAGES: {json.dumps(payload, ensure_ascii=False)}"""
                 else:
                     # Retry each page individually to rescue as many regions as possible.
                     for sub_page in chunk:
-                        sub_payload = [{"page": sub_page["number"], "regions": [
-                            {"id": item["id"], "japanese": item["source"]}
-                            for item in sub_page["regions"]
-                        ]}]
-                        sub_expected = sub_payload[0]["regions"]
+                        sub_payload = [
+                            build_page_panel_structure(sub_page["number"], sub_page["regions"], sub_page.get("panels"), include_draft=False)
+                        ]
+                        sub_expected = sub_page["regions"]
                         if not sub_expected:
                             continue
-                        sub_prompt = prompt.replace(
-                            json.dumps(payload, ensure_ascii=False),
-                            json.dumps(sub_payload, ensure_ascii=False),
-                        )
+                        sub_prompt = build_draft_prompt(sub_payload, guide, previous)
                         try:
                             sub_data, sub_provider = await self._json_request("draft", sub_prompt)
                             sub_values = self._regions(sub_data, sub_expected)
@@ -509,26 +452,13 @@ CURRENT PAGES: {json.dumps(payload, ensure_ascii=False)}"""
             await self._report(f"editing:{story_index}/{story_count}:{chunk_index}/{chunk_count}")
             chunk = pages[offset:offset + chunk_size]
             payload = [
-                {"page": page["number"], "regions": [{"id": item["id"], "japanese": item["source"], "draft": item["draft"]} for item in page["regions"]]}
+                build_page_panel_structure(page["number"], page["regions"], page.get("panels"), include_draft=True)
                 for page in chunk
             ]
-            expected = [item for page in payload for item in page["regions"]]
+            expected = [item for page in chunk for item in page["regions"]]
             if not expected:
                 continue
-            prompt = f"""You are a separate senior English editor for a professionally localized adult manga.
-Independently compare the Japanese source and the first draft; do not rubber-stamp the draft. Rewrite literal,
-stiff, repetitive, awkward, or AI-sounding English into natural professional localization while preserving the
-Japanese meaning, character voice, exact explicitness, consent/coercion signals, terminology, and hybrid Japanese
-flavor. Apply the story guide's character language profiles, language_features, honorific_policy, and
-localization_conventions consistently, including dialect function and forms of address. Do not invent, omit, censor,
-moralize, or add commentary. A final identical to the draft is acceptable
-only after deliberately checking that it is already natural and accurate. Flag ambiguous OCR, speaker/pronoun
-uncertainty, wordplay, missing context, or a meaning-sensitive rewrite. Return JSON only: {{"regions":[{{"id":"...",
-"translation":"...","confidence":0.0,"review_reasons":[]}}]}}. Include every id once.
-
-STORY GUIDE: {guide}
-FINALIZED EARLIER ENGLISH: {previous[-8000:]}
-CURRENT PAGES: {json.dumps(payload, ensure_ascii=False)}"""
+            prompt = build_editor_prompt(payload, guide, previous)
             try:
                 data, provider = await self._json_request("editing", prompt)
                 values = self._regions(data, expected)
@@ -594,10 +524,11 @@ async def translate_professionally(
     for number, (ctx, _) in enumerate(ordered, 1):
         regions = []
         all_regions = []
+        panels = getattr(ctx, "panel_detections", None) or []
         for region in ctx.text_regions or []:
             if not getattr(region, "region_id", None):
                 region.region_id = uuid.uuid4().hex
-            item = {"id": region.region_id, "source": region.text}
+            item = {"id": region.region_id, "source": region.text, "region": region, "panel_index": getattr(region, "panel_index", -1)}
             if is_preserved_region(region):
                 item.update(
                     draft=region.text,
@@ -611,7 +542,7 @@ async def translate_professionally(
             else:
                 regions.append(item)
             all_regions.append(item)
-        pages.append({"number": number, "ctx": ctx, "regions": regions, "all_regions": all_regions})
+        pages.append({"number": number, "ctx": ctx, "regions": regions, "all_regions": all_regions, "panels": panels})
 
     analysis = await engine.analyze(pages, config.story_plan or config.story_page_ranges)
     story_count = len(analysis["stories"])

@@ -120,8 +120,11 @@ export const useTranslationSettings = () => {
       else setBubbleDetection(savedSettings.bubbleDetection);
     }
     if (shouldRememberSettings && savedSettings.bubbleModel) {
-      if (savedSettings.bubbleModel === "yolov8m" && !savedSettings.migratedDefaultBubbleModel) setBubbleModel("shadowb_manga109");
-      else setBubbleModel(savedSettings.bubbleModel);
+      if ((savedSettings.bubbleModel === "yolov8m" || savedSettings.bubbleModel === "manga109" || savedSettings.bubbleModel === "yolo11_manga_seg") && !savedSettings.migratedDefaultBubbleModel) {
+        setBubbleModel("shadowb_manga109");
+      } else {
+        setBubbleModel(savedSettings.bubbleModel);
+      }
     }
     if (shouldRememberSettings && savedSettings.bubbleConfidence !== undefined) setBubbleConfidence(savedSettings.bubbleConfidence);
     if (shouldRememberSettings && savedSettings.inpainter) setInpainter(savedSettings.inpainter);

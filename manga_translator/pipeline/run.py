@@ -510,6 +510,7 @@ class PipelineRun:
         precomputed_upscale: Image.Image | None = None,
         precomputed_detection: tuple[list, np.ndarray | None, np.ndarray | None] | None = None,
         precomputed_bubbles: list | None = None,
+        precomputed_panels: list | None = None,
         precomputed_inpainting: np.ndarray | None = None,
         stage_already_running: bool = False,
     ) -> dict[str, Any]:
@@ -526,6 +527,7 @@ class PipelineRun:
             precomputed_upscale=precomputed_upscale,
             precomputed_detection=precomputed_detection,
             precomputed_bubbles=precomputed_bubbles,
+            precomputed_panels=precomputed_panels,
             precomputed_inpainting=precomputed_inpainting,
             stage_already_running=stage_already_running,
         )

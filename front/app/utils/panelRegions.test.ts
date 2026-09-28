@@ -48,7 +48,7 @@ assert.equal(parsed[1].order, 2);
 
 assert.equal(parsed[2].id, "panel-3");
 assert.equal(parsed[2].order, 3);
-assert.equal(parsed[2].polygons, undefined);
+assert.deepEqual(parsed[2].polygons, [[[0, 700], [1000, 700], [1000, 1500], [0, 1500]]]);
 
 // Test 3: Array format without root object
 const arrayPayload = [

@@ -512,16 +512,15 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
     // Load Panels
     useEffect(() => {
       const shouldLoadPanels = showPanels || showBubbleRegions;
-      if (!shouldLoadPanels && panelRegionsStatus !== "idle" && panelRegionsLoadedForRef.current === folder) return;
-      if (!folder || !shouldLoadPanels) {
-        if (!shouldLoadPanels) {
-          setDetectedPanelRegions([]);
-          setPanelRegionsStatus("idle");
-        }
+      if (!shouldLoadPanels || (panelRegionsStatus === "loaded" && panelRegionsLoadedForRef.current === folder)) return;
+      if (!folder) {
+        setDetectedPanelRegions([]);
+        setPanelRegionsStatus("error");
         return;
       }
 
       let isMounted = true;
+      setDetectedPanelRegions([]);
       setPanelRegionsStatus("loading");
       fetch(apiUrl(`/api/result/${encodeURIComponent(folder)}/panel_detections.json`))
         .then((res) => {
@@ -536,6 +535,7 @@ export const PreviewImage: React.FC<PreviewImageProps> = React.memo(
         })
         .catch((error) => {
           if (!isMounted) return;
+          console.warn("PreviewImage could not load panel regions:", error);
           setDetectedPanelRegions([]);
           setPanelRegionsStatus("error");
         });

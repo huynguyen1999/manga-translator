@@ -12,6 +12,14 @@ from pathlib import Path
 from server.image_variants import final_file
 from typing import Any, Iterable
 
+from manga_translator.professional_panels import (
+    format_synopsis_transcript,
+    group_transcript_panel_texts,
+    read_page_panels,
+    read_page_regions,
+)
+from manga_translator.professional_prompts import build_synopsis_system_prompt
+
 try:
     import openai
 except ImportError:  # pragma: no cover - requirements include openai in production
@@ -184,10 +192,14 @@ def source_snapshot(pages: Iterable[dict[str, Any]]) -> dict[str, Any]:
     for page in pages_list:
         texts = read_page_text(page)
         extracted = is_page_text_extracted(page, has_group_text=has_group_text)
+        regions = read_page_regions(page)
+        panels = read_page_panels(page)
+        panel_groups = group_transcript_panel_texts(regions, panels) if (regions and panels) else None
         entries.append({
             "folder": page["folder"],
             "name": page["name"],
             "texts": texts,
+            "panel_groups": panel_groups,
             "missing": not extracted,
         })
         fingerprint_entries.append({
@@ -473,11 +485,7 @@ def synopsis_status(
 
 
 def transcript_pages(snapshot: dict[str, Any]) -> list[str]:
-    return [
-        f"[Page {entry['name']}]\n" + "\n".join(entry["texts"])
-        for entry in snapshot["entries"]
-        if entry["texts"]
-    ]
+    return format_synopsis_transcript(snapshot)
 
 
 def chunk_transcript(pages: list[str], count_tokens, limit: int = 3500) -> list[str]:
@@ -629,43 +637,7 @@ async def _summary_completion(
         messages=[
             {
                 "role": "system",
-                "content": (
-                    f"{instruction} Write all prose in English, regardless of target language code {language}. "
-                    "Do not output Japanese text. Chinese words or characters may remain when they are "
-                    "names, titles, places, organizations, or other meaningful source terms. "
-                    "First determine whether the source is one continuous narrative or a collection of distinct "
-                    "stories. Split stories only when supported by a title, chapter boundary, substantial cast "
-                    "or setting reset, unrelated premise, or similarly strong evidence. Do not treat scene "
-                    "changes, flashbacks, or time skips as story boundaries. If a boundary is uncertain, preserve "
-                    "page order and describe the transition cautiously rather than asserting a split. "
-                    "For one continuous narrative, use these exact plain-text headings: OVERVIEW; SETTING AND "
-                    "PREMISE; KEY CHARACTERS AND RELATIONSHIPS; STORY; ENDING AND UNRESOLVED THREADS; ENTITIES "
-                    "AND CONCEPTS. For a collection, use COLLECTION OVERVIEW, then numbered STORY sections using "
-                    "source titles when available; within each story cover its premise, relevant characters, "
-                    "dense chronology, ending, and unresolved threads. Finish with one ENTITIES AND CONCEPTS "
-                    "section, grouping entries by story where names or concepts could be confused. "
-                    "Be thorough about what happens and why. Summarize conversations only by what they reveal, "
-                    "decide, change, or cause; do not quote dialogue or narrate speaker-by-speaker exchanges. "
-                    "Retain minor events only when they explain later actions, character development, relationships, "
-                    "world rules, or consequences. Aim for 1,200–2,500 words according to source complexity and "
-                    "never exceed 3,000 words for the entire manga or collection. "
-                    "When OCR or page context is incomplete, cautiously infer the most likely meaning from the "
-                    "surrounding dialogue, page order, recurring names, and clear cause-and-effect clues. "
-                    "Flag only material uncertainty as likely, apparent, or suggested; omit unreadable trivia. "
-                    "Never invent specific scenes, dialogue, identities, motivations, events, or links between stories. "
-                    "Use natural, professional, reader-friendly wording instead of raw OCR phrasing, profanity, "
-                    "slurs, crude expressions, or unnecessarily graphic wording. Preserve the intended meaning, "
-                    "plot relevance, consent, threat, and severity without repeating vulgar language verbatim. "
-                    "Exclude additional details unrelated to the plot, publication information, credits, "
-                    "author or editor notes, afterword notes, advertisements, and front-cover or back-cover "
-                    "text. State each event, fact, interpretation, and relationship change once in its most "
-                    "appropriate section. Consolidate repeated source material; keep overview sections high-level "
-                    "without duplicating detailed story sections; and avoid repeated sentence openings, conclusions, "
-                    "section restarts, cyclic recaps, and recurring paragraph patterns. Before responding, silently "
-                    "remove duplicated events and paragraphs. End immediately after ENTITIES AND CONCEPTS; never "
-                    "restart or continue the synopsis. Use only source-supported facts and do not mention OCR or "
-                    "these instructions."
-                ),
+                "content": build_synopsis_system_prompt(instruction, language),
             },
             {"role": "user", "content": text},
         ],

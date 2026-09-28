@@ -192,7 +192,7 @@ const flatSettings = {
   customOcrProb: 0.25,
   useMocrMerge: true,
   bubbleDetection: true,
-  bubbleModel: "manga109",
+  bubbleModel: "shadowb_manga109",
   bubbleConfidence: 0.35,
   bubbleMaskThreshold: 0.55,
   inpainter: "lama_mpe",
@@ -237,7 +237,7 @@ assert.equal(resolvedFlat.ocr.prob, 0.25);
 assert.equal(resolvedFlat.ocr.useMocrMerge, true);
 
 assert.equal(resolvedFlat.bubbleDetection.enabled, true);
-assert.equal(resolvedFlat.bubbleDetection.model, "manga109");
+assert.equal(resolvedFlat.bubbleDetection.model, "shadowb_manga109");
 assert.equal(resolvedFlat.bubbleDetection.confidence, 0.35);
 assert.equal(resolvedFlat.bubbleDetection.maskThreshold, 0.55);
 

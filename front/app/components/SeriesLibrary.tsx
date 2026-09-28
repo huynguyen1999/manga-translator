@@ -107,6 +107,7 @@ export const SeriesLibrary: React.FC<SeriesLibraryProps> = ({
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isRenaming, setIsRenaming] = useState(false);
   const [editingTitle, setEditingTitle] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -183,6 +184,7 @@ export const SeriesLibrary: React.FC<SeriesLibraryProps> = ({
       const value = await fetchSeriesDetail(id);
       setDetail(value);
       setEditingTitle(value.title);
+      setIsRenaming(false);
       setSeries((previous) => previous.some((entry) => entry.id === value.id)
         ? previous.map((entry) => entry.id === value.id ? value : entry)
         : [value, ...previous]);
@@ -194,6 +196,7 @@ export const SeriesLibrary: React.FC<SeriesLibraryProps> = ({
   useEffect(() => {
     if (!seriesId) {
       setDetail(null);
+      setIsRenaming(false);
       return;
     }
     seriesPageCacheRef.current.clear();
@@ -205,6 +208,7 @@ export const SeriesLibrary: React.FC<SeriesLibraryProps> = ({
         if (!cancelled) {
           setDetail(value);
           setEditingTitle(value.title);
+          setIsRenaming(false);
           setSeries((previous) => previous.some((entry) => entry.id === value.id)
             ? previous.map((entry) => entry.id === value.id ? value : entry)
             : [value, ...previous]);
@@ -417,9 +421,10 @@ export const SeriesLibrary: React.FC<SeriesLibraryProps> = ({
     setSaving(true);
     setError(null);
     try {
-      const updated = await renameSeries(detail.id, editingTitle);
+      const updated = await renameSeries(detail.id, editingTitle.trim());
       setDetail(updated);
       setEditingTitle(updated.title);
+      setIsRenaming(false);
       setSeries((previous) => previous.map((entry) => entry.id === updated.id ? { ...entry, title: updated.title } : entry));
       await refreshChanged();
     } catch (reason) {
@@ -468,11 +473,80 @@ export const SeriesLibrary: React.FC<SeriesLibraryProps> = ({
 
           {detail && (
             <div className="flex min-w-0 flex-1 items-center gap-3">
-              <SeriesCover series={detail} className="h-16 w-11 sm:h-20 sm:w-14" />
+              <SeriesCover series={detail} className="h-16 w-11 sm:h-20 sm:w-14 shrink-0" />
               <div className="min-w-0 flex-1">
-                <h2 id="series-detail-title" className="truncate text-base sm:text-lg font-bold text-zinc-900 dark:text-zinc-100" title={detail.title}>
-                  {detail.title}
-                </h2>
+                {isRenaming ? (
+                  <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="text"
+                      value={editingTitle}
+                      onChange={(event) => setEditingTitle(event.target.value)}
+                      maxLength={MANGA_TITLE_MAX_LENGTH}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void saveTitle();
+                        }
+                        if (event.key === "Escape") {
+                          setIsRenaming(false);
+                          setEditingTitle(detail.title);
+                        }
+                      }}
+                      autoFocus
+                      disabled={saving}
+                      className="min-w-0 max-w-full rounded border border-indigo-400 bg-white px-2 py-1 text-sm font-semibold text-zinc-900 dark:border-indigo-600 dark:bg-zinc-900 dark:text-zinc-100"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void saveTitle()}
+                      disabled={saving || !editingTitle.trim()}
+                      className="rounded-md p-1.5 text-emerald-600 hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-50 dark:text-emerald-400 dark:hover:bg-emerald-950/40 cursor-pointer transition-colors"
+                      title="Save title"
+                      aria-label="Save title"
+                    >
+                      <Icon icon="carbon:checkmark" className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsRenaming(false);
+                        setEditingTitle(detail.title);
+                      }}
+                      disabled={saving}
+                      className="rounded-md p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300 cursor-pointer transition-colors"
+                      title="Cancel"
+                      aria-label="Cancel"
+                    >
+                      <Icon icon="carbon:close" className="w-4 h-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <h2
+                      id="series-detail-title"
+                      onClick={() => {
+                        setEditingTitle(detail.title);
+                        setIsRenaming(true);
+                      }}
+                      className="truncate text-base sm:text-lg font-bold text-zinc-900 hover:text-indigo-600 dark:text-zinc-100 dark:hover:text-indigo-400 cursor-pointer transition-colors"
+                      title="Click to rename Series"
+                    >
+                      {detail.title}
+                    </h2>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingTitle(detail.title);
+                        setIsRenaming(true);
+                      }}
+                      className="shrink-0 rounded-md p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300 cursor-pointer transition-colors"
+                      title="Rename Series"
+                      aria-label="Rename Series"
+                    >
+                      <Icon icon="carbon:edit" className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">
                   {detail.members.length} {detail.members.length === 1 ? "manga" : "manga in series"}
                 </p>
@@ -493,6 +567,18 @@ export const SeriesLibrary: React.FC<SeriesLibraryProps> = ({
               </button>
             )}
             {detail && (
+              <button
+                type="button"
+                onClick={() => void openAdd()}
+                disabled={saving}
+                className="inline-flex min-h-9 items-center justify-center gap-1 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 cursor-pointer shadow-xs transition-colors"
+                title="Add manga to this series"
+              >
+                <Icon icon="carbon:add" className="h-4 w-4" />
+                <span>Add manga</span>
+              </button>
+            )}
+            {detail && (
               <Button
                 onClick={() => void removeSeries()}
                 className="border-red-200 text-red-600 hover:bg-red-50 dark:border-red-900/60 dark:text-red-400 dark:hover:bg-red-950/30"
@@ -509,33 +595,6 @@ export const SeriesLibrary: React.FC<SeriesLibraryProps> = ({
 
         {detail && (
           <>
-            {/* Title edit & Add Manga action bar */}
-            <div className="flex flex-col gap-2 rounded-xl border border-zinc-200 bg-white p-3.5 sm:p-4 dark:border-zinc-800 dark:bg-zinc-900 sm:flex-row sm:items-end">
-              <label className="min-w-0 flex-1 text-xs font-semibold text-zinc-600 dark:text-zinc-300">
-                Series title
-                <input
-                  value={editingTitle}
-                  onChange={(event) => setEditingTitle(event.target.value)}
-                  maxLength={MANGA_TITLE_MAX_LENGTH}
-                  className="mt-1 block w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                />
-              </label>
-              <div className="flex items-center gap-2 shrink-0">
-                <Button onClick={() => void saveTitle()} disabled={saving || !editingTitle.trim()}>
-                  Save title
-                </Button>
-                <button
-                  type="button"
-                  onClick={() => void openAdd()}
-                  disabled={saving}
-                  className="inline-flex min-h-9 items-center justify-center gap-1 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 cursor-pointer shadow-xs transition-colors"
-                >
-                  <Icon icon="carbon:add" className="h-4 w-4" />
-                  <span>Add manga</span>
-                </button>
-              </div>
-            </div>
-
             {/* Member list */}
             <div className="space-y-2.5">
               {detail.members.map((member, index) => (

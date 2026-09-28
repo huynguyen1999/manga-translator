@@ -67,7 +67,6 @@ class BubbleDetector:
         self.model = YOLO(str(_resolve_checkpoint(model)))
         raw_names = getattr(self.model, "names", {})
         self.class_map = {int(k): normalize_class_name(v) for k, v in raw_names.items()} if isinstance(raw_names, dict) else {}
-        self.is_multiclass = len(self.class_map) > 1 and any(name in ("panel", "balloon") for name in self.class_map.values())
         self.last_panel_detections: list[PanelDetection] = []
 
     def __call__(self, image: np.ndarray, confidence: float | None = None, mask_threshold: float | None = None, image_size: int | None = None) -> list[BubbleDetection]:
@@ -149,7 +148,6 @@ class BubbleDetector:
             boxes_iter = boxes_iter + [None] * (len(masks_data) - len(boxes_iter))
 
         class_map = getattr(self, "class_map", {})
-        is_multiclass = getattr(self, "is_multiclass", False)
 
         for idx, mask in enumerate(masks_data):
             conf_t = boxes_conf[idx] if (boxes_conf is not None and idx < len(boxes_conf)) else 1.0
@@ -158,7 +156,7 @@ class BubbleDetector:
                 continue
             box = boxes_iter[idx]
             cls_id = int(box.cls[0].item()) if (box is not None and hasattr(box, "cls") and len(box.cls) > 0) else 0
-            norm_class = class_map.get(cls_id, "balloon" if not is_multiclass else f"class_{cls_id}")
+            norm_class = class_map.get(cls_id, "balloon")
 
             values = mask.detach().float().cpu().numpy() if hasattr(mask, "detach") else np.asarray(mask, dtype=np.float32)
             if values.shape != image_shape:
@@ -169,7 +167,7 @@ class BubbleDetector:
                 xyxy = [int(v) for v in box.xyxy[0].tolist()] if (box is not None and hasattr(box, "xyxy") and len(box.xyxy) > 0) else [0, 0, image_shape[1], image_shape[0]]
                 polys = [[[int(pt[0]), int(pt[1])] for pt in raw_polygons[idx].tolist()]] if raw_polygons is not None and idx < len(raw_polygons) and len(raw_polygons[idx]) > 0 else []
                 raw_panels.append(PanelDetection(xyxy=xyxy, polygons=polys, confidence=score, mask=binary))
-            elif norm_class in ("balloon", "bubble") or not is_multiclass:
+            elif norm_class in ("balloon", "bubble"):
                 if np.count_nonzero(binary) >= 100 or np.count_nonzero(binary) == binary.size:
                     bubbles.append(BubbleDetection(binary, score))
 

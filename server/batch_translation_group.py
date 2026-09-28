@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from manga_translator import Context
+from manga_translator.detection.panel import deserialize_panel_detections
 from manga_translator.pipeline.run import deserialize_textblocks, serialize_regions
 
 
@@ -64,7 +65,7 @@ async def process_translation_group(
             if result_dir:
                 for name in (
                     "pipeline_manifest.json", "detection.json", "ocr.json",
-                    "text_regions_merged.json", "bubble_detections.json",
+                    "text_regions_merged.json", "bubble_detections.json", "panel_detections.json",
                 ):
                     path = result_dir / name
                     if name not in saved_documents and path.is_file():
@@ -73,14 +74,12 @@ async def process_translation_group(
                         except (OSError, UnicodeError, json.JSONDecodeError):
                             pass
             merged_data = saved_documents.get("text_regions_merged.json")
+            panel_data = saved_documents.get("panel_detections.json")
 
             ctx = Context()
-            if merged_data:
-                ctx.text_regions = deserialize_textblocks(merged_data)
-                ctx.result_documents = saved_documents
-            else:
-                ctx.text_regions = []
-                ctx.result_documents = saved_documents
+            ctx.text_regions = deserialize_textblocks(merged_data) if merged_data else []
+            ctx.result_documents = saved_documents
+            ctx.panel_detections = deserialize_panel_detections(panel_data) if panel_data else []
 
             if folder:
                 ctx.debug_folder = folder

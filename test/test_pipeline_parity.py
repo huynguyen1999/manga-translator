@@ -25,7 +25,7 @@ class PipelineParityTests(unittest.TestCase):
             ),
             bubble_detection=BubbleDetectionConfig(
                 enabled=True,
-                model="yolov8m",
+                model="shadowb_manga109",
                 confidence=0.25,
                 mask_threshold=0.5,
                 padding=9,

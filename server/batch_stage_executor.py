@@ -346,15 +346,15 @@ async def process_checkpointed_model_group(
                 translator._current_image_context["started_at"] = run.manifest.get("createdAt")
             translator._pipeline_run = run
             run.translator = translator
-            kwargs = (
-                {"precomputed_upscale": output}
-                if stage_id == "upscaling"
-                else {"precomputed_detection": output}
-                if stage_id == "detection"
-                else {"precomputed_bubbles": output}
-                if stage_id == "bubble_detection"
-                else {"precomputed_inpainting": output}
-            )
+            if stage_id == "bubble_detection":
+                bubbles, panels = output if isinstance(output, tuple) else (output, [])
+                kwargs = {"precomputed_bubbles": bubbles, "precomputed_panels": panels}
+            elif stage_id == "upscaling":
+                kwargs = {"precomputed_upscale": output}
+            elif stage_id == "detection":
+                kwargs = {"precomputed_detection": output}
+            else:
+                kwargs = {"precomputed_inpainting": output}
             await run.retry_stage(
                 stage_id,
                 config,

@@ -287,7 +287,7 @@ export const resolvePipelineStepSettings = (
   const ignoreBubble = numberValue(cfgOcr.ignore_bubble);
 
   const bubbleEnabled = booleanValue(cfgBubble.enabled, settings?.bubbleDetection) ?? false;
-  const bubbleModel = stringValue(cfgBubble.model, settings?.bubbleModel) || "manga109";
+  const bubbleModel = stringValue(cfgBubble.model, settings?.bubbleModel) || "shadowb_manga109";
   const bubbleConfidence = numberValue(cfgBubble.confidence, settings?.bubbleConfidence);
   const bubbleMaskThreshold = numberValue(cfgBubble.mask_threshold, settings?.bubbleMaskThreshold);
   const bubbleSize = numberValue(cfgBubble.image_size);

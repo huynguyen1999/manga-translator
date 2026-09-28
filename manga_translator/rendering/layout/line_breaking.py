@@ -61,6 +61,9 @@ class RowGeometry:
     intervals: List[BandSlot]
 
 
+_LineBackpointer = Tuple[str, int, int, int, int, BandSlot, Any]
+
+
 def _build_row_slot_table(
     geom: BubbleGeometry,
     font_size: int,
@@ -378,10 +381,8 @@ def _dp_word_break_rows(
     for width in word_widths:
         word_width_prefix.append(word_width_prefix[-1] + width)
 
-    # Trailing whitespace needs no state: once all words are placed, the
-    # paragraph ends and remaining rows are free.
-    # Result per state: line count -> (cost, candidate lines) pairs.
-    memo: Dict[Tuple[Any, ...], Dict[int, List[Tuple[float, List[PlacedLine]]]]] = {}
+    # Trailing rows are free; each state maps line count to (cost, candidate path) pairs.
+    memo: Dict[Tuple[Any, ...], Dict[int, List[Tuple[float, Optional[_LineBackpointer]]]]] = {}
     prof = get_solver_profile()
 
     # These bounds are necessary conditions, so they only reject states that
@@ -404,22 +405,26 @@ def _dp_word_break_rows(
     # previous placement in the DP state. Reuse their exact original order.
     placement_options: Dict[Tuple[int, int], List[Tuple[int, int, BandSlot, int, int, float, float, str]]] = {}
 
-    BEFORE_TEXT = 0
-    IN_TEXT = 1
+    BEFORE_TEXT, IN_TEXT = 0, 1
+
+    def same_path_identity(first: Optional[_LineBackpointer], second: Optional[_LineBackpointer], count: int) -> bool:
+        while count and first is not None and second is not None and (first[0], first[1]) == (second[0], second[1]):
+            first, second, count = first[6], second[6], count - 1
+        return count == 0 and first is None and second is None
 
     def _add_candidates(
-        dest: Dict[int, List[Tuple[float, List[PlacedLine]]]],
+        dest: Dict[int, List[Tuple[float, Optional[_LineBackpointer]]]],
         cand_lines_cnt: int,
         cand_cost: float,
-        cand_lines: List[PlacedLine],
+        cand_path: Optional[_LineBackpointer],
     ) -> None:
         if cand_lines_cnt not in dest:
-            dest[cand_lines_cnt] = [(cand_cost, cand_lines)]
+            dest[cand_lines_cnt] = [(cand_cost, cand_path)]
         else:
             bucket = dest[cand_lines_cnt]
-            if any(len(b[1]) == len(cand_lines) and all(l1.text == l2.text and l1.y == l2.y for l1, l2 in zip(b[1], cand_lines)) for b in bucket):
+            if any(same_path_identity(path, cand_path, cand_lines_cnt) for _, path in bucket):
                 return
-            bucket.append((cand_cost, cand_lines))
+            bucket.append((cand_cost, cand_path))
             bucket.sort(key=lambda item: item[0])
             del bucket[max_per_bucket:]
 
@@ -431,10 +436,10 @@ def _dp_word_break_rows(
         prev_center_x: Optional[float],
         prev_line_y: Optional[int],
         text_state: int,
-    ) -> Dict[int, List[Tuple[float, List[PlacedLine]]]]:
+    ) -> Dict[int, List[Tuple[float, Optional[_LineBackpointer]]]]:
         prof.dp_invocations += 1
         if wi == nw:
-            return {0: [(0.0, [])]}
+            return {0: [(0.0, None)]}
         if ri == nr:
             return {}
 
@@ -459,7 +464,7 @@ def _dp_word_break_rows(
 
         prof.dp_states_created += 1
         row = rows[ri]
-        results_by_lines: Dict[int, List[Tuple[float, List[PlacedLine]]]] = {}
+        results_by_lines: Dict[int, List[Tuple[float, Optional[_LineBackpointer]]]] = {}
 
         row_can_fit_next = row_max_widths[ri] >= word_widths[wi]
         if text_state == IN_TEXT and not row_can_fit_next:
@@ -527,20 +532,13 @@ def _dp_word_break_rows(
                 IN_TEXT,
             )
             for rem_cnt, cand_list in rem_dict.items():
-                for rem_cost, rem_lines in cand_list:
-                    this_line = PlacedLine(
-                        text=line_text,
-                        y=row.y,
-                        x=x,
-                        width=run_w,
-                        height=font_size,
-                        slot=slot,
-                    )
+                for rem_cost, rem_path in cand_list:
+                    path = (line_text, row.y, x, run_w, font_size, slot, rem_path)
                     _add_candidates(
                         results_by_lines,
                         rem_cnt + 1,
                         step_cost + rem_cost,
-                        [this_line] + rem_lines,
+                        path,
                     )
 
         if text_state == IN_TEXT and row_can_fit_next:
@@ -557,12 +555,12 @@ def _dp_word_break_rows(
             )
 
         for rem_cnt, cand_list in skip_dict.items():
-            for skip_cost, skip_lines in cand_list:
+            for skip_cost, skip_path in cand_list:
                 _add_candidates(
                     results_by_lines,
                     rem_cnt,
                     skip_cost,
-                    skip_lines,
+                    skip_path,
                 )
 
         memo[key] = results_by_lines
@@ -571,12 +569,17 @@ def _dp_word_break_rows(
     root_dict = dp(0, 0, None, None, None, None, BEFORE_TEXT)
     if not root_dict:
         return []
-
     candidates: List[List[PlacedLine]] = []
     expected_words = sum(word != HARD_LINE_BREAK for word in words)
     for line_cnt in sorted(root_dict.keys()):
-        for cost, lines in root_dict[line_cnt]:
-            placed_words = sum(len(line.text.split()) for line in lines)
+        for cost, path in root_dict[line_cnt]:
+            placed_words = 0
+            lines: List[PlacedLine] = []
+            current = path
+            while current is not None:
+                placed_words += len(current[0].split())
+                lines.append(PlacedLine(*current[:6]))
+                current = current[6]
             if placed_words == expected_words:
                 candidates.append(lines)
 

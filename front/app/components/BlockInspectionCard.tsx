@@ -68,7 +68,7 @@ export const BlockInspectionCard: React.FC<BlockInspectionCardProps> = ({
               <span>Original Japanese</span>
               <button
                 type="button"
-                onClick={() => void onCopy(block.original_text, "original")}
+                onClick={() => void onCopy(block.original_text || "", "original")}
                 className="flex items-center gap-1 text-zinc-400 hover:text-zinc-200 transition-colors lowercase"
               >
                 <Icon icon={copiedKind === "original" ? "carbon:checkmark" : "carbon:copy"} className="h-2.5 w-2.5" />
@@ -87,7 +87,7 @@ export const BlockInspectionCard: React.FC<BlockInspectionCardProps> = ({
               <span>English Translation</span>
               <button
                 type="button"
-                onClick={() => void onCopy(block.translation, "translation")}
+                onClick={() => void onCopy(block.translation || "", "translation")}
                 className="flex items-center gap-1 text-zinc-400 hover:text-zinc-200 transition-colors lowercase"
               >
                 <Icon icon={copiedKind === "translation" ? "carbon:checkmark" : "carbon:copy"} className="h-2.5 w-2.5" />

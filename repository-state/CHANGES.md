@@ -2,6 +2,38 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-28 — Layout step behavior contract and rule documentation sync
+
+- Reason: Layout algorithms, free-text candidate footprint validation, early fast-gate acceptance, bubble DP backpointers, spiral block centering, dictionary hyphenation rescue, and joint panel constraints received refinements across recent updates that needed to be reflected in the repository state compatibility contract.
+- Updated `repository-state/LAYOUT_AND_TEXT_MERGE_RULES.md` to document the complete layout pipeline order, OCR textline merge thresholds, free-text coalescing invariants, bubble shape-aware line breaking & centering, free-text ownership & fast-gate footprint validation, region font policy & consistency floors, page-level joint collision selection, suppression review semantics, and the corresponding characterization test map.
+
+## 2026-09-28 — Batch scheduler bubble and panel detection persistence
+
+- Reason: Batch translation jobs discarded detected panels during the batch bubble detection stage because the batch runner returned only speech bubbles, causing `panel_detections.json` to be serialized as empty `[]`.
+- Updated `run_bubble_detection_batch` to preserve and return both `(bubbles, panels)` tuples for each context.
+- Unpacked and forwarded `precomputed_bubbles` and `precomputed_panels` in `server/batch_stage_executor.py`, `manga_translator/bubble_detection_stage.py`, `manga_translator/pipeline/run.py`, and `manga_translator/pipeline/retry.py`.
+- Added unit tests in `test/test_joint_bubble_panel_detection.py` validating batch execution and precomputed panels handling.
+
+## 2026-09-28 — End-to-end panel detection propagation and overlay visualization fix
+
+- Reason: Manga frame/panel bounding polygons and order badges (`#1, #2...`) were missing from the UI page detail overlay because `panel_detections.json` was not rehydrated in batch translation groups, retry/rerun stages, or cached pipeline completions, and the frontend panel loader had an inverted guard condition.
+- Plumbed `panel_detections.json` serialization and deserialization across `server/batch_translation_group.py`, `manga_translator/pipeline/retry.py` (`bubble_detection`, `textline_merge`, `translation`), and `manga_translator/pipeline/completion.py`.
+- Corrected the panel fetching effect guard in `front/app/components/PreviewImage.tsx` to cleanly cache loaded results, exported `normalizePanelBoxes` in `panelRegions.ts`, and updated TypeScript definitions and unit tests across frontend and backend.
+
+## 2026-09-28 — Panel-grouped hierarchical context structuring for LLM localization and synopsis
+
+- Reason: Raw page transcripts with linear region ordering often split coherent conversational exchanges, causing the LLM to translate speech bubbles in isolation or follow imperfect OCR reading order rather than visual scene context.
+- Implemented panel-as-primary-context architecture while retaining text regions as atomic translation output units (`{"regions": [{"id": ..., "translation": ..., ...}]}`):
+  - Created `manga_translator/professional_panels.py` (<310 lines) with spatial and index-based region assignment (`assign_regions_to_panels`), structured page payload builder (`build_page_panel_structure`), hierarchical analysis transcript formatting (`format_page_transcript_for_analysis`), synopsis panel grouping (`group_transcript_panel_texts`), and synopsis transcript builder (`format_synopsis_transcript`).
+  - Extracted prompt templates and system prompt builders into `manga_translator/professional_prompts.py` (<220 lines), instructing LLMs across Story Analysis, First Draft Translation, Senior Editor Pass, and Manga Synopsis Generation to treat panels as primary narrative context units and reading order as an estimated guide (soft error correction), with seamless fallback to `unassigned_regions`.
+  - Refactored `manga_translator/professional_translation.py` and `server/manga_summary.py` to forward panel detections and format panel-structured prompts, keeping both files well below line limit ratchets.
+  - Added characterization and unit tests in `test/test_professional_panels.py` and `test/test_professional_translation.py`.
+
+## 2026-09-28 — Compact Series detail header with inline title editing
+
+- Reason: Having a separate standalone card below the header bar solely for editing the series title and adding manga consumed unnecessary vertical space and created visual redundancy.
+- Integrated series title inline editing (click to rename with save/cancel buttons and Enter/Escape support) and the "Add manga" action button directly into the top Series detail header bar in `SeriesLibrary.tsx`, completely removing the separate title edit card for a more compact layout.
+
 ## 2026-09-28 — Compact Jobs sidebar workflow
 
 - Reason: The Jobs sidebar's bulk-action row and tall nested page cards obscured live progress and required extra scanning.
@@ -10,8 +42,15 @@ Record new features and large changes here. Keep implementation detail in code, 
 ## 2026-09-28 — Exact bubble line-break DP optimization
 
 - Reason: Saved-page profiling showed word-break DP dominated several slow layout calls, while reducing search budgets could discard higher-quality alternatives.
-- Reused row/word placement options, pruned only suffixes whose words cannot fit any remaining row, jumped over post-text rows that cannot fit the next word, and precomputed hard-break lookups.
-- Validation: All eight saved-page layout artifacts and rendered JPEGs remained byte-identical. Comparing direct profiles across the same cases showed 7.7% fewer DP invocations and 16.4% fewer created states; elapsed timings varied substantially between runs.
+- Reused row/word placement options, pruned only suffixes whose words cannot fit any remaining row, jumped over post-text rows that cannot fit the next word, and precomputed hard-break lookups. Candidate paths now use backpointers instead of copying line lists, and centering validates cached offsets without allocating rejected translations.
+- Validation: Saved-page regression renders remained byte-identical. On the six-page local benchmark, aggregate bubble-solver time fell from 9.05s to 7.56s in matched single runs; focused layout tests and the source line-count ratchet pass.
+
+## 2026-09-28 — Deprecate and remove legacy single-class speech bubble detector models
+
+- Removed old single-class speech bubble detector models (`yolov8m_seg-speech-bubble.pt`, `juithealien/manga109-segmentation-bubble`, `chiqui7/yolo11-manga-seg`) and dead evaluation code.
+- Unified bubble and panel detection entirely on the multi-class joint neural segmentation model (`ShadowB/Manga109-panel-balloon-text-yolov26-segmentation`).
+- Configured model checkpoint resolver (`resolve_model_checkpoint` in `manga_translator/detection/panel.py`) and frontend settings hydration to alias any remaining legacy model strings to `shadowb_manga109`.
+- Streamlined `BubbleDetector` in `manga_translator/detection/bubble.py` to natively parse multi-class output masks and bounding boxes for simultaneous panel and bubble extraction.
 
 ## 2026-09-28 — Multi-class joint speech bubble and panel detection with interactive web visualization
 

@@ -8,8 +8,8 @@ import { BlockInspectionCard } from "./BlockInspectionCard";
 
 interface PreviewOverlayProps {
   imageCoordinateSize: { width: number; height: number };
-  bubbleCoordinateSize?: { width: number; height: number };
-  panelCoordinateSize?: { width: number; height: number };
+  bubbleCoordinateSize?: { width: number; height: number } | null;
+  panelCoordinateSize?: { width: number; height: number } | null;
   detectionCoordinateSize: { width: number; height: number };
   showBubbleRegions?: boolean;
   detectedBubbleRegions: DetectedBubbleRegion[];

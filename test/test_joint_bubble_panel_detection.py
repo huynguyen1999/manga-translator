@@ -174,3 +174,64 @@ class TestBubbleDetectorJointParsing:
         assert panels[0].confidence == pytest.approx(0.95)
         assert panels[0].order_index == 1
         assert panels[0].xyxy == [10, 10, 190, 190]
+
+
+class TestBubbleDetectionStageBatch:
+    @pytest.mark.asyncio
+    async def test_run_bubble_detection_batch_returns_bubbles_and_panels(self):
+        from manga_translator.bubble_detection_stage import run_bubble_detection_batch
+        from manga_translator.config import Config
+        from manga_translator.utils import Context
+
+        cfg = Config()
+        ctx1 = Context(img_rgb=np.zeros((100, 100, 3), dtype=np.uint8))
+        ctx2 = Context(img_rgb=np.zeros((100, 100, 3), dtype=np.uint8))
+
+        bubble1 = BubbleDetection(mask=np.zeros((100, 100), dtype=bool), confidence=0.9)
+        panel1 = PanelDetection(xyxy=[0, 0, 100, 100], polygons=[], confidence=0.95, order_index=1)
+
+        async def fake_dispatch(images, b_cfg, device):
+            return [([bubble1], [panel1]), ([], [])]
+
+        owner = MagicMock()
+        owner.device = "cpu"
+        owner._mps_call.side_effect = lambda fn, *args: fn(*args)
+
+        results = await run_bubble_detection_batch(owner, [cfg, cfg], [ctx1, ctx2], dispatch_batch=fake_dispatch)
+
+        assert len(results) == 2
+        assert results[0] == ([bubble1], [panel1])
+        assert ctx1.bubble_detections == [bubble1]
+        assert ctx1.panel_detections == [panel1]
+        assert results[1] == ([], [])
+        assert ctx2.bubble_detections == []
+        assert ctx2.panel_detections == []
+
+    @pytest.mark.asyncio
+    async def test_run_bubble_detection_precomputed_panels(self):
+        from manga_translator.bubble_detection_stage import run_bubble_detection
+        from manga_translator.config import Config
+        from manga_translator.utils import Context
+
+        cfg = Config()
+        ctx = Context(img_rgb=np.zeros((100, 100, 3), dtype=np.uint8))
+        panel = PanelDetection(xyxy=[0, 0, 100, 100], polygons=[], confidence=0.95, order_index=1)
+        owner = MagicMock()
+        owner._pipeline_run = None
+
+        await run_bubble_detection(
+            owner,
+            cfg,
+            ctx,
+            report_progress=False,
+            precomputed_detections=[],
+            precomputed_panels=[panel],
+            detect_bubbles=MagicMock(),
+            dispatch_detection=MagicMock(),
+            group_regions_by_bubbles=lambda regions, bubbles, **kw: regions,
+            logger=MagicMock(),
+        )
+
+        assert ctx.panel_detections == [panel]
+        assert ctx.bubble_detections == []
+

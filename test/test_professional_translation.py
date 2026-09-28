@@ -243,5 +243,50 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine._get_translator_for_stage("editing"), Translator.deepseek)
 
 
+    async def test_panel_context_in_draft_and_analysis_prompts(self):
+        config = TranslatorConfig(
+            translator="deepseek",
+            target_lang="ENG",
+            translation_quality="professional",
+        )
+        engine = ProfessionalTranslator(config)
+        recorded_prompts = {}
+
+        async def fake_request(stage, prompt):
+            recorded_prompts[stage] = prompt
+            return ({"stories": [{"start_page": 1, "end_page": 1, "confidence": 1.0}]}, "deepseek")
+
+        engine._json_request = fake_request
+
+        pages = [
+            {
+                "number": 1,
+                "panels": [{"xyxy": [0, 0, 100, 100], "order": 1}],
+                "regions": [
+                    {"id": "r1", "panel_index": 0, "source": "こんにちは"},
+                    {"id": "r2", "source": "ナレーション"},
+                ],
+            }
+        ]
+
+        await engine.analyze(pages, None)
+        self.assertIn("[PANEL p1_01 | PANEL ORDER 1]", recorded_prompts["analysis"])
+        self.assertIn("[r1 | estimated order 1]\nこんにちは", recorded_prompts["analysis"])
+        self.assertIn("[UNASSIGNED REGIONS]", recorded_prompts["analysis"])
+        self.assertIn("[r2 | estimated order 1]\nナレーション", recorded_prompts["analysis"])
+
+        story = {"start_page": 1, "end_page": 1, "confidence": 1.0}
+        async def fake_draft_request(stage, prompt):
+            recorded_prompts[stage] = prompt
+            return ({"regions": [{"id": "r1", "translation": "Hello", "confidence": 1.0, "review_reasons": []}, {"id": "r2", "translation": "Narration", "confidence": 1.0, "review_reasons": []}]}, "deepseek")
+
+        engine._json_request = fake_draft_request
+        await engine.localize_story(story, pages)
+        self.assertIn('"panel_id": "p1_01"', recorded_prompts["draft"])
+        self.assertIn('"japanese": "こんにちは"', recorded_prompts["draft"])
+        self.assertIn('"unassigned_regions"', recorded_prompts["draft"])
+
+
 if __name__ == "__main__":
     unittest.main()
+

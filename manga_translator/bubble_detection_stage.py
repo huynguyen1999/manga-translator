@@ -1,6 +1,6 @@
-"""Bubble and panel detection stage calls used by MangaTranslator."""
 import asyncio
 import json
+from pathlib import Path
 import time
 import uuid
 import numpy as np
@@ -28,14 +28,16 @@ async def run_bubble_detection_batch(owner, configs: list[Config], contexts: lis
         raise RuntimeError(f"Bubble detector returned {len(out)} pages for {len(images)} inputs")
     for ctx, item in zip(contexts, out):
         ctx.bubble_detections, ctx.panel_detections = item if isinstance(item, tuple) else (item, [])
-    return [ctx.bubble_detections for ctx in contexts]
+    return [(ctx.bubble_detections, ctx.panel_detections) for ctx in contexts]
 
 
 async def run_bubble_detection(owner, config: Config, ctx: Context, report_progress: bool = True,
-                               precomputed_detections: list[BubbleDetection] | None = None, *,
+                               precomputed_detections: list[BubbleDetection] | None = None,
+                               precomputed_panels: list | None = None, *,
                                detect_bubbles, dispatch_detection, group_regions_by_bubbles, logger):
     """Run optional bubble + panel detection before translation in every pipeline mode."""
-    ctx.bubble_detections, ctx.panel_detections = precomputed_detections or [], []
+    ctx.bubble_detections = precomputed_detections or []
+    ctx.panel_detections = precomputed_panels or []
     ctx._bubble_detection_done = True
     for region in ctx.text_regions or []:
         if not getattr(region, 'region_id', None):
@@ -43,7 +45,7 @@ async def run_bubble_detection(owner, config: Config, ctx: Context, report_progr
     if not config.bubble_detection.enabled or getattr(ctx, 'img_rgb', None) is None:
         return
     try:
-        if precomputed_detections is None:
+        if precomputed_detections is None and precomputed_panels is None:
             if report_progress:
                 await owner._report_progress('bubble-detection')
             if hasattr(owner, "_model_usage_timestamps") and isinstance(owner._model_usage_timestamps, dict):
@@ -61,11 +63,10 @@ async def run_bubble_detection(owner, config: Config, ctx: Context, report_progr
             for region in ctx.text_regions:
                 if not getattr(region, 'region_id', None):
                     region.region_id = uuid.uuid4().hex
-        bubble_documents = serialize_bubble_detections(getattr(ctx, 'bubble_detections', None) or [])
-        panel_documents = serialize_panel_detections(getattr(ctx, 'panel_detections', None) or [], ctx.img_rgb.shape[:2] if ctx.img_rgb is not None else None)
+        b_docs = serialize_bubble_detections(getattr(ctx, 'bubble_detections', None) or [])
+        p_docs = serialize_panel_detections(getattr(ctx, 'panel_detections', None) or [], ctx.img_rgb.shape[:2] if ctx.img_rgb is not None else None)
         if getattr(ctx, 'result_documents', None) is not None:
-            ctx.result_documents['bubble_detections.json'] = bubble_documents
-            ctx.result_documents['panel_detections.json'] = panel_documents
+            ctx.result_documents.update({'bubble_detections.json': b_docs, 'panel_detections.json': p_docs})
 
         if ctx.bubble_detections and (getattr(owner, 'verbose', False) or owner._pipeline_run is not None):
             mask = np.zeros(ctx.img_rgb.shape[:2], np.uint8)
@@ -74,14 +75,13 @@ async def run_bubble_detection(owner, config: Config, ctx: Context, report_progr
             await owner._async_imwrite(owner._result_path('bubble_mask.png'), mask)
 
         if owner._pipeline_run is not None:
-            owner._pipeline_run.write_json('bubble_detections.json', bubble_documents)
-            owner._pipeline_run.write_json('panel_detections.json', panel_documents)
+            owner._pipeline_run.write_json('bubble_detections.json', b_docs)
+            owner._pipeline_run.write_json('panel_detections.json', p_docs)
             owner._pipeline_run.refresh()
         elif hasattr(owner, '_result_path') and getattr(owner, '_current_image_context', None):
-            for name, payload in (('bubble_detections.json', bubble_documents), ('panel_detections.json', panel_documents)):
+            for name, payload in (('bubble_detections.json', b_docs), ('panel_detections.json', p_docs)):
                 try:
-                    with open(owner._result_path(name), 'w', encoding='utf-8') as f:
-                        json.dump(payload, f, indent=2)
+                    Path(owner._result_path(name)).write_text(json.dumps(payload, indent=2), encoding='utf-8')
                 except Exception:
                     pass
 

@@ -643,18 +643,13 @@ class MangaTranslator:
         )
 
     async def _detect_speech_bubbles(
-        self,
-        config: Config,
-        ctx: Context,
-        report_progress: bool = True,
+        self, config: Config, ctx: Context, report_progress: bool = True,
         precomputed_detections: list[BubbleDetection] | None = None,
+        precomputed_panels: list | None = None,
     ):
         return await run_bubble_detection(
-            self,
-            config,
-            ctx,
-            report_progress,
-            precomputed_detections,
+            self, config, ctx, report_progress,
+            precomputed_detections, precomputed_panels,
             detect_bubbles=detect_bubbles,
             dispatch_detection=dispatch_bubble_detection,
             group_regions_by_bubbles=group_regions_by_bubbles,

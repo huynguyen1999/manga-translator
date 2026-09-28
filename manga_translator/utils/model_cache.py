@@ -260,7 +260,15 @@ class SharedModelExecutor:
                 await self._evict_model(identity, entry, 'executor shutdown')
 
         if self._model_entries:
-            asyncio.run(self.run_exclusive(unload_all))
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            runner = lambda: asyncio.run(self.run_exclusive(unload_all))
+            if loop and loop.is_running():
+                t = threading.Thread(target=runner); t.start(); t.join()
+            else:
+                runner()
         self._pool.shutdown(wait=True)
 
         def close_loops():
@@ -271,8 +279,7 @@ class SharedModelExecutor:
                 loop.close()
 
         closer = threading.Thread(target=close_loops, name='shared-model-cleanup')
-        closer.start()
-        closer.join()
+        closer.start(); closer.join()
         self._cache.clear()
         with self._registry_lock:
             self._model_entries.clear()
@@ -283,9 +290,7 @@ def model_operation(operation):
     @wraps(operation)
     async def run(*args, **kwargs):
         executor = get_model_executor()
-        if executor is None:
-            return await operation(*args, **kwargs)
-        return await executor.run(operation, *args, **kwargs)
+        return await operation(*args, **kwargs) if executor is None else await executor.run(operation, *args, **kwargs)
     return run
 
 
@@ -299,9 +304,7 @@ def reset_model_cache(token):
 
 def get_model_cache(name: str, default: dict) -> dict:
     cache = _active_cache.get()
-    if cache is None:
-        return default
-    return cache.setdefault(name, {})
+    return default if cache is None else cache.setdefault(name, {})
 
 
 def get_cached_model(name: str, default: dict, key, factory):
@@ -350,12 +353,9 @@ async def _unload_model_cache_entry(name, key):
         await unload(key)
         return
     unloaders = {
-        'colorizer': ('..colorization', 'unload'),
-        'detector': ('..detection', 'unload'),
-        'inpainter': ('..inpainting', 'unload'),
-        'ocr': ('..ocr', 'unload'),
-        'translator': ('..translators', 'unload'),
-        'upscaler': ('..upscaling', 'unload'),
+        'colorizer': ('..colorization', 'unload'), 'detector': ('..detection', 'unload'),
+        'inpainter': ('..inpainting', 'unload'), 'ocr': ('..ocr', 'unload'),
+        'translator': ('..translators', 'unload'), 'upscaler': ('..upscaling', 'unload'),
     }
     module_name, function_name = unloaders[name]
     from importlib import import_module

@@ -65,21 +65,6 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
         "filename": "best.pt",
         "local_subpath": "shadowb_manga109/best.pt",
     },
-    "manga109": {
-        "repo_id": "juithealien/manga109-segmentation-bubble",
-        "filename": "best.pt",
-        "local_subpath": "manga109/best.pt",
-    },
-    "yolov8m": {
-        "repo_id": None,
-        "filename": "yolov8m_seg-speech-bubble.pt",
-        "local_subpath": "yolov8m_seg-speech-bubble.pt",
-    },
-    "yolo11_manga_seg": {
-        "repo_id": "chiqui7/yolo11-manga-seg",
-        "filename": "best.pt",
-        "local_subpath": "yolo11_manga_seg/best.pt",
-    },
 }
 
 
@@ -107,15 +92,13 @@ def resolve_model_checkpoint(model: str) -> Path:
         "manga109-panel-balloon-text-yolov26-segmentation",
         "manga109-panel-balloon-text-yolov26",
         "shadowb/manga109-panel-balloon-text-yolov26-segmentation",
+        "yolov8m",
+        "yolov8",
+        "manga109",
+        "yolo11-manga-seg",
     )
     if canonical_key in shadowb_keys or model.lower().strip() in MODEL_PRESETS:
         preset = MODEL_PRESETS["shadowb_manga109"]
-    elif canonical_key in ("yolo11-manga-seg", "chiqui7/yolo11-manga-seg"):
-        preset = MODEL_PRESETS["yolo11_manga_seg"]
-    elif canonical_key in ("manga109", "juithealien/manga109-segmentation-bubble"):
-        preset = MODEL_PRESETS["manga109"]
-    elif canonical_key in ("yolov8m", "yolov8"):
-        preset = MODEL_PRESETS["yolov8m"]
     elif canonical_key in MODEL_PRESETS:
         preset = MODEL_PRESETS[canonical_key]
     else:

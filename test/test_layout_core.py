@@ -22,6 +22,7 @@ from manga_translator.rendering.layout.models import (
     PanelConstraint,
     PlacedLine,
 )
+from manga_translator.rendering.layout.hard_line_breaks import HARD_LINE_BREAK
 from manga_translator.rendering.layout.free_text_solver import (
     _solve_free_text_region,
     _source_height_candidates,
@@ -312,6 +313,54 @@ def test_compression_thresholds_and_explicit_break_only_split_at_chosen_word():
 
     assert any(len(lines) == 1 and lines[0].text == "INTER- VIEW" for lines in normal)
     assert any([line.text for line in lines] == ["INTER-", "VIEW"] for lines in rescue)
+
+
+def test_dp_preserves_ordered_multislot_hard_break_candidates():
+    rows = [
+        RowGeometry(y, 10, [BandSlot(0, 25, y, y + 10), BandSlot(40, 85, y, y + 10)])
+        for y in (10, 22, 34, 46)
+    ]
+    candidates = _dp_word_break_rows(
+        ["ONE", "TWO", HARD_LINE_BREAK, "THREE", "X"], [10, 10, 0, 30, 8], 2, rows, 10
+    )
+    fingerprints = [
+        tuple(
+            (
+                line.text, line.x, line.y, line.width, line.height,
+                (line.slot.left, line.slot.right, line.slot.y_start, line.slot.y_end),
+            )
+            for line in candidate
+        )
+        for candidate in candidates
+    ]
+    assert len({id(line) for candidate in candidates for line in candidate}) == sum(map(len, candidates))
+
+    assert fingerprints == [
+        (
+            ("ONE TWO", 2, 10, 22, 10, (0, 25, 10, 20)),
+            ("THREE X", 42, 22, 40, 10, (40, 85, 22, 32)),
+        ),
+        (
+            ("ONE TWO", 2, 22, 22, 10, (0, 25, 22, 32)),
+            ("THREE X", 42, 34, 40, 10, (40, 85, 34, 44)),
+        ),
+        (
+            ("ONE", 8, 10, 10, 10, (0, 25, 10, 20)),
+            ("TWO", 8, 22, 10, 10, (0, 25, 22, 32)),
+            ("THREE X", 42, 34, 40, 10, (40, 85, 34, 44)),
+        ),
+        (
+            ("ONE", 8, 22, 10, 10, (0, 25, 22, 32)),
+            ("TWO", 8, 34, 10, 10, (0, 25, 34, 44)),
+            ("THREE X", 42, 46, 40, 10, (40, 85, 46, 56)),
+        ),
+        (
+            ("ONE", 8, 10, 10, 10, (0, 25, 10, 20)),
+            ("TWO", 8, 22, 10, 10, (0, 25, 22, 32)),
+            ("THREE", 48, 34, 30, 10, (40, 85, 34, 44)),
+            ("X", 8, 46, 8, 10, (0, 25, 46, 56)),
+        ),
+    ]
 
 
 def test_dp_prunes_when_a_remaining_word_fits_no_remaining_row():

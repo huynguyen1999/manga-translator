@@ -11,6 +11,7 @@ from PIL import Image
 
 from manga_translator.config import Config
 from manga_translator.detection.bubble import deserialize_bubble_detections, serialize_bubble_detections
+from manga_translator.detection.panel import deserialize_panel_detections
 from manga_translator.mask_builder import build_inpaint_masks
 from manga_translator.pipeline.cpu import CPU_PRIORITY_BACKGROUND
 from manga_translator.pipeline.run import deserialize_textlines
@@ -20,6 +21,20 @@ from manga_translator.rendering.layout import layout_page
 from manga_translator.rendering.layout.frozen import serialize_frozen_layout
 from manga_translator.translation_errors import TranslationFailure
 from manga_translator.utils import Context, dump_image, is_preserved_region, load_image
+
+
+def _load_stage_doc(owner, ctx: Context, filename: str):
+    docs = getattr(ctx, 'result_documents', {}) or {}
+    doc = docs.get(filename) or (owner._pipeline_run._document(filename) if owner._pipeline_run else None)
+    if doc is None:
+        path = owner._result_path(filename)
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                return None
+    return doc
 
 
 async def complete_translation_pipeline(
@@ -73,13 +88,7 @@ async def complete_translation_pipeline(
         ctx.img_rgb, ctx.img_alpha = load_image(ctx.upscaled)
 
     if not getattr(ctx, 'textlines', None):
-        documents = getattr(ctx, 'result_documents', {}) or {}
-        saved_textlines = (
-            documents.get('ocr.json')
-            or (owner._pipeline_run._document('ocr.json') if owner._pipeline_run else None)
-            or documents.get('detection.json')
-            or (owner._pipeline_run._document('detection.json') if owner._pipeline_run else None)
-        )
+        saved_textlines = _load_stage_doc(owner, ctx, 'ocr.json') or _load_stage_doc(owner, ctx, 'detection.json')
         if saved_textlines is not None:
             ctx.textlines = deserialize_textlines(saved_textlines)
     if getattr(ctx, 'mask_raw', None) is None:
@@ -88,22 +97,10 @@ async def complete_translation_pipeline(
             ctx.mask_raw = cv2.imread(mask_raw_path, cv2.IMREAD_GRAYSCALE)
 
     if getattr(ctx, 'bubble_detections', None) is None:
-        bd_path = owner._result_path('bubble_detections.json')
-        documents = getattr(ctx, 'result_documents', {}) or {}
-        bubble_document = (
-            documents.get('bubble_detections.json')
-            or (owner._pipeline_run._document('bubble_detections.json') if owner._pipeline_run else None)
-        )
-        if bubble_document is None and os.path.exists(bd_path):
+        bubble_doc = _load_stage_doc(owner, ctx, 'bubble_detections.json')
+        if bubble_doc is not None and getattr(ctx, 'img_rgb', None) is not None:
             try:
-                with open(bd_path, 'r', encoding='utf-8') as f:
-                    bubble_document = json.load(f)
-            except Exception as e:
-                logger.warning(f"Failed to load existing bubble_detections.json: {e}")
-        if bubble_document is not None and getattr(ctx, 'img_rgb', None) is not None:
-            try:
-                bds_raw = bubble_document
-                ctx.bubble_detections = deserialize_bubble_detections(bds_raw, ctx.img_rgb.shape)
+                ctx.bubble_detections = deserialize_bubble_detections(bubble_doc, ctx.img_rgb.shape)
                 ctx._bubble_detection_done = True
                 group_regions = getattr(config.bubble_detection, 'group_regions', False)
                 ctx.text_regions = group_regions_by_bubbles(
@@ -111,6 +108,14 @@ async def complete_translation_pipeline(
                 )
             except Exception as e:
                 logger.warning(f"Failed to load existing bubble_detections.json: {e}")
+
+    if getattr(ctx, 'panel_detections', None) is None:
+        panel_doc = _load_stage_doc(owner, ctx, 'panel_detections.json')
+        if panel_doc is not None and getattr(ctx, 'img_rgb', None) is not None:
+            try:
+                ctx.panel_detections = deserialize_panel_detections(panel_doc, ctx.img_rgb.shape)
+            except Exception as e:
+                logger.warning(f"Failed to load existing panel_detections.json: {e}")
 
     if (config.bubble_detection.enabled
             and not getattr(ctx, '_bubble_detection_done', False)):
@@ -233,17 +238,6 @@ async def complete_translation_pipeline(
     if ctx.mask is not None and ctx.img_inpainted is not None:
         ctx.gimp_mask = np.dstack((cv2.cvtColor(ctx.img_inpainted, cv2.COLOR_RGB2BGR), ctx.mask))
 
-    if owner.verbose:
-        try:
-            inpainted_path = owner._result_path('inpainted.jpg')
-            await asyncio.to_thread(save_jpeg_fn, ctx.img_inpainted, inpainted_path)
-            try:
-                os.unlink(owner._result_path('inpainted.png'))
-            except FileNotFoundError:
-                pass
-        except Exception as e:
-            logger.error(f"Error saving inpainted.jpg debug image: {e}")
-            logger.debug(f"Exception details: {traceback.format_exc()}")
 
     # -- Rendering
     await owner._report_progress('rendering')

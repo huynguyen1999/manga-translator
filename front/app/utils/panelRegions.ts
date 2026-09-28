@@ -69,3 +69,8 @@ export const parsePanelDetections = (data: unknown): DetectedPanelRegion[] => {
     }];
   });
 };
+
+export const normalizePanelBoxes = (panels: DetectedPanelRegion[]): Array<[number, number, number, number]> => {
+  return panels.map((p) => p.xyxy);
+};
+

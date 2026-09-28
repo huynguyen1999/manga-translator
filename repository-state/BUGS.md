@@ -2,6 +2,34 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-28 — Batch translation scheduler discarded panel detections during bubble detection stage
+
+- Symptom: When translation jobs were processed through the batch scheduler, `panel_detections.json` was serialized as an empty list `[]` and panel frames/badges were missing from the UI for batch-translated pages, despite the model detecting high-confidence panels.
+- Root cause:
+  1. In `manga_translator/bubble_detection_stage.py`, `run_bubble_detection_batch` returned `[ctx.bubble_detections for ctx in contexts]`, discarding `ctx.panel_detections`.
+  2. In `server/batch_stage_executor.py`, `process_checkpointed_model_group` passed only `{"precomputed_bubbles": output}` to `retry_stage`.
+  3. In `manga_translator/pipeline/retry.py` and `manga_translator/bubble_detection_stage.py`, `precomputed_panels` was not accepted, causing `run_bubble_detection` to reset `ctx.panel_detections = []` when precomputed detections were provided.
+- Fix:
+  1. Updated `run_bubble_detection_batch` to return `[(ctx.bubble_detections, ctx.panel_detections) for ctx in contexts]`.
+  2. Updated `server/batch_stage_executor.py` to unpack `(bubbles, panels)` and pass `precomputed_bubbles` and `precomputed_panels` to `retry_stage`.
+  3. Added `precomputed_panels` parameter across `manga_translator.py: _detect_speech_bubbles`, `pipeline/run.py: retry_stage`, `pipeline/retry.py: execute_retry_stage`, and `bubble_detection_stage.py: run_bubble_detection`.
+- Prevention: In multi-output stages (like joint bubble + panel segmentation), ensure stage returns are tuples/named records preserved in batch runners, executor kwargs, and retry deserialization.
+
+## 2026-09-28 — Manga frame/panel overlays missing from page detail preview and pipeline stages
+
+- Symptom: Manga frame/panel boundary polygons and order badges (`#1, #2...`) were not displayed in the page detail preview overlay when viewing translated pages.
+- Root cause:
+  1. In `server/batch_translation_group.py`, `panel_detections.json` was omitted from `saved_documents` rehydration, leaving `ctx.panel_detections` empty during stage-barrier batch translation groups.
+  2. In `manga_translator/pipeline/retry.py`, `panel_detections.json` was omitted during retry stage serialization (`bubble_detection`) and deserialization (`textline_merge`, `translation`).
+  3. In `manga_translator/pipeline/completion.py`, `panel_detections.json` was not rehydrated when completing cached pipeline runs.
+  4. In `front/app/components/PreviewImage.tsx`, the panel loading effect condition `if (!shouldLoadPanels && panelRegionsStatus !== "idle" && panelRegionsLoadedForRef.current === folder) return;` had inverted condition logic compared to bubbles, failing to guard already-loaded states.
+- Fix:
+  1. Added `panel_detections.json` to `saved_documents` search list and hydrated `ctx.panel_detections` in `server/batch_translation_group.py`.
+  2. Plumbed `panel_detections.json` serialization and deserialization across `bubble_detection`, `textline_merge`, and `translation` in `manga_translator/pipeline/retry.py`.
+  3. Rehydrated `panel_detections.json` using `_load_stage_doc` in `manga_translator/pipeline/completion.py`.
+  4. Harmonized the panel loading effect in `PreviewImage.tsx` (`if (!shouldLoadPanels || (panelRegionsStatus === "loaded" && panelRegionsLoadedForRef.current === folder)) return;`) and exported `normalizePanelBoxes` in `panelRegions.ts`.
+- Prevention: Whenever introducing a new detection artifact (`panel_detections.json`), comprehensively plumb its persistence and rehydration across all pipeline entry points (single-page, batch groups, rerun/retry, completion) and frontend preview loaders.
+
 ## 2026-09-28 — Joint speech bubble and panel detector failed on Ultralytics Boxes iteration and missing document persistence
 
 - Symptom: Opening page detail for translated images showed "No saved frame or bubble regions" error banner despite running the joint frame/bubble segmentation model.

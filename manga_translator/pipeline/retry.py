@@ -22,6 +22,7 @@ async def execute_retry_stage(
     precomputed_upscale: Image.Image | None = None,
     precomputed_detection: tuple[list, np.ndarray | None, np.ndarray | None] | None = None,
     precomputed_bubbles: list | None = None,
+    precomputed_panels: list | None = None,
     precomputed_inpainting: np.ndarray | None = None,
     stage_already_running: bool = False,
 ) -> dict[str, Any]:
@@ -163,6 +164,10 @@ async def execute_retry_stage(
                     ctx.bubble_detections,
                     group=bool(getattr(config.bubble_detection, "group_regions", False)),
                 )
+            panel_data = run._document("panel_detections.json")
+            if panel_data is not None and ctx.img_rgb is not None:
+                from ..detection.panel import deserialize_panel_detections
+                ctx.panel_detections = deserialize_panel_detections(panel_data, ctx.img_rgb.shape)
             elif not defer_bubble_detection:
                 await translator._detect_speech_bubbles(config, ctx, report_progress=False)
             if (bubble_data is not None or not defer_bubble_detection
@@ -184,13 +189,17 @@ async def execute_retry_stage(
                 ctx,
                 report_progress=False,
                 precomputed_detections=precomputed_bubbles,
+                precomputed_panels=precomputed_panels,
             )
             from ..rendering.paragraph_coalescing import coalesce_free_text_regions
             ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
             detections = getattr(ctx, "bubble_detections", None) or []
+            panel_detections = getattr(ctx, "panel_detections", None) or []
             from ..detection.bubble import serialize_bubble_detections
+            from ..detection.panel import serialize_panel_detections
 
             run.write_json("bubble_detections.json", serialize_bubble_detections(detections))
+            run.write_json("panel_detections.json", serialize_panel_detections(panel_detections, ctx.img_rgb.shape[:2] if ctx.img_rgb is not None else None))
             if ctx.text_regions:
                 run.write_json("text_regions_merged.json", serialize_regions(ctx.text_regions))
             if detections:
@@ -214,6 +223,10 @@ async def execute_retry_stage(
                 ctx.bubble_detections = deserialize_bubble_detections(bubble_data, ctx.img_rgb.shape)
                 if ctx.bubble_detections:
                     restore_bubble_assignments(ctx.text_regions, ctx.bubble_detections)
+            panel_data = run._document("panel_detections.json")
+            if panel_data is not None and ctx.img_rgb is not None:
+                from ..detection.panel import deserialize_panel_detections
+                ctx.panel_detections = deserialize_panel_detections(panel_data, ctx.img_rgb.shape)
             from ..rendering.paragraph_coalescing import coalesce_free_text_regions
             ctx.text_regions = coalesce_free_text_regions(ctx.text_regions, ctx.img_rgb)
             run.write_json("text_regions_merged.json", serialize_regions(ctx.text_regions))
