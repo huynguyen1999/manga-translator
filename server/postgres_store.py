@@ -11,6 +11,13 @@ from typing import Any
 from server.postgres_common import _json_dump, _safe_folder
 
 from server.batch_store import BatchConflict, BatchNotFound, BatchStore, InvalidBatch
+from server.preset_repository import (
+    InvalidPreset,
+    PresetConflict,
+    PresetNotFound,
+    PresetRepository,
+    PresetStoreError,
+)
 from server.series_repository import (
     GroupConflict,
     GroupNotFound,
@@ -74,6 +81,7 @@ class PostgresStore:
         self._manga_mutation_repository = MangaMutationRepository(self)
         self._page_state_repository = PageStateRepository(self, _manga_id)
         self._document_repository = DocumentRepository(self)
+        self._preset_repository = PresetRepository(self, self.result_root, _iso)
 
     @property
     def ready(self) -> bool:
@@ -453,6 +461,39 @@ class PostgresStore:
 
     async def save_progress(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._manga_repository.save_progress(payload)
+
+    async def list_presets(self) -> list[dict[str, Any]]:
+        return await self._preset_repository.list_presets()
+
+    async def get_preset(self, preset_id: str) -> dict[str, Any]:
+        return await self._preset_repository.get_preset(preset_id)
+
+    async def create_preset(
+        self,
+        name: str,
+        description: str = "",
+        settings: dict[str, Any] | None = None,
+        is_default: bool = False,
+    ) -> dict[str, Any]:
+        return await self._preset_repository.create_preset(name, description, settings, is_default)
+
+    async def update_preset(
+        self,
+        preset_id: str,
+        name: str | None = None,
+        description: str | None = None,
+        settings: dict[str, Any] | None = None,
+        is_default: bool | None = None,
+    ) -> dict[str, Any]:
+        return await self._preset_repository.update_preset(
+            preset_id, name=name, description=description, settings=settings, is_default=is_default
+        )
+
+    async def delete_preset(self, preset_id: str) -> None:
+        await self._preset_repository.delete_preset(preset_id)
+
+    async def set_default_preset(self, preset_id: str) -> dict[str, Any]:
+        return await self._preset_repository.set_default_preset(preset_id)
 
     async def record_migration(
         self, source_type: str, source_key: str, status: str, detail: dict[str, Any]

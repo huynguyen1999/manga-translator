@@ -5,9 +5,12 @@ import { validTranslators } from "@/types";
 import { getTranslatorName, getTranslatorGroup } from "@/utils/getTranslatorName";
 import { languageOptions, fontOptions } from "@/config";
 import { LabeledSelect } from "@/components/LabeledSelect";
-import type { OptionsPanelProps } from "@/features/studio/options/OptionsTypes";
 import { OptionsEnhancements } from "@/features/studio/options/OptionsEnhancements";
 import { OptionsAdvancedPipeline } from "@/features/studio/options/OptionsAdvancedPipeline";
+import type { OptionsPanelProps } from "@/features/studio/options/OptionsTypes";
+import { PresetToolbar } from "@/features/studio/presets/PresetToolbar";
+import { usePresets } from "@/features/studio/presets/usePresets";
+import type { TranslationSettings } from "@/types";
 
 export type Props = OptionsPanelProps;
 export type { OptionsPanelProps };
@@ -112,10 +115,76 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
 
   const isApiTranslator = API_TRANSLATORS.includes(translator);
 
+  const getCurrentSettings = (): TranslationSettings => ({
+    detectionResolution,
+    textDetector,
+    ocr,
+    renderFont,
+    renderTextDirection,
+    letterCase,
+    uppercase: letterCase === "uppercase",
+    lowercase: letterCase === "lowercase",
+    translator,
+    summaryModel,
+    targetLanguage,
+    translationQuality,
+    inpaintingSize,
+    customUnclipRatio,
+    customBoxThreshold,
+    customOcrProb,
+    maskDilationOffset,
+    bubbleDetection,
+    bubbleConfidence,
+    inpainter,
+    colorizer,
+    colorizeOnly,
+    colorizationSize,
+    denoiseSigma,
+    colorThreshold,
+    upscaler,
+    upscaleRatio: upscaleRatio ? Number(upscaleRatio) : null,
+    revertUpscaling: Boolean(upscaleRatio) && revertUpscaling,
+    translationBatchSize,
+  });
+
+  const presetManager = usePresets({
+    getCurrentSettings,
+    setters: {
+      setDetectionResolution,
+      setTextDetector,
+      setOcr,
+      setRenderFont,
+      setRenderTextDirection,
+      setLetterCase,
+      setTranslator,
+      setSummaryModel,
+      setTargetLanguage,
+      setTranslationQuality,
+      setInpaintingSize,
+      setCustomUnclipRatio,
+      setCustomBoxThreshold,
+      setCustomOcrProb,
+      setMaskDilationOffset,
+      setBubbleDetection,
+      setBubbleConfidence,
+      setInpainter,
+      setColorizer,
+      setColorizeOnly,
+      setColorizationSize,
+      setDenoiseSigma,
+      setColorThreshold,
+      setUpscaler,
+      setUpscaleRatio,
+      setRevertUpscaling,
+      setTranslationBatchSize,
+    },
+    autoHydrateDefault: true,
+  });
+
   return (
     <div className="space-y-4 rounded-xl border border-zinc-200/80 bg-white p-3.5 shadow-xs transition-colors dark:border-zinc-800/80 dark:bg-zinc-900/70 sm:p-4.5">
       {/* Tier 1: Minimal Header / Action Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 pb-2.5 dark:border-zinc-800/80">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-100 pb-2.5 dark:border-zinc-800/80">
         <div className="flex items-center space-x-2">
           <div className="flex h-5 w-5 items-center justify-center rounded-md bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400">
             <Icon icon="carbon:settings-adjust" className="h-3.5 w-3.5" />
@@ -127,6 +196,21 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
             {translationQuality === "professional" ? "Pro Localization" : "Fast Mode"}
           </span>
         </div>
+
+        <PresetToolbar
+          presets={presetManager.presets}
+          activePreset={presetManager.activePreset}
+          activePresetId={presetManager.activePresetId}
+          isModified={presetManager.isModified}
+          loading={presetManager.loading}
+          onSelectPreset={presetManager.selectPreset}
+          onSaveAsNew={presetManager.saveCurrentAsNew}
+          onUpdateActive={presetManager.updateActivePreset}
+          onRevertActive={presetManager.revertActivePreset}
+          onSetDefault={presetManager.setDefaultById}
+          onDeletePreset={presetManager.deletePresetById}
+          onRenamePreset={presetManager.renamePreset}
+        />
 
         <div className="flex items-center space-x-4">
           <label className="flex cursor-pointer items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">
@@ -140,7 +224,10 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
           </label>
           <button
             type="button"
-            onClick={resetDefaults}
+            onClick={() => {
+              resetDefaults();
+              presetManager.clearActivePreset();
+            }}
             className="flex items-center space-x-1 text-xs text-zinc-500 transition-colors hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
           >
             <Icon icon="carbon:reset" className="h-3.5 w-3.5" />

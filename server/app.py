@@ -9,15 +9,14 @@ from server.api.routes.editor import create_editor_router
 from server.api.routes.health import router as health_router
 from server.api.routes.instances import create_instance_router
 from server.api.routes.internal_translation import (
-    execute_batch_stream,
-    router as internal_translation_router,
-    simple_execute_batch,
+    execute_batch_stream, router as internal_translation_router, simple_execute_batch,
 )
 from server.api.routes.manual import router as manual_router
 from server.api.routes.manga import create_manga_group_router, create_manga_router
 from server.api.routes.manga_export import create_manga_export_router
 from server.api.routes.manga_management import create_manga_management_router
 from server.api.routes.pipeline_reruns import create_pipeline_rerun_router
+from server.api.routes.presets import create_preset_router
 from server.api.routes.reading_progress import create_reading_progress_router
 from server.api.routes.result_files import create_result_files_router
 from server.api.routes.result_import import create_result_import_router
@@ -37,11 +36,7 @@ def create_app(runtime) -> FastAPI:
     app.include_router(search_router(lambda: runtime.search_service), prefix="/api")
     app.middleware("http")(runtime.serialize_original_manga_imports)
     app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
     )
     app.middleware("http")(runtime.correlation_id_middleware)
 
@@ -139,6 +134,12 @@ def create_app(runtime) -> FastAPI:
         "remove_manga_series", "delete_series", "get_manga_series",
     ))
     app.include_router(runtime._series_router)
+
+    runtime._preset_router, preset_exports = create_preset_router(lambda: runtime.get_preset_repository())
+    _bind(runtime, preset_exports, (
+        "list_presets", "create_preset", "get_preset", "update_preset", "delete_preset", "set_default_preset",
+    ))
+    app.include_router(runtime._preset_router)
 
     runtime._reading_progress_router, progress_exports = create_reading_progress_router(
         runtime._postgres, runtime._validate_installation_id

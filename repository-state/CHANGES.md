@@ -2,15 +2,20 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
-## 2026-09-29 — Panel detection overlap suppression and smallest-enclosure region assignment
+## 2026-09-29 — Smallest enclosing panel spatial containment for text blocks
 
-- Reason: Multi-class neural panel detection occasionally predicts overlapping bounding boxes, spurious whole-page boxes, and compound macro-panels alongside granular sub-panels. Downstream greedy assignment caused the first/macro panel to swallow all text regions, depriving actual sub-panels of their text and cluttering UI overlays.
-- Added `suppress_overlapping_panels` in `manga_translator/detection/panel.py`, filtering out near-full-page false positives ($\ge 92\%$ page coverage when $\ge 2$ panels exist) and applying Intersection-over-Smaller ($\text{IoS} \ge 0.80$) suppression to eliminate redundant compound and duplicate panel detections.
-- Integrated overlap suppression into `sort_panel_detections_reading_order` and `BubbleDetector._read_result` in `manga_translator/detection/bubble.py`.
-- Updated `assign_regions_to_panels` (`manga_translator/professional_panels.py`) and `_assign_regions_to_panels` (`manga_translator/utils/sort.py`) to assign text regions to the smallest enclosing panel (most specific containment).
+- Reason: When nested or inset panels were detected, text block spatial assignment previously stopped on the first matching panel, causing larger macro container panels to swallow text blocks belonging to smaller sub-panels.
+- Updated text block spatial assignment in `manga_translator/utils/sort.py` and `manga_translator/professional_panels.py` to associate regions with the smallest enclosing panel by bounding box area (`min(inside, key=lambda it: it[1])`).
 - Added unit tests in `test/test_joint_bubble_panel_detection.py` and `test/test_professional_panels.py`.
 
-## 2026-09-29 — Remove dormant LaMa implementation and share translator key pools
+## 2026-09-29 — Database-backed translation presets and Web Studio Preset toolbar
+
+- Reason: Users had to repeatedly re-configure translation, OCR, inpainting, typography, colorization, and upscaling settings in Web Studio without a way to save, name, or switch between tailored configuration profiles.
+- Added database migration `server/migrations/016_translation_presets.sql` creating `translation_presets` with unique name indexing and default status tracking.
+- Implemented `PresetRepository` (`server/preset_repository.py`) supporting dual-mode persistence (PostgreSQL with fallback to `presets.json` in result root when running without a database).
+- Added FastAPI endpoints in `server/api/routes/presets.py` and schemas in `server/api/schemas/preset.py` for listing, creating, updating, deleting, and setting default presets (`/api/presets`).
+- Built Web Studio presets subsystem (`front/app/features/studio/presets/`) including `usePresets` hook, `PresetToolbar` dropdown in Tier 1 of `OptionsPanel`, "Modified" change detection with Quick Update & Revert actions, `SavePresetModal`, and `ManagePresetsModal`.
+- Added backend unit tests (`test/test_preset_repository.py`, `test/test_preset_api.py`) and frontend tests (`front/app/features/studio/presets/usePresets.test.ts`).
 
 - Reason: An unregistered 688-line LaMa implementation had no in-repo callers, and Groq/Gemini repeated key parsing and pool-selection logic.
 - Removed the dormant implementation, consolidated common key/model parsing, pool metadata, and round-robin selection, and reused filesystem argument converters across both CLIs.

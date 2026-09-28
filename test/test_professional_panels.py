@@ -43,19 +43,18 @@ class TestProfessionalPanels(unittest.TestCase):
         self.assertEqual([r["id"] for r in grouped[1]], ["r2"])
         self.assertEqual([r["id"] for r in unassigned], ["r3", "r4"])
 
-    def test_assign_regions_to_nested_panels_chooses_smallest_enclosure(self):
-        # Panel 0: Large container panel (0, 0, 500, 500)
-        # Panel 1: Inset sub-panel (100, 100, 200, 200)
+    def test_assign_regions_to_panels_smallest_enclosing_panel(self):
+        # Macro container panel (idx 0) and nested inset panel (idx 1)
         panels = [
-            {"xyxy": [0, 0, 500, 500]},
-            {"xyxy": [100, 100, 200, 200]},
+            {"xyxy": [0, 0, 1000, 1000]},
+            {"xyxy": [100, 100, 400, 400]},
         ]
         regions = [
-            {"id": "r_inset", "xywh": [120, 120, 40, 40]},  # inside both, but Panel 1 is smaller
-            {"id": "r_outer", "xywh": [10, 10, 40, 40]},     # inside Panel 0 only
+            {"id": "r_inset", "xywh": [150, 150, 50, 50]}, # Center (175, 175) -> inside both, smaller is Panel 1
+            {"id": "r_macro", "xywh": [600, 600, 50, 50]}, # Center (625, 625) -> inside only Panel 0
         ]
         grouped, unassigned = assign_regions_to_panels(regions, panels)
-        self.assertEqual([r["id"] for r in grouped[0]], ["r_outer"])
+        self.assertEqual([r["id"] for r in grouped[0]], ["r_macro"])
         self.assertEqual([r["id"] for r in grouped[1]], ["r_inset"])
         self.assertEqual(unassigned, [])
 

@@ -2,16 +2,13 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
-## 2026-09-29 — Overlapping and full-page panel detections hijacked region assignment and corrupted context
+## 2026-09-29 — Macro container panels swallowing text blocks from nested or sub-panels
 
-- Symptom: On pages with multi-scale, compound, or near-full-page panel detections (e.g. `1790618090324-99ecbb08-2048-ENG-sugoi`), multiple overlapping frames were predicted (e.g. a 100% full-page bounding box at lower confidence alongside individual sub-panels). Downstream, all bottom text regions were assigned exclusively to the full-page panel, leaving actual sub-panels with 0 regions and polluting LLM prompt hierarchy and UI overlays.
-- Root cause:
-  1. In `manga_translator/detection/panel.py`, neural panel segmentation had no containment or Intersection-over-Smaller (IoS) overlap suppression, allowing spurious full-page boxes and compound macro-panels to survive alongside granular sub-panels.
-  2. In `manga_translator/professional_panels.py` (`assign_regions_to_panels`) and `manga_translator/utils/sort.py` (`_assign_regions_to_panels`), text regions were greedily assigned to the *first* panel in iteration order containing their center `(cx, cy)`, causing any preceding macro or whole-page panel to swallow all enclosed text.
-- Fix:
-  1. Added `suppress_overlapping_panels` in `manga_translator/detection/panel.py` and integrated it with `sort_panel_detections_reading_order` and `BubbleDetector._read_result` to drop near-full-page false positives (>92% image area when other panels exist) and suppress redundant compound/duplicate detections with $\text{IoS} \ge 0.80$.
-  2. Updated `assign_regions_to_panels` (`professional_panels.py`) and `_assign_regions_to_panels` (`sort.py`) to select the *smallest enclosing panel* (most specific containment) rather than the first matching panel.
-- Prevention: Apply containment/IoS suppression to multi-scale segmentation outputs and always assign spatial child elements to their tightest/smallest enclosing container.
+- Symptom: When nested, inset, or compound panels were detected, text blocks inside smaller sub-panels were swallowed by larger enclosing container panels, corrupting reading order and panel grouping.
+- Root cause: Spatial region assignment in `sort.py` and `professional_panels.py` stopped at the first matching panel that contained the text block center rather than finding the most specific (smallest area) enclosing container.
+- Fix: Updated `_assign_regions_to_panels` in `manga_translator/utils/sort.py` and `assign_regions_to_panels` in `manga_translator/professional_panels.py` to associate text blocks with the smallest enclosing panel by bounding box area (`min(inside, key=lambda it: it[1])`).
+- Prevention: When associating points or regions with potentially nested or overlapping bounding boxes, find the most specific (smallest enclosing area) match rather than breaking on first match.
+
 
 ## 2026-09-28 — Page detail modal "Retry pipeline" button failed for gallery and unlinked batch pages
 

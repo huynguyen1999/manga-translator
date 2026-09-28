@@ -159,6 +159,11 @@ from server.postgres_store import (
     InvalidSeries,
     SeriesConflict,
     SeriesNotFound,
+    InvalidPreset,
+    PresetConflict,
+    PresetNotFound,
+    PresetRepository,
+    PresetStoreError,
 )
 from server.result_queries import _image_urls, _scan_manga_groups, _scan_results
 from server.result_metadata import (
@@ -266,6 +271,19 @@ def _postgres_required() -> PostgresStore:
     if store is None:
         raise HTTPException(503, detail="PostgreSQL is not available")
     return store
+
+
+_fallback_preset_repo: PresetRepository | None = None
+
+
+def get_preset_repository() -> PresetRepository:
+    global _fallback_preset_repo
+    store = _postgres()
+    if store is not None:
+        return store._preset_repository
+    if _fallback_preset_repo is None:
+        _fallback_preset_repo = PresetRepository(store=None, result_root=RESULT_ROOT)
+    return _fallback_preset_repo
 
 
 async def _index_context_result(ctx: Any) -> None:

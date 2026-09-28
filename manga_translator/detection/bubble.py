@@ -16,7 +16,6 @@ from .panel import (
     serialize_bubble_detections as _serialize_bubbles,
     serialize_panel_detections,
     sort_panel_detections_reading_order,
-    suppress_overlapping_panels,
 )
 from ..utils.model_cache import (
     clear_model_cache, get_cached_model, model_operation, unload_cached_model,
@@ -172,7 +171,7 @@ class BubbleDetector:
                 if np.count_nonzero(binary) >= 100 or np.count_nonzero(binary) == binary.size:
                     bubbles.append(BubbleDetection(binary, score))
 
-        return bubbles, sort_panel_detections_reading_order(raw_panels, rtl=True, image_shape=image_shape)
+        return bubbles, sort_panel_detections_reading_order(raw_panels, rtl=True)
 
 
 def get_detector(model: str, confidence: float = 0.25, mask_threshold: float = 0.5, image_size: int = 512, device: str = "cpu") -> BubbleDetector:

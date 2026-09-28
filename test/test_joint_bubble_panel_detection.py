@@ -75,51 +75,8 @@ class TestPanelDetectionDataclass:
         ]
         assert [p.order_index for p in sorted_panels] == [1, 2, 3, 4]
 
-    def test_suppress_overlapping_panels_suppresses_full_page_and_compound(self):
-        # 5 panels: top, spurious full-page, middle, compound bottom, and bottom
-        p_top = PanelDetection(xyxy=[0, 1, 1280, 1263], polygons=[], confidence=0.72)
-        p_full = PanelDetection(xyxy=[0, 0, 1280, 1855], polygons=[], confidence=0.31)
-        p_mid = PanelDetection(xyxy=[37, 1224, 1191, 1454], polygons=[], confidence=0.85)
-        p_comp = PanelDetection(xyxy=[1, 1245, 1168, 1849], polygons=[], confidence=0.61)
-        p_bot = PanelDetection(xyxy=[20, 1443, 1170, 1845], polygons=[], confidence=0.52)
-
-        sorted_panels = sort_panel_detections_reading_order(
-            [p_top, p_full, p_mid, p_comp, p_bot],
-            rtl=True,
-            image_shape=(1855, 1280),
-        )
-        assert len(sorted_panels) == 3
-        assert sorted_panels[0].xyxy == [0, 1, 1280, 1263]
-        assert sorted_panels[1].xyxy == [37, 1224, 1191, 1454]
-        assert sorted_panels[2].xyxy == [20, 1443, 1170, 1845]
-        assert [p.order_index for p in sorted_panels] == [1, 2, 3]
-
 
 class TestSortRegionsWithPanels:
-    def test_sort_regions_assigns_smallest_enclosing_panel(self):
-        # Panel 1: Outer large panel (y=0..1000, x=0..1000)
-        # Panel 2: Inner specific inset panel (y=200..400, x=200..400)
-        panel_outer = PanelDetection(xyxy=[0, 0, 1000, 1000], polygons=[], confidence=0.8, order_index=1)
-        panel_inner = PanelDetection(xyxy=[200, 200, 400, 400], polygons=[], confidence=0.9, order_index=2)
-
-        block_inner = TextBlock(
-            lines=[[[250, 250], [350, 250], [350, 350], [250, 350]]],
-            texts=["Inner text"],
-        )
-        block_outer = TextBlock(
-            lines=[[[50, 50], [150, 50], [150, 150], [50, 150]]],
-            texts=["Outer text"],
-        )
-
-        sorted_blocks = sort_regions(
-            [block_inner, block_outer],
-            right_to_left=True,
-            panel_detections=[panel_outer, panel_inner],
-        )
-        # block_inner is inside both panels, but panel_inner is smaller (panel_index=1 vs 0)
-        assert block_inner.panel_index == 1
-        assert block_outer.panel_index == 0
-
     def test_sort_regions_prioritizes_panel_order(self):
         # Panel 1: Top-Right ([500, 0, 1000, 500])
         # Panel 2: Top-Left ([0, 0, 500, 500])
@@ -147,6 +104,29 @@ class TestSortRegionsWithPanels:
         assert len(sorted_blocks) == 2
         assert sorted_blocks[0].text == "Right panel text"
         assert sorted_blocks[1].text == "Left panel text"
+
+    def test_sort_regions_assigns_to_smallest_enclosing_panel(self):
+        # Macro container panel (order 1)
+        macro_panel = PanelDetection(xyxy=[0, 0, 1000, 1000], polygons=[], confidence=0.95, order_index=1)
+        # Nested smaller inset panel (order 2)
+        inset_panel = PanelDetection(xyxy=[100, 100, 400, 400], polygons=[], confidence=0.90, order_index=2)
+
+        # Block inside inset panel (center 200, 200)
+        block_inset = TextBlock(
+            lines=[[[150, 150], [250, 150], [250, 250], [150, 250]]],
+            texts=["Inset text"],
+        )
+        # Block in macro panel outside inset (center 700, 700)
+        block_macro = TextBlock(
+            lines=[[[650, 650], [750, 650], [750, 750], [650, 750]]],
+            texts=["Macro text"],
+        )
+
+        sort_regions([block_inset, block_macro], right_to_left=True, panel_detections=[macro_panel, inset_panel])
+
+        # block_inset should be assigned to inset_panel (index 1), not macro_panel (index 0)
+        assert block_inset.panel_index == 1
+        assert block_macro.panel_index == 0
 
 
 class TestInferPanelConstraintsWithPanels:

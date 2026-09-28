@@ -293,7 +293,7 @@ export const ItemRow: React.FC<{
         {originalDownloadUrl && (
           <a href={originalDownloadUrl} download={item.file.name} aria-label={`Download original image ${item.file.name}`}
             className="inline-flex size-8 items-center justify-center rounded-lg text-zinc-600 hover:bg-zinc-200 hover:text-indigo-600 dark:text-zinc-400 dark:hover:bg-zinc-600 dark:hover:text-indigo-300"
-            title="Download original image"><Icon icon="carbon:download" className="h-4 w-4" /></a>
+            title="Download original image"><Icon icon="carbon:image" className="h-4 w-4" /></a>
         )}
         {needsReview && downloadUrl && (onOpenPageEdit || onOpenLightbox) && (
           <button
