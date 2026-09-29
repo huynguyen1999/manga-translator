@@ -20,9 +20,15 @@ export const BlockInspectionCard: React.FC<BlockInspectionCardProps> = ({
   onCopy,
   onClose,
 }) => {
-  const isCardNearBottom = imageCoordinateSize.height > 0
-    ? (block.y + block.height) / imageCoordinateSize.height > 0.62
-    : false;
+  const hasImageHeight = imageCoordinateSize.height > 0;
+  const blockTopPct = hasImageHeight
+    ? Math.max(0, Math.min(100, (block.y / imageCoordinateSize.height) * 100))
+    : 0;
+  const blockBottomPct = hasImageHeight
+    ? Math.max(0, Math.min(100, ((block.y + block.height) / imageCoordinateSize.height) * 100))
+    : 0;
+  const showCardBelow = !hasImageHeight || blockTopPct + blockBottomPct <= 100;
+  const availableHeightPct = !hasImageHeight ? 100 : showCardBelow ? 100 - blockBottomPct : blockTopPct;
   const clampedCardXPct = imageCoordinateSize.width > 0
     ? Math.max(20, Math.min(80, ((block.x + block.width / 2) / imageCoordinateSize.width) * 100))
     : 50;
@@ -32,13 +38,14 @@ export const BlockInspectionCard: React.FC<BlockInspectionCardProps> = ({
 
   return (
     <div
-      className="absolute pointer-events-auto z-40 w-72 sm:w-84 max-w-[90vw] rounded-xl border border-zinc-700 bg-zinc-900/95 p-3.5 text-zinc-100 shadow-2xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-150"
+      className="absolute pointer-events-auto z-40 w-72 sm:w-84 max-w-[90vw] overflow-y-auto overscroll-contain rounded-xl border border-zinc-700 bg-zinc-900/95 p-3.5 text-zinc-100 shadow-2xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-150"
       style={{
         left: `${clampedCardXPct}%`,
         transform: "translateX(-50%)",
-        ...(isCardNearBottom
-          ? { bottom: `calc(${100 - (block.y / imageCoordinateSize.height) * 100}% + 8px)` }
-          : { top: `calc(${((block.y + block.height) / imageCoordinateSize.height) * 100}% + 8px)` }),
+        maxHeight: `max(0px, calc(${availableHeightPct}% - 16px))`,
+        ...(showCardBelow
+          ? { top: `calc(${blockBottomPct}% + 8px)` }
+          : { bottom: `calc(${100 - blockTopPct}% + 8px)` }),
       }}
       onClick={(e) => e.stopPropagation()}
     >

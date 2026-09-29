@@ -323,9 +323,8 @@ export const mergeServerBatches = (
     ...remote.map((batch) => {
       const translated = toTranslationBatch(batch);
       const existing = currentById.get(batch.id);
-      const merged = existing?.detailsLoaded
-        ? { ...translated, items: existing.items, detailsLoaded: true }
-        : translated;
+      const staleTerminal = (batch.status === "completed" || batch.status === "error") && existing?.items.some((item) => item.status === "queued" || item.status === "processing");
+      const merged = existing?.detailsLoaded && !staleTerminal ? { ...translated, items: existing.items, detailsLoaded: true } : translated;
       const optimisticTranslator = optimisticTranslators.get(batch.id);
       const withOptimisticTranslator = optimisticTranslator && merged.settings.translator !== optimisticTranslator
         ? { ...merged, settings: { ...merged.settings, translator: optimisticTranslator } }
@@ -503,18 +502,14 @@ export const updateBatchManualReview = async (batchId: string, enabled: boolean)
 export const updateBatchTitle = async (batchId: string, mangaTitle: string) => {
   const cleanTitle = mangaTitle.trim() || "Ungrouped";
   const response = await fetch(apiUrl(`/api/batches/${encodeURIComponent(batchId)}`), {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mangaTitle: cleanTitle }),
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mangaTitle: cleanTitle }),
   });
   if (!response.ok) throw new Error(`Batch title update failed (${response.status})`);
 };
 
 export const updateBatchPriority = async (batchId: string, priority: boolean) => {
   const response = await fetch(apiUrl(`/api/batches/${encodeURIComponent(batchId)}`), {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ priority }),
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ priority }),
   });
   if (!response.ok) throw new Error(`Batch priority update failed (${response.status})`);
   return (await response.json()) as ServerBatch;

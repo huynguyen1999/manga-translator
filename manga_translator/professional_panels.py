@@ -15,13 +15,20 @@ def _extract_region_center(region: Any) -> tuple[float, float] | None:
         except (IndexError, TypeError, ValueError):
             pass
 
+    if hasattr(region, "x") and hasattr(region, "y"):
+        try:
+            w = getattr(region, "width", getattr(region, "w", 0.0))
+            h = getattr(region, "height", getattr(region, "h", 0.0))
+            return float(region.x + w / 2.0), float(region.y + h / 2.0)
+        except (TypeError, ValueError):
+            pass
+
     if isinstance(region, dict):
         reg_obj = region.get("region")
-        if reg_obj is not None and hasattr(reg_obj, "center"):
-            try:
-                return float(reg_obj.center[0]), float(reg_obj.center[1])
-            except (IndexError, TypeError, ValueError):
-                pass
+        if reg_obj is not None:
+            c = _extract_region_center(reg_obj)
+            if c is not None:
+                return c
 
         if "center" in region:
             try:
@@ -41,6 +48,26 @@ def _extract_region_center(region: Any) -> tuple[float, float] | None:
             try:
                 x1, y1, x2, y2 = region["xyxy"]
                 return float((x1 + x2) / 2.0), float((y1 + y2) / 2.0)
+            except (IndexError, TypeError, ValueError):
+                pass
+
+        if "x" in region and "y" in region:
+            try:
+                x = float(region["x"])
+                y = float(region["y"])
+                w = float(region.get("width", region.get("w", 0.0)))
+                h = float(region.get("height", region.get("h", 0.0)))
+                return float(x + w / 2.0), float(y + h / 2.0)
+            except (TypeError, ValueError):
+                pass
+
+        if "lines" in region and isinstance(region["lines"], list) and region["lines"]:
+            try:
+                pts = [pt for line in region["lines"] for pt in line if isinstance(pt, (list, tuple)) and len(pt) >= 2]
+                if pts:
+                    avg_x = sum(float(p[0]) for p in pts) / len(pts)
+                    avg_y = sum(float(p[1]) for p in pts) / len(pts)
+                    return avg_x, avg_y
             except (IndexError, TypeError, ValueError):
                 pass
 
@@ -70,6 +97,15 @@ def _extract_panel_xyxy(panel: Any) -> tuple[int, int, int, int] | None:
                 x, y, w, h = panel["xywh"]
                 return int(x), int(y), int(x + w), int(y + h)
             except (IndexError, TypeError, ValueError):
+                pass
+        if "x" in panel and "y" in panel:
+            try:
+                x = int(panel["x"])
+                y = int(panel["y"])
+                w = int(panel.get("width", panel.get("w", 0)))
+                h = int(panel.get("height", panel.get("h", 0)))
+                return x, y, x + w, y + h
+            except (TypeError, ValueError):
                 pass
 
     return None
@@ -123,9 +159,10 @@ def assign_regions_to_panels(
 
 
 def _format_region_dict(item: dict[str, Any], include_translation: bool = False) -> dict[str, Any]:
+    text_val = item.get("source") or item.get("japanese") or item.get("original_text") or item.get("text_raw") or item.get("text", "")
     formatted: dict[str, Any] = {
         "id": str(item.get("id", "")),
-        "japanese": str(item.get("source") or item.get("japanese") or item.get("text", "")),
+        "japanese": str(text_val),
     }
     if include_translation and "final" in item:
         formatted["translation"] = str(item["final"])
@@ -192,7 +229,10 @@ def build_page_panel_structure(
     return page_dict
 
 
-def format_page_transcript_for_analysis(page_data: dict[str, Any]) -> str:
+def format_page_transcript_for_analysis(
+    page_data: dict[str, Any],
+    include_region_id: bool = False,
+) -> str:
     """Format token-efficient hierarchical transcript for Story Analysis."""
     page_num = page_data.get("page", 1)
     panels = page_data.get("panels")
@@ -208,25 +248,45 @@ def format_page_transcript_for_analysis(page_data: dict[str, Any]) -> str:
             lines.append(f"\n[PANEL {p_id} | PANEL ORDER {p_order}]")
             for idx, reg in enumerate(panel.get("regions", []), 1):
                 r_id = reg.get("id", f"r{idx}")
-                text = reg.get("japanese") or reg.get("source") or reg.get("text", "")
-                lines.append(f"[{r_id} | estimated order {idx}]\n{text}")
+                text = str(reg.get("japanese") or reg.get("source") or reg.get("original_text") or reg.get("text", "")).strip()
+                if not text:
+                    continue
+                if include_region_id:
+                    lines.append(f"[{r_id} | estimated order {idx}]\n{text}")
+                else:
+                    lines.append(text)
 
         if unassigned:
             lines.append("\n[UNASSIGNED REGIONS]")
             for idx, reg in enumerate(unassigned, 1):
                 r_id = reg.get("id", f"r{idx}")
-                text = reg.get("japanese") or reg.get("source") or reg.get("text", "")
-                lines.append(f"[{r_id} | estimated order {idx}]\n{text}")
+                text = str(reg.get("japanese") or reg.get("source") or reg.get("original_text") or reg.get("text", "")).strip()
+                if not text:
+                    continue
+                if include_region_id:
+                    lines.append(f"[{r_id} | estimated order {idx}]\n{text}")
+                else:
+                    lines.append(text)
     elif flat_regions:
         for idx, reg in enumerate(flat_regions, 1):
             r_id = reg.get("id", f"r{idx}")
-            text = reg.get("japanese") or reg.get("source") or reg.get("text", "")
-            lines.append(f"[{r_id} | estimated order {idx}]\n{text}")
+            text = str(reg.get("japanese") or reg.get("source") or reg.get("original_text") or reg.get("text", "")).strip()
+            if not text:
+                continue
+            if include_region_id:
+                lines.append(f"[{r_id} | estimated order {idx}]\n{text}")
+            else:
+                lines.append(text)
     elif unassigned:
         for idx, reg in enumerate(unassigned, 1):
             r_id = reg.get("id", f"r{idx}")
-            text = reg.get("japanese") or reg.get("source") or reg.get("text", "")
-            lines.append(f"[{r_id} | estimated order {idx}]\n{text}")
+            text = str(reg.get("japanese") or reg.get("source") or reg.get("original_text") or reg.get("text", "")).strip()
+            if not text:
+                continue
+            if include_region_id:
+                lines.append(f"[{r_id} | estimated order {idx}]\n{text}")
+            else:
+                lines.append(text)
 
     return "\n".join(lines)
 

@@ -48,7 +48,7 @@ case "$1" in
     ensure_link "front/node_modules" "front/node_modules"
 
     cd "$worktree_root/front"
-    exec env VITE_BACKEND_URL=http://127.0.0.1:8000 npm run dev
+    exec env VITE_BACKEND_URL=http://127.0.0.1:8000 npm run serve
     ;;
   *)
     die "Usage: $0 {backend|frontend}"

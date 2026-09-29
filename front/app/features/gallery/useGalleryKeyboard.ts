@@ -1,5 +1,6 @@
 import { useEffect, type Dispatch, type SetStateAction } from "react";
 import type { MangaSummaryModalState } from "./MangaSummaryModal";
+import { useModalEscape } from "@/utils/useModalEscape";
 
 type EscapeState = {
   summaryOpen: boolean;
@@ -53,56 +54,12 @@ export function useGalleryKeyboard(options: GalleryKeyboardOptions) {
     setSelectedMangaIds,
   } = options;
 
-  useEffect(() => {
-    const state = {
-      summaryOpen,
-      createSeriesOpen,
-      moveMangaOpen,
-      deleteMangaOpen,
-      deletePagesOpen,
-      deleteMangasOpen,
-    };
-    if (getGalleryEscapeAction(state) === null) return;
-
-    const handleModalKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      switch (getGalleryEscapeAction(state)) {
-        case "summary":
-          setSummaryState(null);
-          break;
-        case "create-series":
-          setCreateSeriesOpen(false);
-          break;
-        case "move-manga":
-          setMoveMangaOpen(false);
-          break;
-        case "delete-pages":
-          setDeletePagesOpen(false);
-          break;
-        case "delete-mangas":
-          setDeleteMangasOpen(false);
-          break;
-        case "delete-manga":
-          setDeleteManga(null);
-          break;
-      }
-    };
-    window.addEventListener("keydown", handleModalKeyDown);
-    return () => window.removeEventListener("keydown", handleModalKeyDown);
-  }, [
-    summaryOpen,
-    createSeriesOpen,
-    moveMangaOpen,
-    deleteMangaOpen,
-    deletePagesOpen,
-    deleteMangasOpen,
-    setSummaryState,
-    setCreateSeriesOpen,
-    setMoveMangaOpen,
-    setDeleteManga,
-    setDeletePagesOpen,
-    setDeleteMangasOpen,
-  ]);
+  useModalEscape(createSeriesOpen, () => setCreateSeriesOpen(false));
+  useModalEscape(deleteMangaOpen, () => setDeleteManga(null));
+  useModalEscape(deletePagesOpen, () => setDeletePagesOpen(false));
+  useModalEscape(deleteMangasOpen, () => setDeleteMangasOpen(false));
+  useModalEscape(moveMangaOpen, () => setMoveMangaOpen(false));
+  useModalEscape(summaryOpen, () => setSummaryState(null));
 
   useEffect(() => {
     const state = {

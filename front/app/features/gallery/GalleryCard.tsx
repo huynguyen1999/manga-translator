@@ -3,7 +3,6 @@ import { Icon } from '@iconify/react';
 import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
 import { Link } from 'react-router';
 import type { FinishedImage } from '@/types';
-import type { MangaReadProgress } from '@/utils/resultGallery';
 import { buildPageViewUrl } from '@/utils/routeState';
 import { useGalleryThumbnail } from './useGalleryThumbnail';
 
@@ -15,7 +14,7 @@ export interface GalleryCardProps {
   isHighlighted?: boolean;
   onToggleSelect?: (id: string, shiftKey?: boolean) => void;
   onMoveToManga?: (image: FinishedImage) => void;
-  onReadFromHere?: (pageIndex: number) => void;
+  onReadFromHere?: (pageIndex: number, image?: FinishedImage) => void;
   onClick: (image: FinishedImage) => void;
   onDownload: (image: FinishedImage) => void;
   onDelete?: (image: FinishedImage) => void;
@@ -49,73 +48,36 @@ const areGalleryCardPropsEqual = (prev: GalleryCardProps, next: GalleryCardProps
 };
 
 const GalleryCardComponent: React.FC<GalleryCardProps> = ({
-  image,
-  pageIndex,
-  showSourcePath = false,
-  isSelected = false,
-  isHighlighted = false,
-  onToggleSelect,
-  onMoveToManga,
-  onReadFromHere,
-  onClick,
-  onDownload,
-  onDelete,
-  onEdit,
-  onRerender,
-  pageViewState,
+  image, pageIndex, showSourcePath = false, isSelected = false, isHighlighted = false,
+  onToggleSelect, onMoveToManga, onReadFromHere,
+  onClick, onDownload, onDelete, onEdit, onRerender, pageViewState,
 }) => {
   const { src, hasError, isLoaded, handleLoad, handleError } = useGalleryThumbnail(image);
 
   const finishedDateStr = useMemo(() => {
-    const finishedDate =
-      image.finishedAt instanceof Date
-        ? image.finishedAt
-        : new Date(image.finishedAt || Date.now());
+    const finishedDate = image.finishedAt instanceof Date ? image.finishedAt : new Date(image.finishedAt || Date.now());
     return finishedDate.toLocaleDateString();
   }, [image.finishedAt]);
 
-  const handleCardClick = useCallback(() => {
-    onClick(image);
-  }, [onClick, image]);
-
+  const handleCardClick = useCallback(() => { onClick(image); }, [onClick, image]);
   const handleToggleSelectClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     onToggleSelect?.(image.id, e.shiftKey);
   }, [onToggleSelect, image.id]);
-
-  const handleEditClick = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    onEdit?.(image);
-  }, [onEdit, image]);
-
-  const handleMoveClick = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    onMoveToManga?.(image);
-  }, [onMoveToManga, image]);
-
-  const handleDownloadClick = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    onDownload(image);
-  }, [onDownload, image]);
-
-  const handleDeleteClick = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    onDelete?.(image);
-  }, [onDelete, image]);
-
+  const handleEditClick = useCallback((e: React.MouseEvent) => { e.stopPropagation(); onEdit?.(image); }, [onEdit, image]);
+  const handleMoveClick = useCallback((e: React.MouseEvent) => { e.stopPropagation(); onMoveToManga?.(image); }, [onMoveToManga, image]);
+  const handleDownloadClick = useCallback((e: React.MouseEvent) => { e.stopPropagation(); onDownload(image); }, [onDownload, image]);
+  const handleDeleteClick = useCallback((e: React.MouseEvent) => { e.stopPropagation(); onDelete?.(image); }, [onDelete, image]);
   const handleRerenderClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     void Promise.resolve(onRerender?.(image)).catch((error) => {
       window.alert(error instanceof Error ? error.message : 'Could not queue rerender.');
     });
   }, [onRerender, image]);
-
   const handleReadClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    if (pageIndex !== undefined) {
-      onReadFromHere?.(pageIndex - 1);
-    }
-  }, [onReadFromHere, pageIndex]);
+    if (pageIndex !== undefined) onReadFromHere?.(pageIndex - 1, image);
+  }, [onReadFromHere, pageIndex, image]);
 
   return (
     <div
@@ -171,11 +133,7 @@ const GalleryCardComponent: React.FC<GalleryCardProps> = ({
                     ? 'bg-indigo-600 text-white shadow-xs'
                     : 'bg-black/50 text-transparent hover:text-white/60 opacity-0 group-hover:opacity-100 focus-visible:opacity-100'
                 }`}
-                title={
-                  isSelected
-                    ? 'Deselect page (Shift+click for range)'
-                    : 'Select page (Shift+click for range)'
-                }
+                title={isSelected ? 'Deselect page (Shift+click for range)' : 'Select page (Shift+click for range)'}
               >
                 <Icon icon="carbon:checkmark" className="w-4 h-4" />
               </button>
@@ -214,6 +172,18 @@ const GalleryCardComponent: React.FC<GalleryCardProps> = ({
                 anchor="bottom end"
                 className="w-48 origin-top-right rounded-xl bg-zinc-900 border border-zinc-700/80 shadow-2xl p-1 text-xs text-zinc-200 z-50 focus:outline-none"
               >
+                {onReadFromHere && (
+                  <MenuItem>
+                    <button
+                      type="button"
+                      onClick={handleReadClick}
+                      className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 min-h-[44px] transition-colors data-focus:bg-indigo-600 data-focus:text-white text-zinc-200 hover:bg-zinc-800"
+                    >
+                      <Icon icon="carbon:book-open" className="w-4 h-4 text-emerald-400" />
+                      <span>Read from here</span>
+                    </button>
+                  </MenuItem>
+                )}
                 {onEdit && (
                   <MenuItem>
                     <button
@@ -303,10 +273,10 @@ const GalleryCardComponent: React.FC<GalleryCardProps> = ({
           <button
             type="button"
             onClick={handleEditClick}
-            className="relative z-10 mt-1 flex w-full items-center justify-center gap-1.5 rounded-lg border border-amber-700/60 bg-amber-950/30 px-2.5 py-1.5 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-900/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+            className="relative z-10 mt-1 flex w-full items-center justify-center gap-1.5 rounded-lg border border-amber-700/60 bg-amber-950/30 px-2.5 py-1.5 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-900/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 cursor-pointer"
           >
             <Icon icon="carbon:edit" className="h-3.5 w-3.5" />
-            Review page
+            <span>Review page</span>
           </button>
         )}
         {showSourcePath && image.sourcePath && image.sourcePath !== image.originalName && (

@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import type { FinishedImage } from '@/types';
+import { sortMangaPages } from '@/utils/resultGallery';
 
 type SingleMangaGroup = { title: string; images: FinishedImage[] } | null;
 type ReadManga = (
@@ -87,14 +88,26 @@ export function useGalleryCardActions({
     toggleSelectImage(id, currentSingleGroup?.images || [], shiftKey);
   }, [toggleSelectImage, currentSingleGroup?.images]);
 
-  const handleSingleGroupReadFromHere = useCallback((pageIndex: number) => {
+  const handleSingleGroupReadFromHere = useCallback((pageIndex: number, image?: FinishedImage) => {
     if (currentSingleGroup) {
-      void handleReadManga(currentSingleGroup.title, currentSingleGroup.images, pageIndex);
+      let targetIndex = pageIndex;
+      if (image && currentSingleGroup.images) {
+        const sorted = sortMangaPages(currentSingleGroup.images);
+        const found = sorted.findIndex((img) => img.id === image.id);
+        if (found >= 0) targetIndex = found;
+      }
+      void handleReadManga(currentSingleGroup.title, currentSingleGroup.images, targetIndex);
     }
   }, [currentSingleGroup, handleReadManga]);
 
-  const handleRowGroupReadFromHere = useCallback((title: string, images: FinishedImage[], pageIndex: number) => {
-    void handleReadManga(title, images, pageIndex);
+  const handleRowGroupReadFromHere = useCallback((title: string, images: FinishedImage[], pageIndex: number, image?: FinishedImage) => {
+    let targetIndex = pageIndex;
+    if (image && images) {
+      const sorted = sortMangaPages(images);
+      const found = sorted.findIndex((img) => img.id === image.id);
+      if (found >= 0) targetIndex = found;
+    }
+    void handleReadManga(title, images, targetIndex);
   }, [handleReadManga]);
 
   const handleMangaCardRead = useCallback((title: string, images?: FinishedImage[]) => {

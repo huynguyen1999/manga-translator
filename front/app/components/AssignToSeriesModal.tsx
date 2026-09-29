@@ -3,6 +3,7 @@ import { Icon } from "@iconify/react";
 import type { MangaGroupSummary, SeriesSummary } from "@/types";
 import { apiUrl } from "@/utils/api";
 import { MANGA_TITLE_MAX_LENGTH } from "@/config";
+import { useModalEscape } from "@/utils/useModalEscape";
 import {
   createSeries,
   fetchAllSeries,
@@ -79,14 +80,7 @@ export const AssignToSeriesModal: React.FC<AssignToSeriesModalProps> = ({
     };
   }, [isOpen]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !isSubmitting) onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, isSubmitting, onClose]);
+  useModalEscape(isOpen, onClose);
 
   const loadUnassignedForNewSeries = async () => {
     setLoadingUnassigned(true);

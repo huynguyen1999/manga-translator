@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Icon } from "@iconify/react";
 import { ImageThumb, LargePagePreview, SplitHandle } from "./TranslationSubmitParts";
 import { MANGA_TITLE_MAX_LENGTH } from "@/config";
+import { useModalEscape } from "@/utils/useModalEscape";
 import type { MangaGroupSelection, StoryPlan, StudioFile } from "@/types";
 import {
   addStorySplit,
@@ -82,14 +83,7 @@ export const TranslationSubmitModal: React.FC<Props> = ({
     setInspectBoundary(null);
   }, [isOpen, initialGroupName, initialGroupId, files]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !isSubmitting) onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isOpen, isSubmitting, onClose]);
+  useModalEscape(isOpen, onClose);
 
   if (!isOpen) return null;
 

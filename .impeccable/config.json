@@ -41,6 +41,60 @@
         ],
         "createdAt": "2026-09-25T18:48:35.562Z",
         "reason": "Agent: DESIGN.md documents Electric Iris indigo as the studio's primary accent; this timing heading follows the established palette."
+      },
+      {
+        "rule": "gray-on-color",
+        "value": "*",
+        "files": [
+          "front/app/components/CreateSeriesModal.tsx"
+        ],
+        "createdAt": "2026-09-29T05:10:35.093Z",
+        "reason": "Agent: the close icon uses zinc on its neutral surface and switches to red text on the red hover surface; the static detector does not resolve Tailwind state variants."
+      },
+      {
+        "rule": "gray-on-color",
+        "value": "*",
+        "files": [
+          "front/app/features/gallery/CreateSeriesModal.tsx"
+        ],
+        "createdAt": "2026-09-29T05:10:39.278Z",
+        "reason": "Agent: the remove icon uses zinc on its neutral surface and switches to red text on the red hover surface; the static detector does not resolve Tailwind state variants."
+      },
+      {
+        "rule": "gray-on-color",
+        "value": "*",
+        "files": [
+          "front/app/features/gallery/MoveToMangaModal.tsx"
+        ],
+        "createdAt": "2026-09-29T05:10:43.764Z",
+        "reason": "Agent: the list uses neutral text on a neutral surface and changes both row text and page-count text to indigo on hover; the static detector does not resolve Tailwind state variants."
+      },
+      {
+        "rule": "gray-on-color",
+        "value": "*",
+        "files": [
+          "front/app/components/TranslationSubmitModal.tsx"
+        ],
+        "createdAt": "2026-09-29T05:10:53.938Z",
+        "reason": "Agent: the flagged controls use zinc text on white/neutral surfaces and switch to white, indigo, or red text for their colored hover states; the static detector does not pair Tailwind state variants."
+      },
+      {
+        "rule": "gray-on-color",
+        "value": "*",
+        "files": [
+          "front/app/features/gallery/MangaDetailHeader.tsx"
+        ],
+        "createdAt": "2026-09-29T08:51:01.089Z",
+        "reason": "Agent: base text is on a neutral surface and changes to red on hover; the static detector does not resolve Tailwind state variants."
+      },
+      {
+        "rule": "gray-on-color",
+        "value": "*",
+        "files": [
+          "front/app/features/gallery/GalleryCard.tsx"
+        ],
+        "createdAt": "2026-09-29T08:51:01.197Z",
+        "reason": "Agent: base text is on a neutral dark menu and changes to white on focus; the static detector does not resolve Tailwind state variants."
       }
     ]
   }

@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Icon } from "@iconify/react";
+import { useModalEscape } from "@/utils/useModalEscape";
 
 export interface SavePresetModalProps {
   isOpen: boolean;
@@ -18,6 +19,7 @@ export const SavePresetModal: React.FC<SavePresetModalProps> = ({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useModalEscape(isOpen, onClose);
   if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {

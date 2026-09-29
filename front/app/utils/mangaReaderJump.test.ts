@@ -79,6 +79,12 @@ assert.deepEqual(
   "Reader should prepare five pages in both directions",
 );
 assert.deepEqual(getReaderPriorityIndices(1, 3), [0, 1, 2], "Priority window must clamp at chapter start");
+// When selecting page 10 to read from here
+assert.deepEqual(
+  getReaderPriorityIndices(10, 50),
+  [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "Priority window when reading at page 10 must center around page 10 (index 9)",
+);
 
 // 3. Verify route parsing and navigation for [Higashiyama Show] The Girllove Diary
 const readerUrl = buildReaderUrl("[Higashiyama Show] The Girllove Diary");

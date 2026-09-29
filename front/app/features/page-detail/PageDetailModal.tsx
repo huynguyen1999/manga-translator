@@ -16,6 +16,7 @@ import { usePageDetailActions } from "@/features/page-detail/usePageDetailAction
 import { usePageDetailSidebarResize } from "@/features/page-detail/usePageDetailSidebarResize";
 import { resolvePipelineStepSettings } from "@/utils/pageDetailSettings";
 import { resolveImageUrls, resolveTranslationTiming } from "@/utils/pageDetailTiming";
+import { useModalEscape } from "@/utils/useModalEscape";
 export {
   COLORIZER_LABELS,
   DETECTOR_LABELS,
@@ -71,6 +72,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   onRerender,
   titlePrefix = "Page Detail",
 }) => {
+  useModalEscape(true, onClose);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [viewMode, setViewMode] = useState<PageDetailViewMode>("translated");
   const [showBubbleBoxes, setShowBubbleBoxes] = useState(false), [showReviewBubbles, setShowReviewBubbles] = useState(image.sourceType !== "original");

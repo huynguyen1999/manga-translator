@@ -13,6 +13,7 @@ import { EditorReviewFooter } from "@/features/editor/EditorReviewFooter";
 import { useEditorHistory } from "@/features/editor/useEditorHistory";
 import { useEditorDrag } from "@/features/editor/useEditorDrag";
 import { useEditorExports } from "@/features/editor/useEditorExports";
+import { useModalEscape } from "@/utils/useModalEscape";
 
 interface MangaEditorModalProps {
   image: FinishedImage;
@@ -260,13 +261,7 @@ export const MangaEditorModal: React.FC<MangaEditorModalProps> = ({
     onClose();
   };
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") handleClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isDirty]);
+  useModalEscape(true, handleClose);
 
   const fitPage = useCallback(() => {
     const container = canvasContainerRef.current;

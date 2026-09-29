@@ -2,6 +2,71 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-29 — Reader ignored "Read from here" page selection and opened at start or previous read
+
+- Symptom: In manga detail or library view, clicking "Read from here" on a specific page (e.g. Page 10) opened the reader at Page 1 (if unread) or resumed from the previous last read position instead of starting at the selected page.
+- Root cause:
+  1. `MangaReaderModal.tsx`'s `useClientLayoutEffect` unconditionally restored `savedPos` from `localStorage` without checking if `initialPageIndex` was explicitly provided.
+  2. In infinite scroll mode, there was no scroll execution to position the scroll container / window to `pageRefs.current[initialPageIndex]`, leaving the viewport at the top or previous scroll position.
+  3. The IntersectionObserver then observed the visible page at the top/previous position and immediately overwrote `currentPage` back to that position.
+  4. In `GalleryCard.tsx`, clicking "Read from here" passed the index in the displayed list rather than the image reference, which could mismatch the manga's reading order when the grid was filtered or sorted.
+- Fix:
+  1. Updated `MangaReaderModal.tsx`'s `useClientLayoutEffect` and `useEffect` to scroll directly to `pageRefs.current[initialPageIndex]` (or top when index is 0) and bypass restoring `savedPos` whenever `initialPageIndex` is provided.
+  2. Updated `GalleryCard.tsx`, `useGalleryCardActions.ts`, and `RowGroupCards.tsx` to pass the image reference to `onReadFromHere` and resolve the exact index in `sortMangaPages(images)` regardless of active grid filters or sort modes.
+  3. Extracted fullscreen and keyboard navigation handling into `front/app/features/reader/useReaderControls.ts` keeping `MangaReaderModal.tsx` well under the baseline line limit.
+- Prevention: Always check whether an explicit start target was provided before restoring cached/saved scroll positions, and resolve selected items against the canonical collection order rather than transiently filtered/sorted view indices.
+
+## 2026-09-29 — Text inspection card was clipped at the preview bottom
+
+- Symptom: Selecting a text region near the top of a page opened a review card that continued below the visible preview, hiding its translation and other details.
+- Root cause: The card chose above/below placement from the selected region's position alone and had no height limit or internal scrolling, while the preview clips overflow.
+- Fix: Place the card on the side with more available preview height, cap it to that space, and allow its contents to scroll.
+- Prevention: Keep anchored preview popovers within their clipping container and constrain their height relative to their anchor.
+
+## 2026-09-29 — Overlapping speech bubble false-merge displacing text and leaving original region blank
+
+- Symptom: On page `1790599996739-8761dbed-2048-ENG-deepl` (region `ebbb134cf09b4f6d8f8ffd3f1b5d3728`), the translated text ("Being teased gently first like this❤") did not cover the original text region ($y \in [354, 633]$) in a dark thought oval, and instead displaced ~220px downwards to $y \in [570, 740]$, overlapping and colliding with the lower speech balloon.
+- Root cause: YOLO bubble detection emitted a high-confidence bubble (0.65) for the lower balloon and a low-confidence (0.34) false-merge bubble spanning both the dark oval and lower balloon ($y \in [317, 1041]$). `BubbleDetector` lacked mask-level containment/overlap suppression against higher-confidence bubbles. Lower text regions chose the higher-confidence bubble, leaving the low-confidence mega-bubble with only the single top text region. Because single-region bubble groups bypassed zone constraints, the solver placed the text into the lower, wider lobe of the mega-bubble to optimize vertical whitespace balance, abandoning the original source region.
+- Fix:
+  1. Added `suppress_overlapping_bubbles()` in `manga_translator/detection/bubble.py` to suppress lower-confidence duplicate or false-merge bubble proposals that heavily overlap ($\text{IoU} \ge 0.50$ or $\ge 70\%$ containment) with higher-confidence accepted bubbles.
+  2. Added `_clean_assigned_bubble_mask()` in `manga_translator/rendering/grouping.py` to trim assigned bubble masks by subtracting overlapping higher-confidence bubbles and retaining only connected components that overlap the assigned member text regions.
+- Prevention: Apply mask-level containment and overlap NMS during bubble detection, and prune multi-component bubble masks to the connected components containing member text.
+
+## 2026-09-29 — PageDetailHeader reviewBubbleCount optionality type error & frontend build sync
+
+- Symptom: Opening the app in a new fresh browser rendered unstyled markup or failed frontend typecheck on `reviewBubbleCount`.
+- Root cause: `PageDetailHeader.tsx` evaluated `reviewBubbleCount > 0` directly after a null check without narrowing optional/undefined type. A previous frontend build in `react-router-serve` also needed fresh compilation and asset reconciliation.
+- Fix: Guarded `reviewBubbleCount` against `undefined`, resolved typecheck error, condensed line count in `serverBatches.ts` to satisfy line limits ratchet, and verified clean client/server React Router builds.
+- Prevention: Include explicit undefined checks for optional numeric props and run `npm run typecheck` across all frontend components.
+
+## 2026-09-29 — Full pipeline reruns silently fell back to typesetting
+
+- Symptom: A Full rerun completed after executing only rendering; its batch detail omitted the selected mode.
+- Root cause: `BatchStore._to_dto` dropped `rerunMode` from both the batch and item. The worker reloaded that DTO, found no mode, and used its `typesetting` fallback.
+- Fix: Preserve `rerunMode` through batch details and summaries so the worker executes the selected plan and the UI can label it.
+- Prevention: Keep scheduler-consumed fields in DTOs and verify selected modes survive persistence and reload.
+
+## 2026-09-29 — Completed batch retained stale active page details after SSE reconnect
+
+- Symptom: A rerun showed `Complete` and 100% while its page row still showed an active stage and `Skip`.
+- Root cause: The first SSE snapshot contains batch summaries only; `mergeServerBatches` preserved previously loaded item details, which can be stale after a disconnect or reload.
+- Fix: Drop loaded details when a terminal summary contradicts them; an expanded card then uses its existing detail loader to fetch the current item state.
+- Prevention: Reconcile persisted item details against terminal server summaries before presenting them as current.
+
+## 2026-09-29 — Region center extraction omitted standard x/y/width/height dictionary keys
+
+- Symptom: Text regions inside detected panels were dropped into `UNASSIGNED REGIONS` or flat page lists, preventing panel grouping from appearing in story analysis, single-pass translation, and synopsis prompts.
+- Root cause: `_extract_region_center` in `manga_translator/professional_panels.py` only checked for `"center"`, `"xywh"`, and `"xyxy"` keys in region dicts, returning `None` for standard serialized text regions formatted with individual `"x"`, `"y"`, `"width"`, `"height"` (or `"lines"`).
+- Fix: Expanded `_extract_region_center` to extract center coordinates from `"x"`, `"y"`, `"width"`, `"height"`, `"lines"` polygons, and region object attributes.
+- Prevention: Support all standard bounding geometry representations (`x`/`y`/`width`/`height`, `xywh`, `xyxy`, and polygon vertices) when computing bounding box centers.
+
+## 2026-09-29 — Bulk review approval left manga detail on the cleared queue screen
+
+- Symptom: Accepting every flagged page in a manga opened the generic "Review queue is clear" screen.
+- Root cause: The detail route remained review-only after its flagged pages were removed from the local list.
+- Fix: Reopen the same manga detail route without the review filter after successful bulk approval.
+- Prevention: When clearing a scoped review filter, preserve the selected manga route.
+
 ## 2026-09-29 — Saved translations suppressed by inferred bubble and panel bounds
 
 - Symptom: Regions `cc455706405342a0804b0984125af677` and `2947b6146bc74dca91c4e020fbb34839` have saved translations but render no translated pixels. Region `084fa60938bb4c58ab28ccb93ea2dde8` renders with a thin white contour.
@@ -1610,3 +1675,10 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 - Root cause: Search navigation to `/gallery?search=...` was followed by detail-close navigation using the prior route state.
 - Fix: Let route-backed search own the transition; close the detail locally only when no route search callback exists.
 - Prevention: Keep route navigation and the local detail-close fallback mutually exclusive on search submission.
+
+## 2026-09-29 — Rebuilt frontend left open tabs without styling
+
+- Symptom: The studio rendered as unstyled HTML after its `/assets/root-<hash>.css` request returned 404.
+- Root cause: A tab held HTML referencing a hashed stylesheet removed by a frontend rebuild; stale-asset recovery only reloads for missing JavaScript.
+- Fix: Reload once when a same-origin bundled stylesheet fails, and clear the retry guard after a stylesheet loads.
+- Prevention: Cover missing CSS assets as well as missing JavaScript when handling stale frontend builds.

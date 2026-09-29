@@ -696,6 +696,7 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
       });
       if (reviewOnly) {
         setMangaImages((prev) => ({ ...prev, [currentSingleGroup.title]: [] }));
+        onOpenMangaDetail?.(currentSingleGroup.id, false);
       }
       if (onUpdateImage && currentSingleGroup.images) {
         for (const img of currentSingleGroup.images) {
@@ -1032,37 +1033,17 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
         <div className="space-y-6">
           {/* Manga Header Banner */}
           <MangaDetailHeader
-            currentSingleGroup={currentSingleGroup}
-            closeMangaDetail={closeMangaDetail}
-            renamingManga={renamingManga}
-            renameInputValue={renameInputValue}
-            setRenameInputValue={setRenameInputValue}
-            handleSaveRename={handleSaveRename}
-            setRenamingManga={setRenamingManga}
-            handleStartRename={handleStartRename}
-            setAssigningManga={setAssigningManga}
-            summaryAvailability={summaryAvailability}
-            onRestoreBatchPages={onRestoreBatchPages}
-            handleRestoreBatchPages={handleRestoreBatchPages}
-            restoringBatchPages={restoringBatchPages}
-            handleToggleSelectAll={handleToggleSelectAll}
-            selectedImageIds={selectedImageIds}
-            onRerenderImages={onRerenderImages}
-            requestRerender={requestRerender}
-            handleReadManga={handleReadManga}
-            readerLoadingTitle={readerLoadingTitle}
-            readerLoadError={readerLoadError}
-            handleSummarize={handleSummarize}
-            summarizingTitle={summarizingTitle}
-            handleDownloadCbz={handleDownloadCbz}
-            downloadingCbz={downloadingCbz}
-            onDeleteManga={onDeleteManga}
-            setConfirmDeleteManga={setConfirmDeleteManga}
-            restoreBatchMessage={restoreBatchMessage}
-            reviewOnly={reviewOnly}
-            handleCardEdit={handleCardEdit}
-            handleApproveAllReviews={handleApproveAllReviews}
-            isApprovingAllReviews={isApprovingAllReviews}
+            currentSingleGroup={currentSingleGroup} closeMangaDetail={closeMangaDetail}
+            renamingManga={renamingManga} renameInputValue={renameInputValue} setRenameInputValue={setRenameInputValue}
+            handleSaveRename={handleSaveRename} setRenamingManga={setRenamingManga} handleStartRename={handleStartRename}
+            setAssigningManga={setAssigningManga} summaryAvailability={summaryAvailability} onRestoreBatchPages={onRestoreBatchPages}
+            handleRestoreBatchPages={handleRestoreBatchPages} restoringBatchPages={restoringBatchPages}
+            handleToggleSelectAll={handleToggleSelectAll} selectedImageIds={selectedImageIds} onRerenderImages={onRerenderImages}
+            requestRerender={requestRerender} handleReadManga={handleReadManga} readerLoadingTitle={readerLoadingTitle}
+            readerLoadError={readerLoadError} handleSummarize={handleSummarize} summarizingTitle={summarizingTitle}
+            handleDownloadCbz={handleDownloadCbz} downloadingCbz={downloadingCbz} onDeleteManga={onDeleteManga}
+            setConfirmDeleteManga={setConfirmDeleteManga} restoreBatchMessage={restoreBatchMessage} reviewOnly={reviewOnly}
+            handleCardEdit={handleCardEdit} handleApproveAllReviews={handleApproveAllReviews} isApprovingAllReviews={isApprovingAllReviews}
           />
 
           {/* Bulk Selection Action Bar inside single manga view */}
@@ -1081,33 +1062,17 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
 
           {/* Pages Grid */}
           <MangaPagesGrid
-            currentSingleGroup={currentSingleGroup}
-            canReorderCurrentGroup={canReorderCurrentGroup}
-            pageSort={pageSort}
-            reorderingGroupId={reorderingGroupId}
-            handlePageSort={handlePageSort}
-            handleSavePageSort={handleSavePageSort}
-            pageSortIsDirty={pageSortIsDirty}
-            pageOrderError={pageOrderError}
-            displayedPageImages={displayedPageImages}
-            setDraggedPageId={setDraggedPageId}
-            setDragOverPageId={setDragOverPageId}
-            draggedPageId={draggedPageId}
-            dragOverPageId={dragOverPageId}
-            stopPageDragAutoScroll={stopPageDragAutoScroll}
-            handlePageDrop={handlePageDrop}
-            duplicateSinglePageNames={duplicateSinglePageNames}
-            highlightedImageId={highlightedImageId}
-            selectedImageIds={selectedImageIds}
-            handleSingleGroupToggleSelect={handleSingleGroupToggleSelect}
-            handleCardMove={handleCardMove}
-            handleSingleGroupReadFromHere={handleSingleGroupReadFromHere}
-            handleCardClick={handleCardClick}
-            handleCardDownload={handleCardDownload}
-            onDeleteImage={onDeleteImage}
-            handleCardDelete={handleCardDelete}
-            handleCardEdit={handleCardEdit}
-            onRerenderImage={onRerenderImage}
+            currentSingleGroup={currentSingleGroup} canReorderCurrentGroup={canReorderCurrentGroup}
+            pageSort={pageSort} reorderingGroupId={reorderingGroupId} handlePageSort={handlePageSort}
+            handleSavePageSort={handleSavePageSort} pageSortIsDirty={pageSortIsDirty} pageOrderError={pageOrderError}
+            displayedPageImages={displayedPageImages} setDraggedPageId={setDraggedPageId}
+            setDragOverPageId={setDragOverPageId} draggedPageId={draggedPageId} dragOverPageId={dragOverPageId}
+            stopPageDragAutoScroll={stopPageDragAutoScroll} handlePageDrop={handlePageDrop}
+            duplicateSinglePageNames={duplicateSinglePageNames} highlightedImageId={highlightedImageId}
+            selectedImageIds={selectedImageIds} handleSingleGroupToggleSelect={handleSingleGroupToggleSelect}
+            handleCardMove={handleCardMove} handleSingleGroupReadFromHere={handleSingleGroupReadFromHere}
+            handleCardClick={handleCardClick} handleCardDownload={handleCardDownload} onDeleteImage={onDeleteImage}
+            handleCardDelete={handleCardDelete} handleCardEdit={handleCardEdit} onRerenderImage={onRerenderImage}
             pageViewState={pageViewState}
           />
         </div>

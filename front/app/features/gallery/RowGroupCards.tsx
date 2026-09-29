@@ -9,7 +9,7 @@ interface RowGroupCardsProps {
   selectedImageIds: Set<string>;
   onToggleSelectImage: (id: string, groupImages?: FinishedImage[], shiftKey?: boolean) => void;
   onMoveImage: (image: FinishedImage) => void;
-  onReadFromHere: (title: string, images: FinishedImage[], idx: number) => void;
+  onReadFromHere: (title: string, images: FinishedImage[], idx: number, image?: FinishedImage) => void;
   onClickImage: (image: FinishedImage) => void;
   onDownloadImage: (image: FinishedImage) => void;
   onDeleteImage?: (image: FinishedImage) => void;
@@ -46,8 +46,8 @@ export const RowGroupCards: React.FC<RowGroupCardsProps> = React.memo(({
     onToggleSelectImage(id, images, shiftKey);
   }, [onToggleSelectImage, images]);
 
-  const handleRead = useCallback((pageIndex: number) => {
-    onReadFromHere(title, images, pageIndex);
+  const handleRead = useCallback((pageIndex: number, image?: FinishedImage) => {
+    onReadFromHere(title, images, pageIndex, image);
   }, [onReadFromHere, title, images]);
 
   return (

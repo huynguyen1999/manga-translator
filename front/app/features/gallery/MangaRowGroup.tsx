@@ -71,11 +71,7 @@ interface MangaRowGroupActions {
   ) => void | Promise<void>;
   setConfirmDeleteManga: Dispatch<SetStateAction<string | null>>;
   onMoveImage: (image: FinishedImage) => void;
-  onReadFromHere: (
-    title: string,
-    images: FinishedImage[],
-    pageIndex: number,
-  ) => void;
+  onReadFromHere: (title: string, images: FinishedImage[], pageIndex: number, image?: FinishedImage) => void;
   onClickImage: (image: FinishedImage) => void;
   onDownloadImage: (image: FinishedImage) => void;
   onDeleteImage?: (image: FinishedImage) => void;

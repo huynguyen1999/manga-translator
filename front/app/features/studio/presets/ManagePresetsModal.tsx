@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Icon } from "@iconify/react";
+import { useModalEscape } from "@/utils/useModalEscape";
 import type { TranslationPreset } from "./presetTypes";
 
 export interface ManagePresetsModalProps {
@@ -33,6 +34,7 @@ export const ManagePresetsModal: React.FC<ManagePresetsModalProps> = ({
   const [savingEdit, setSavingEdit] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useModalEscape(isOpen, onClose);
   if (!isOpen) return null;
 
   const startEditing = (preset: TranslationPreset) => {

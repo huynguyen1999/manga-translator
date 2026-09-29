@@ -81,6 +81,12 @@ try {
   assert.equal(state.loading, null);
   assert.equal(state.error, null);
 
+  // Test selecting specific non-zero page to read from here
+  await actions.handleReadManga("Chapter 1", [image, { ...image, id: "page-2", pageOrder: 2 }], 1);
+  assert.deepEqual(openReaderArgs, ["group-1", 1]);
+  assert.equal(state.reading?.initialPageIndex, 1);
+  assert.equal(state.reading?.images.length, 2);
+
   renderToStaticMarkup(React.createElement(Harness));
   actions.handleCloseReader(0, "page-1");
   assert.equal(state.reading, null);

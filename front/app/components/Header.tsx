@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { Icon } from "@iconify/react";
 import { Link } from "react-router";
+import { useModalEscape } from "@/utils/useModalEscape";
 
 interface HeaderProps {
   theme: "light" | "dark";
@@ -27,14 +28,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const [showShortcuts, setShowShortcuts] = useState(false);
 
-  useEffect(() => {
-    if (!showShortcuts) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setShowShortcuts(false);
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showShortcuts]);
+  useModalEscape(showShortcuts, () => setShowShortcuts(false));
 
   return (
     <>

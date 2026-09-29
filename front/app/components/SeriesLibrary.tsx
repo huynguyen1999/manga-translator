@@ -5,6 +5,7 @@ import { AssignToSeriesModal } from "./AssignToSeriesModal";
 import CreateSeriesModal from "./CreateSeriesModal";
 import type { MangaGroupSummary, SeriesDetail, SeriesMember, SeriesSummary } from "@/types";
 import { apiUrl } from "@/utils/api";
+import { useModalEscape } from "@/utils/useModalEscape";
 import { MANGA_TITLE_MAX_LENGTH } from "@/config";
 import {
   addMangaToSeries,
@@ -130,16 +131,8 @@ export const SeriesLibrary: React.FC<SeriesLibraryProps> = ({
   const [createError, setCreateError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
 
-  useEffect(() => {
-    if (!isAddOpen && !isCreateModalOpen) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || isCreating) return;
-      if (isAddOpen) setIsAddOpen(false);
-      else setIsCreateModalOpen(false);
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isAddOpen, isCreateModalOpen, isCreating]);
+  useModalEscape(isAddOpen, () => setIsAddOpen(false));
+  useModalEscape(isCreateModalOpen, () => setIsCreateModalOpen(false));
 
   const [draggedMemberId, setDraggedMemberId] = useState<string | null>(null);
   const [dragOverMemberId, setDragOverMemberId] = useState<string | null>(null);

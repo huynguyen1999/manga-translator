@@ -96,9 +96,13 @@ class TestProfessionalPanels(unittest.TestCase):
         transcript = format_page_transcript_for_analysis(page_data)
         self.assertIn("[PAGE 3]", transcript)
         self.assertIn("[PANEL p3_01 | PANEL ORDER 1]", transcript)
-        self.assertIn("[r1 | estimated order 1]\nおはよう", transcript)
+        self.assertIn("おはよう", transcript)
         self.assertIn("[UNASSIGNED REGIONS]", transcript)
-        self.assertIn("[r2 | estimated order 1]\nナレーション", transcript)
+        self.assertIn("ナレーション", transcript)
+        self.assertNotIn("[r1 |", transcript)
+
+        transcript_with_ids = format_page_transcript_for_analysis(page_data, include_region_id=True)
+        self.assertIn("[r1 | estimated order 1]\nおはよう", transcript_with_ids)
 
     def test_format_page_transcript_for_analysis_without_panels(self):
         page_data = {
@@ -111,10 +115,11 @@ class TestProfessionalPanels(unittest.TestCase):
         transcript = format_page_transcript_for_analysis(page_data)
         self.assertEqual(
             transcript,
-            "[PAGE 4]\n[r1 | estimated order 1]\nおはよう\n[r2 | estimated order 2]\nさようなら",
+            "[PAGE 4]\nおはよう\nさようなら",
         )
         self.assertNotIn("[PANEL", transcript)
         self.assertNotIn("[UNASSIGNED", transcript)
+        self.assertNotIn("[r1 |", transcript)
 
     def test_group_transcript_panel_texts(self):
         panels = [{"xyxy": [0, 0, 100, 100], "order": 1}]

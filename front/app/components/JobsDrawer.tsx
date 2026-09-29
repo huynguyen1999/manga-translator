@@ -7,6 +7,7 @@ import { apiUrl } from "@/utils/api";
 import { buildMangaDetailIdUrl, mangaIdForTitle } from "@/utils/routeState";
 import { summaryModelOptions } from "@/config";
 import SummaryJobRow from "./SummaryJobRow";
+import { useModalEscape } from "@/utils/useModalEscape";
 
 type AsyncAction = () => void | Promise<void>;
 type JobSection = "active" | "queued" | "attention" | "completed";
@@ -135,26 +136,13 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
     }
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && shouldCloseJobsDrawer(event.target, drawerRef.current)) {
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, onClose]);
+  useModalEscape(open, onClose);
 
   useEffect(() => {
     if (!summaryModal) return;
     summaryCloseRef.current?.focus();
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSummaryModal(null);
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
   }, [summaryModal]);
+  useModalEscape(Boolean(summaryModal), () => setSummaryModal(null));
 
   const isActionPending = useCallback((key: string) => Boolean(pendingActionsRef.current[key]), []);
   const runAction = useCallback((key: string, label: string, action: AsyncAction) => {

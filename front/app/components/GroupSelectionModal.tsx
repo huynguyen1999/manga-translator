@@ -3,6 +3,7 @@ import { Icon } from '@iconify/react';
 import { MANGA_TITLE_MAX_LENGTH } from '@/config';
 import type { MangaGroupSelection } from '@/types';
 import type { ExistingGroupTitle } from '@/utils/groupTitles';
+import { useModalEscape } from '@/utils/useModalEscape';
 
 export type ExistingGroupItem = ExistingGroupTitle;
 
@@ -102,17 +103,7 @@ export const GroupSelectionModal: React.FC<GroupSelectionModalProps> = ({
     inputRef.current?.focus();
   }, [isOpen, initialGroupName, initialGroupId, normalizedGroups]);
 
-  // Handle Escape key
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !isSubmitting) {
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, isSubmitting, onClose]);
+  useModalEscape(isOpen, onClose);
 
   // Check if current input matches an existing group
   const matchedExistingGroup = useMemo(() => {

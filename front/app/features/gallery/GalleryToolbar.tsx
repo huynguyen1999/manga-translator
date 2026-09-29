@@ -49,37 +49,39 @@ export function GalleryToolbar({
   onGallerySortChange,
 }: GalleryToolbarProps) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-200 bg-white p-3 shadow-xs dark:border-zinc-800 dark:bg-zinc-900 sm:p-4">
-      <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
-        <div className="flex items-center space-x-2">
-          <Icon icon="carbon:book" className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-          <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-            Manga Gallery
-          </h3>
-        </div>
-        <div className="flex items-center space-x-1.5">
-          <span className="flex items-center rounded-full bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 px-2.5 py-0.5 text-xs font-semibold text-indigo-700 dark:text-indigo-300">
-            {effectiveIsLoading && (
-              <Icon icon="carbon:renew" className="w-3 h-3 animate-spin mr-1 text-indigo-600 dark:text-indigo-400" />
+    <div className="space-y-4 rounded-xl border border-zinc-200 bg-white p-3 shadow-xs dark:border-zinc-800 dark:bg-zinc-900 sm:p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
+          <div className="flex items-center gap-2">
+            <Icon icon="carbon:book" className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+            <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+              Manga Gallery
+            </h3>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="flex items-center rounded-full bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 px-2.5 py-0.5 text-xs font-semibold text-indigo-700 dark:text-indigo-300">
+              {effectiveIsLoading && (
+                <Icon icon="carbon:renew" className="w-3 h-3 animate-spin mr-1 text-indigo-600 dark:text-indigo-400" />
+              )}
+              <span>{totalImagesCount} {totalImagesCount === 1 ? 'page' : 'pages'}</span>
+            </span>
+            <span className="rounded-full bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:text-zinc-400">
+              {galleryMangaCount} {galleryMangaCount === 1 ? 'manga' : 'manga series'}
+            </span>
+            {(reviewCount > 0 || reviewOnly) && (
+              <button
+                type="button"
+                onClick={() => onGalleryReviewChange?.(!reviewOnly)}
+                className={`inline-flex min-h-11 items-center gap-1 rounded-full border px-3 py-1 text-xs font-semibold transition-colors sm:min-h-8 ${reviewOnly
+                  ? 'border-amber-300 bg-amber-100 text-amber-900 dark:border-amber-700 dark:bg-amber-950/50 dark:text-amber-200'
+                  : 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300 dark:hover:bg-amber-950/60'}`}
+                aria-pressed={reviewOnly}
+              >
+                <Icon icon="carbon:warning-alt" className="h-3 w-3" />
+                {reviewOnly ? `${reviewCount} ${reviewCount === 1 ? 'page' : 'pages'} to review` : `${reviewCount} needs review`}
+              </button>
             )}
-            <span>{totalImagesCount} {totalImagesCount === 1 ? 'page' : 'pages'}</span>
-          </span>
-          <span className="rounded-full bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:text-zinc-400">
-            {galleryMangaCount} {galleryMangaCount === 1 ? 'manga' : 'manga series'}
-          </span>
-          {(reviewCount > 0 || reviewOnly) && (
-            <button
-              type="button"
-              onClick={() => onGalleryReviewChange?.(!reviewOnly)}
-              className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors ${reviewOnly
-                ? 'border-amber-300 bg-amber-100 text-amber-900 dark:border-amber-700 dark:bg-amber-950/50 dark:text-amber-200'
-                : 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300 dark:hover:bg-amber-950/60'}`}
-              aria-pressed={reviewOnly}
-            >
-              <Icon icon="carbon:warning-alt" className="h-3 w-3" />
-              {reviewOnly ? `${reviewCount} ${reviewCount === 1 ? 'page' : 'pages'} to review` : `${reviewCount} needs review`}
-            </button>
-          )}
+          </div>
         </div>
       </div>
 

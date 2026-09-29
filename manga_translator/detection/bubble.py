@@ -171,7 +171,41 @@ class BubbleDetector:
                 if np.count_nonzero(binary) >= 100 or np.count_nonzero(binary) == binary.size:
                     bubbles.append(BubbleDetection(binary, score))
 
-        return bubbles, sort_panel_detections_reading_order(raw_panels, rtl=True)
+        return suppress_overlapping_bubbles(bubbles), sort_panel_detections_reading_order(raw_panels, rtl=True)
+
+
+def suppress_overlapping_bubbles(
+    bubbles: list[BubbleDetection],
+    iou_threshold: float = 0.5,
+    containment_threshold: float = 0.7,
+) -> list[BubbleDetection]:
+    """Suppress redundant duplicate or false-merge bubble detections with lower confidence."""
+    if len(bubbles) <= 1:
+        return bubbles
+    sorted_bubbles = sorted(bubbles, key=lambda b: b.confidence, reverse=True)
+    kept: list[BubbleDetection] = []
+    for cand in sorted_bubbles:
+        cand_mask = cand.mask > 0
+        cand_area = int(np.count_nonzero(cand_mask))
+        if cand_area < 100:
+            continue
+        suppress = False
+        for accepted in kept:
+            acc_mask = accepted.mask > 0
+            acc_area = int(np.count_nonzero(acc_mask))
+            inter = int(np.count_nonzero(cand_mask & acc_mask))
+            if inter == 0:
+                continue
+            union = cand_area + acc_area - inter
+            iou = inter / union if union > 0 else 0.0
+            inter_over_cand = inter / cand_area
+            inter_over_acc = inter / acc_area
+            if iou >= iou_threshold or inter_over_cand >= containment_threshold or inter_over_acc >= containment_threshold:
+                suppress = True
+                break
+        if not suppress:
+            kept.append(cand)
+    return kept
 
 
 def get_detector(model: str, confidence: float = 0.25, mask_threshold: float = 0.5, image_size: int = 512, device: str = "cpu") -> BubbleDetector:

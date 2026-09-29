@@ -79,6 +79,9 @@ export const parseTextRegions = (data: unknown): EditableTextBlock[] => {
       group_members: Array.isArray(item.group_members) ? item.group_members.filter((value): value is string => typeof value === "string") : undefined,
       review_required: item.review_required === true,
       review_reason: typeof item.review_reason === "string" ? item.review_reason : null,
+      render_suppressed: (item as any).render_suppressed === true || (item as any)._render_suppressed === true,
+      retention: typeof (item as any).retention === "string" ? (item as any).retention : undefined,
+      retention_reason: typeof (item as any).retention_reason === "string" ? (item as any).retention_reason : undefined,
       layout_segments: Array.isArray(item.layout_segments)
         ? item.layout_segments.flatMap((rawSegment) => {
             if (!rawSegment || typeof rawSegment !== "object") return [];
@@ -96,7 +99,7 @@ export const parseTextRegions = (data: unknown): EditableTextBlock[] => {
             }] : [];
           }) : undefined,
       lines: linesFrom(item.lines),
-      original_text: typeof item.original_text === "string" ? item.original_text : "",
+      original_text: typeof item.original_text === "string" ? item.original_text : (typeof (item as any).text === "string" ? (item as any).text : ""),
       translation: String(item.translation ?? ""),
       confidence: numberValue(item.confidence ?? item.prob),
       prob: numberValue(item.prob ?? item.confidence),

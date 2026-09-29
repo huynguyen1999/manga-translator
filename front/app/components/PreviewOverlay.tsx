@@ -389,11 +389,6 @@ export const PreviewOverlay: React.FC<PreviewOverlayProps> = ({
               }`}>
                 {block.id}
               </span>
-            ) : isReview ? (
-              <span className="absolute -top-2 -right-1 flex h-4 items-center gap-0.5 rounded bg-yellow-400 px-1 text-[8px] font-bold text-black shadow-xs select-none">
-                <Icon icon="carbon:warning-filled" className="h-2.5 w-2.5" />
-                <span>Review</span>
-              </span>
             ) : null}
           </div>
         );

@@ -91,10 +91,10 @@ export function MoveToMangaModal({
                   key={group.title}
                   type="button"
                   onClick={() => onMove(group.title)}
-                  className="w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-left text-zinc-800 dark:text-zinc-200 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+                  className="group w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs text-left text-zinc-800 dark:text-zinc-200 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
                 >
                   <span className="truncate">{group.title}</span>
-                  <span className="text-[10px] text-zinc-400">{group.images.length} pages</span>
+                  <span className="text-[10px] text-zinc-400 group-hover:text-indigo-600 dark:group-hover:text-indigo-300">{group.images.length} pages</span>
                 </button>
               )) : (
                 <p className="px-2.5 py-2 text-center text-xs text-zinc-500 dark:text-zinc-400">

@@ -283,7 +283,7 @@ export const PageDetailHeader: React.FC<PageDetailHeaderProps> = ({
               </button>
 
               {!isOriginal && (reviewBubbleCount === null || (reviewBubbleCount ?? 0) > 0) && <button type="button" onClick={() => setShowReviewBubbles?.((prev) => !prev)} className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${showReviewBubbles ? "bg-amber-600 text-white shadow-xs" : "text-zinc-300 hover:bg-white/10 hover:text-white"}`} title={showReviewBubbles ? "Hide bubbles needing review" : "Show bubbles needing review"} aria-pressed={showReviewBubbles}>
-                <Icon icon="carbon:warning-alt" className="h-3.5 w-3.5" /><span>Needs review</span>{reviewBubbleCount !== null && reviewBubbleCount > 0 && <span className={`rounded-full px-1.5 py-0.2 text-[10px] ${showReviewBubbles ? "bg-amber-700/80 text-white" : "bg-zinc-800 text-zinc-300"}`}>{reviewBubbleCount}</span>}
+                <Icon icon="carbon:warning-alt" className="h-3.5 w-3.5" /><span>Needs review</span>{reviewBubbleCount !== null && reviewBubbleCount !== undefined && reviewBubbleCount > 0 && <span className={`rounded-full px-1.5 py-0.2 text-[10px] ${showReviewBubbles ? "bg-amber-700/80 text-white" : "bg-zinc-800 text-zinc-300"}`}>{reviewBubbleCount}</span>}
               </button>}
 
               <button

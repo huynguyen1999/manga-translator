@@ -11,6 +11,21 @@ import type { Route } from "./+types/root";
 import "./app.css";
 import { RenderPerformanceProbe } from "./utils/renderPerformance";
 
+const staleStylesheetRecovery = `
+window.addEventListener("error", (event) => {
+  const link = event.target;
+  if (!(link instanceof HTMLLinkElement) || link.rel !== "stylesheet" || !link.href.startsWith(location.origin + "/assets/")) return;
+  const key = "stale-stylesheet-recovery";
+  if (sessionStorage.getItem(key)) return;
+  sessionStorage.setItem(key, "1");
+  location.reload();
+}, true);
+window.addEventListener("load", (event) => {
+  const link = event.target;
+  if (link instanceof HTMLLinkElement && link.rel === "stylesheet" && link.href.startsWith(location.origin + "/assets/")) sessionStorage.removeItem("stale-stylesheet-recovery");
+}, true);
+`;
+
 export const links: Route.LinksFunction = () => [
   { rel: "preconnect", href: "https://fonts.googleapis.com" },
   {
@@ -41,6 +56,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <meta name="apple-mobile-web-app-title" content="Manga Translator" />
         <link rel="manifest" href="/manifest.webmanifest" />
         <Meta />
+        <script dangerouslySetInnerHTML={{ __html: staleStylesheetRecovery }} />
         <Links />
       </head>
       <body>

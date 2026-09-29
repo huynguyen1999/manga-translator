@@ -45,9 +45,15 @@ def group_regions_by_bubbles(regions, detections, minimum_overlap: float = 0.35,
             result.append(region)
     for detection_index, members in assignments.items():
         members.sort(key=lambda item: item[0])
+        other_higher_masks = [
+            detections[j].mask for j in assignments.keys()
+            if j != detection_index and detections[j].confidence >= detections[detection_index].confidence
+        ]
+        assigned_mask = _clean_assigned_bubble_mask(detections[detection_index].mask, members, other_higher_masks)
+
         if not group:
             for _, region in members:
-                region._bubble_mask = detections[detection_index].mask
+                region._bubble_mask = assigned_mask
                 region.bubble_id = f"bubble_{detection_index}"
                 region._bubble_detection_confidence = detections[detection_index].confidence
                 result.append(region)
@@ -55,7 +61,7 @@ def group_regions_by_bubbles(regions, detections, minimum_overlap: float = 0.35,
 
         preserved = [item for item in members if getattr(item[1], "translation_policy", None) == "preserve"]
         for _, region in preserved:
-            region._bubble_mask = detections[detection_index].mask
+            region._bubble_mask = assigned_mask
             region.bubble_id = f"bubble_{detection_index}"
             region._bubble_detection_confidence = detections[detection_index].confidence
             result.append(region)
@@ -63,7 +69,7 @@ def group_regions_by_bubbles(regions, detections, minimum_overlap: float = 0.35,
 
         if len(members) == 1:
             region = members[0][1]
-            region._bubble_mask = detections[detection_index].mask
+            region._bubble_mask = assigned_mask
             region.bubble_id = f"bubble_{detection_index}"
             region._bubble_detection_confidence = detections[detection_index].confidence
             result.append(region)
@@ -86,10 +92,41 @@ def group_regions_by_bubbles(regions, detections, minimum_overlap: float = 0.35,
             region.source_regions = [
                 _source_region_snapshot(item, source_index) for source_index, item in members
             ]
-            region._bubble_mask = detections[detection_index].mask
+            region._bubble_mask = assigned_mask
             region._bubble_detection_confidence = detections[detection_index].confidence
             result.append(region)
     return sorted(result, key=lambda item: getattr(item, "_bubble_source_order", 0))
+
+
+def _clean_assigned_bubble_mask(mask: np.ndarray, members: list, other_masks: list[np.ndarray] | None = None) -> np.ndarray:
+    """Trim assigned bubble mask by subtracting overlapping higher-confidence masks and keeping relevant components."""
+    if mask is None or not np.any(mask):
+        return mask
+    clean_mask = mask.copy()
+    if other_masks:
+        for other in other_masks:
+            if other is not None and other.shape == clean_mask.shape:
+                clean_mask[other > 0] = 0
+    binary = (clean_mask > 0).astype(np.uint8)
+    num_labels, labels, _, _ = cv2.connectedComponentsWithStats(binary, 8)
+    if num_labels <= 2:
+        return clean_mask if np.any(clean_mask) else mask
+    reg_mask = np.zeros_like(binary, dtype=np.uint8)
+    for _, reg in members:
+        lines = getattr(reg, "lines", None)
+        if lines is not None and len(lines):
+            cv2.fillPoly(reg_mask, [np.asarray(line, np.int32) for line in lines], 1)
+        elif getattr(reg, "xyxy", None) is not None:
+            x1, y1, x2, y2 = [int(v) for v in reg.xyxy]
+            reg_mask[max(0, y1):min(binary.shape[0], y2), max(0, x1):min(binary.shape[1], x2)] = 1
+    kept = np.zeros_like(binary, dtype=np.uint8)
+    for l in range(1, num_labels):
+        comp = (labels == l)
+        if np.any(comp & (reg_mask > 0)):
+            kept |= comp.astype(np.uint8)
+    if np.any(kept):
+        return kept * 255
+    return clean_mask if np.any(clean_mask) else mask
 
 
 def _source_region_snapshot(region, reading_order: int):

@@ -4,6 +4,7 @@ import type { FinishedImage, PipelineRerunMode, TranslationSettings } from "@/ty
 import { AppOverlayPortal } from "@/components/AppOverlayPortal";
 import { PRESETS } from "./pipelineRerunPresets";
 import { PipelineRerunOverrides } from "./PipelineRerunOverrides";
+import { useModalEscape } from "@/utils/useModalEscape";
 
 export type RerunSettingsSource = "app" | "snapshot";
 
@@ -114,6 +115,7 @@ export const PipelineRerunDialog: React.FC<PipelineRerunDialogProps> = ({
 
   const pageCount = images.length;
   const targetLabel = pageCount === 1 ? images[0].originalName : `${pageCount} selected pages`;
+  useModalEscape(true, onClose);
 
   return (
     <AppOverlayPortal>

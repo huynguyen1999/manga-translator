@@ -10,20 +10,13 @@ import type { ReaderMode, ReaderWidth, SinglePageFit } from '@/features/reader/P
 import { ReaderWidthMenu } from '@/features/reader/ReaderWidthMenu';
 import { ReaderPageStage } from '@/features/reader/ReaderPageStage';
 import { getReaderPreloadIndices, getReaderPriorityIndices, getSeriesMemberNavigation } from '@/features/reader/readerUtils';
+import { useModalEscape } from '@/utils/useModalEscape';
+import { useReaderControls } from '@/features/reader/useReaderControls';
 export { getReaderPreloadIndices, getReaderPriorityIndices, getSeriesMemberNavigation } from '@/features/reader/readerUtils';
 export { getReaderTitle, isPhoneOrTouch } from '@/features/reader/PageItem';
 export type { ReaderMode, ReaderWidth, SinglePageFit } from '@/features/reader/PageItem';
 
 const useClientLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
-
-type SafariFullscreenDocument = Document & {
-  webkitFullscreenElement?: Element | null;
-  webkitExitFullscreen?: () => Promise<void> | void;
-};
-
-type SafariFullscreenElement = HTMLElement & {
-  webkitRequestFullscreen?: () => Promise<void> | void;
-};
 
 interface MangaReaderModalProps {
   mangaId?: string;
@@ -98,7 +91,6 @@ export const MangaReaderModal: React.FC<MangaReaderModalProps> = ({
     [currentPage, images.length],
   );
 
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(false);
   const [isLandscape, setIsLandscape] = useState(() =>
     typeof window !== 'undefined' && window.matchMedia('(orientation: landscape)').matches,
@@ -294,6 +286,24 @@ export const MangaReaderModal: React.FC<MangaReaderModalProps> = ({
     }
 
     if (readerMode === 'infinite') {
+      if (initialPageIndex !== undefined && initialPageIndex >= 0 && initialPageIndex < images.length) {
+        const scrollToTarget = () => {
+          const el = pageRefs.current[initialPageIndex];
+          if (el) {
+            el.scrollIntoView({ behavior: 'auto', block: 'start' });
+          } else if (initialPageIndex === 0) {
+            if (isPhoneOrTouch()) {
+              window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+            } else if (scrollContainerRef.current) {
+              scrollContainerRef.current.scrollTop = 0;
+            }
+          }
+        };
+        scrollToTarget();
+        const frame = requestAnimationFrame(scrollToTarget);
+        return () => cancelAnimationFrame(frame);
+      }
+
       const savedPos = chapterChanged ? null : localStorage.getItem(storageKey);
       if (savedPos) {
         const pos = parseInt(savedPos, 10);
@@ -309,7 +319,30 @@ export const MangaReaderModal: React.FC<MangaReaderModalProps> = ({
         return () => cancelAnimationFrame(frame);
       }
     }
-  }, [images.length, pageCountStorageKey, pageStorageKey, readerMode, storageKey]);
+  }, [images.length, initialPageIndex, pageCountStorageKey, pageStorageKey, readerMode, storageKey]);
+
+  useEffect(() => {
+    if (initialPageIndex !== undefined && initialPageIndex >= 0 && initialPageIndex < images.length) {
+      setCurrentPage(initialPageIndex + 1);
+      if (readerMode === 'infinite') {
+        const scrollToTarget = () => {
+          const el = pageRefs.current[initialPageIndex];
+          if (el) {
+            el.scrollIntoView({ behavior: 'auto', block: 'start' });
+          } else if (initialPageIndex === 0) {
+            if (isPhoneOrTouch()) {
+              window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+            } else if (scrollContainerRef.current) {
+              scrollContainerRef.current.scrollTop = 0;
+            }
+          }
+        };
+        scrollToTarget();
+        const frame = requestAnimationFrame(scrollToTarget);
+        return () => cancelAnimationFrame(frame);
+      }
+    }
+  }, [images.length, initialPageIndex, readerMode]);
 
   // High-performance scroll handler without triggering parent re-render on every pixel
   const handleScroll = useCallback(() => {
@@ -489,108 +522,20 @@ export const MangaReaderModal: React.FC<MangaReaderModalProps> = ({
     const currentImg = images[pageIndex];
     onClose(pageIndex, currentImg?.id);
   }, [currentPage, images, onClose]);
+  useModalEscape(true, handleCloseReader);
 
-  // Fullscreen toggle handler
-  const toggleFullscreen = useCallback(() => {
-    hideControls();
-    const safariDocument = document as SafariFullscreenDocument;
-    const fullscreenElement = containerRef.current as SafariFullscreenElement | null;
-    const activeFullscreenElement = document.fullscreenElement ?? safariDocument.webkitFullscreenElement;
-
-    if (!activeFullscreenElement) {
-      const request = fullscreenElement?.requestFullscreen?.() ?? fullscreenElement?.webkitRequestFullscreen?.();
-      void Promise.resolve(request)
-        .then(() => {
-          const orientation = screen.orientation as ScreenOrientation & {
-            lock?: (orientation: string) => Promise<void>;
-          };
-          const lock = orientation.lock?.('landscape');
-          return lock ? lock.catch(() => {}) : undefined;
-        })
-        .catch(() => {});
-    } else {
-      const exit = document.exitFullscreen?.() ?? safariDocument.webkitExitFullscreen?.();
-      void Promise.resolve(exit).catch(() => {});
-    }
-  }, [hideControls]);
-
-  // Sync fullscreen change events
-  useEffect(() => {
-    const onFullscreenChange = () => {
-      const safariDocument = document as SafariFullscreenDocument;
-      setIsFullscreen(Boolean(document.fullscreenElement ?? safariDocument.webkitFullscreenElement));
-    };
-    document.addEventListener('fullscreenchange', onFullscreenChange);
-    document.addEventListener('webkitfullscreenchange', onFullscreenChange);
-    return () => {
-      document.removeEventListener('fullscreenchange', onFullscreenChange);
-      document.removeEventListener('webkitfullscreenchange', onFullscreenChange);
-    };
-  }, []);
-
-  // Keyboard navigation
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Focus trap within modal for Tab key navigation
-      if (e.key === 'Tab' && containerRef.current) {
-        const focusable = containerRef.current.querySelectorAll<HTMLElement>(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-        );
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-        return;
-      }
-
-      // Don't intercept if user is typing in an input
-      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) {
-        return;
-      }
-
-      if (e.key === 'Escape') {
-        handleCloseReader();
-      } else if (e.key === 'ArrowRight' || e.key === 'PageDown') {
-        e.preventDefault();
-        if (readerMode === 'single') {
-          handleNextPage();
-        } else if (touchDevice) {
-          window.scrollBy({ top: window.innerHeight * 0.75, behavior: 'smooth' });
-        } else if (scrollContainerRef.current) {
-          scrollContainerRef.current.scrollBy({ top: window.innerHeight * 0.75, behavior: 'smooth' });
-        }
-      } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
-        e.preventDefault();
-        if (readerMode === 'single') {
-          handlePrevPage();
-        } else if (touchDevice) {
-          window.scrollBy({ top: -window.innerHeight * 0.75, behavior: 'smooth' });
-        } else if (scrollContainerRef.current) {
-          scrollContainerRef.current.scrollBy({ top: -window.innerHeight * 0.75, behavior: 'smooth' });
-        }
-      } else if (e.key === 'Home') {
-        e.preventDefault();
-        handleJumpToPage(1);
-      } else if (e.key === 'End') {
-        e.preventDefault();
-        handleJumpToPage(images.length);
-      } else if (e.key === ' ' && readerMode === 'single') {
-        e.preventDefault();
-        handleNextPage();
-      } else if (e.key === 'f' || e.key === 'F') {
-        e.preventDefault();
-        toggleFullscreen();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [readerMode, handleNextPage, handlePrevPage, handleJumpToPage, images.length, handleCloseReader, revealControls, toggleFullscreen]);
+  const { isFullscreen, toggleFullscreen } = useReaderControls({
+    containerRef,
+    scrollContainerRef,
+    readerMode,
+    touchDevice,
+    imagesLength: images.length,
+    handleNextPage,
+    handlePrevPage,
+    handleJumpToPage,
+    revealControls,
+    hideControls,
+  });
 
   // Clean up timer and active preloads on unmount
   useEffect(() => {

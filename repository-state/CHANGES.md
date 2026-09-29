@@ -2,11 +2,32 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-29 — Read from selected page in Manga Detail and Gallery
+
+- Reason: When clicking "Read from here" on a specific page in manga detail or library view, users expect the reader to start reading directly at that selected page. The reader previously ignored `initialPageIndex` in infinite scroll mode and restored the previous last read position or remained at the start.
+- Updated `MangaReaderModal.tsx` (`useClientLayoutEffect` and `useEffect`) to scroll to `pageRefs.current[initialPageIndex]` and bypass restoring saved positions when `initialPageIndex` is provided.
+- Updated `GalleryCard.tsx`, `MangaPagesGrid.tsx`, `RowGroupCards.tsx`, and `useGalleryCardActions.ts` to pass the selected image reference to `onReadFromHere`, resolving the exact canonical reading index in `sortMangaPages(images)` even when the grid is filtered or custom-sorted.
+- Extracted fullscreen and keyboard navigation handlers into `front/app/features/reader/useReaderControls.ts`.
+- Added test coverage in `front/app/utils/mangaReaderJump.test.ts` and `front/app/features/gallery/useMangaReaderActions.test.ts`.
+
+## 2026-09-29 — Omit "Review" word badges on preview overlay bubble boxes
+
+- Reason: The overlay pill badges ("⚠️ Review") rendered on top of speech bubbles needing review obstructed manga dialogue and artwork. The yellow border styling and translucent yellow highlight are sufficient to indicate review state clearly without obscuring underlying text.
+- Updated `front/app/components/PreviewOverlay.tsx` to remove the unselected "Review" pill badge while retaining the yellow border, subtle highlight fill, hover tooltip title, and click-to-inspect behavior.
+
+## 2026-09-29 — Overlapping speech bubble suppression and assigned mask component pruning
+
+- Reason: Low-confidence YOLO speech bubble detections could fuse multiple visual elements (such as adjacent dark thought ovals and white speech balloons) into single mega-bubbles that overlapped higher-confidence bubble detections. This caused text regions in one lobe to migrate to lower lobes and miss their original source area while colliding with adjacent bubbles.
+- Added `suppress_overlapping_bubbles` in `manga_translator/detection/bubble.py` to suppress lower-confidence bubble detections with high overlap ($\text{IoU} \ge 0.50$ or $\ge 70\%$ containment) against higher-confidence accepted bubbles.
+- Added `_clean_assigned_bubble_mask` in `manga_translator/rendering/grouping.py` to trim assigned bubble masks by subtracting overlapping higher-confidence bubbles and retaining only connected components that overlap member text regions.
+- Added test coverage in `test/test_bubble_grouping_confidence.py`.
+
 ## 2026-09-29 — Add prompt inspection devscript for synopsis, story analysis, and translation chunks
 
 - Reason: Developers and prompt engineers needed a fast, transparent way to inspect prompt templates and structured LLM payloads (system prompts, hierarchical panel/region transcripts, story localization guides, previous chunk context, and merge consolidation prompts) across standalone sample data, local manga folders, or running server instances.
-- Added `devscripts/show_prompts.py` supporting `-p {all, synopsis, summary, chunk}`, target language customization, chunk sizing, manual story ranges, merge consolidation prompt toggle, and multiple output formats (`pretty` terminal, `markdown`, `json`).
-- Added unit tests in `test/test_show_prompts_script.py`.
+- Added `devscripts/show_prompts.py` supporting `-p {all, synopsis, summary, chunk}`, target language customization, chunk sizing, manual story ranges, merge consolidation prompt toggle, `--include-region-ids` option, and multiple output formats (`pretty` terminal, `markdown`, `json`).
+- Updated `format_page_transcript_for_analysis` in `manga_translator/professional_panels.py` to omit region ID tags (`[r_id | estimated order n]`) by default, providing clean dialogue under each panel/page for Story Analysis.
+- Added unit tests in `test/test_show_prompts_script.py` and updated `test/test_professional_panels.py`.
 
 ## 2026-09-29 — Remove mxbai cross-encoder reranker in favor of standalone Typesense hybrid search
 
@@ -1548,10 +1569,21 @@ Record new features and large changes here. Keep implementation detail in code, 
 
 - Batch item rows now expose the original upload alongside the translated image download.
 
-## 2026-09-29 — Add a worktree dev server launcher
+## 2026-09-29 — Add a worktree server launcher
 
-- Added the root-level `run_worktree_server.sh backend|frontend` to link ignored runtime assets or frontend dependencies from the original checkout and run the selected code. It also runs directly from the original checkout by accepting its existing asset directories. Backend mode uses two workers on port 8000; frontend mode runs on port 6868 and proxies API requests to port 8000.
+- Reason: The frontend launcher should match the project's production-style `serve` command.
+- Added the root-level `run_worktree_server.sh backend|frontend` to link ignored runtime assets or frontend dependencies from the original checkout and run the selected code. It also runs directly from the original checkout by accepting its existing asset directories. Backend mode uses two workers on port 8000; frontend mode builds and serves on port 6868 and proxies API requests to port 8000.
 
 ## 2026-09-29 — Default fresh studio users to ALL CAPS lettering
 
 - New users now start with ALL CAPS lettering; previously remembered settings still override the default.
+
+## 2026-09-29 — Close dialogs with Escape
+
+- Reason: Modal keyboard behavior was inconsistent, and independent handlers could close multiple stacked dialogs at once.
+- Added a shared Escape stack and wired app dialogs and drawers so Escape closes the topmost active overlay.
+
+## 2026-09-29 — Put gallery search first and improve responsive filters
+
+- Reason: Manga search was buried after the filters and the toolbar controls wrapped poorly on narrow screens.
+- Moved search to the first, expanding filter position, added the `/` focus shortcut and visible key hint, and reflowed mobile controls into touch-sized rows.
