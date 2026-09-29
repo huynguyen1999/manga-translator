@@ -110,7 +110,11 @@ def _scan_results(
         else:
             has_inpainted = find_asset(item_path, "inpainted") is not None
             has_regions = (item_path / "text_regions.json").exists()
-            has_bubble_mask = (item_path / "bubble_mask.png").is_file()
+            has_bubble_mask = (
+                (item_path / "bubble_mask.png").is_file()
+                or (item_path / "panel_detections.json").is_file()
+                or (item_path / "bubble_detections.json").is_file()
+            )
             items.append({
                 "id": meta.get("id") or folder_name,
                 "groupId": _manga_id(manga_title),

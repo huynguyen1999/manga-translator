@@ -397,6 +397,19 @@ const originalImage: FinishedImage = {
 const originalMarkup = renderHeader(originalImage, () => {});
 assert.doesNotMatch(originalMarkup, /Edit \/ Typeset/);
 
+// Original image with resolvedBubbleMaskUrl -> Frames button rendered
+const originalWithFramesMarkup = renderToStaticMarkup(
+  React.createElement(MemoryRouter, null,
+    React.createElement(PageDetailHeader, {
+      ...baseHeaderProps,
+      image: originalImage,
+      isOriginal: true,
+      resolvedBubbleMaskUrl: "/result/folder123/bubble_mask.png",
+    }),
+  ),
+);
+assert.match(originalWithFramesMarkup, /Frames/);
+
 // Completed translated image with onRerender -> Rerun button rendered as "Rerun pipeline"
 const defaultRerenderMarkup = renderToStaticMarkup(
   React.createElement(MemoryRouter, null,

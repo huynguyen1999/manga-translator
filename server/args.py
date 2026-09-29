@@ -33,7 +33,7 @@ def parse_arguments(args=None):
     parser.add_argument('--post-dict', default=None, type=file_path, help='Path to the post-translation dictionary file')    
     parser.add_argument('--executor-mode', choices=['inprocess', 'subprocess'], default='inprocess',
                         help='Execution mode: "inprocess" shares models and allows up to two concurrent GPU tasks; "subprocess" spawns separate worker processes (default: inprocess)')
-    parser.add_argument('--workers', type=int, default=3, help='Number of active image pipelines; in-process workers share models (default: 3)')
+    parser.add_argument('--workers', type=int, default=3, help='Maximum concurrent batch pages per resource lane in in-process mode; also sets direct request workers (default: 3)')
     parser.add_argument('--cpu-stage-workers', type=cpu_stage_workers, default=None,
                         help='Maximum concurrent background CPU stages (default: auto, capped at 3; keeps 2 for --workers=2)')
     parser.add_argument('--inpainting-concurrency', type=int, default=0, help='Maximum concurrent inpainting passes to avoid VRAM spikes (0 = unlimited, default: 0)')

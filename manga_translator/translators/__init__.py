@@ -24,6 +24,7 @@ from .gemini_keys import GeminiRequestBudget, _CURRENT_RETRY_BUDGET
 from .custom_openai import CustomOpenAiTranslator
 from .openrouter import OpenRouterTranslator
 from .structured import translate_structured
+from .resource_lease import translation_resource_lease as _translation_resource_lease
 from ..config import Translator, TranslatorConfig, TranslatorChain
 from ..utils import Context
 from ..utils.model_cache import (
@@ -58,6 +59,14 @@ TRANSLATORS = {
 }
 translator_cache = {}
 _OFFLINE_TRANSLATOR_LOCK = threading.Lock()
+TRANSLATION_REQUEST_TIMEOUT_SECONDS = 60
+
+
+async def _wait_for_gpt_translation(operation):
+    try:
+        return await asyncio.wait_for(operation, timeout=TRANSLATION_REQUEST_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(f"Translator request exceeded {TRANSLATION_REQUEST_TIMEOUT_SECONDS} seconds") from exc
 
 def get_translator(key: Translator, *args, **kwargs) -> CommonTranslator:
     if key not in TRANSLATORS:
@@ -81,6 +90,7 @@ async def _translate_with_context(
             _CURRENT_RETRY_BUDGET.reset(token)
 
     return await translator.translate(from_lang, to_lang, queries, use_mtpe)
+
 
 async def prepare(chain: TranslatorChain):
     for key, tgt_lang in chain.chain:
@@ -118,24 +128,31 @@ async def _run_offline_operation(operation):
 async def _dispatch_one(key, tgt_lang, queries, translator_config, use_mtpe, args, device, unload=False):
     async def translate_one():
         translator = get_translator(key)
-        if isinstance(translator, OfflineTranslator):
-            await translator.load('auto', tgt_lang, device)
-        if translator_config:
-            translator.parse_args(translator_config)
-        translated = await _translate_with_context(key, translator, 'auto', tgt_lang, queries, use_mtpe, args)
-        if args is not None:
+        lease_args = None if key in {Translator.none, Translator.original} else args
+        async with _translation_resource_lease(lease_args, key in OFFLINE_TRANSLATORS, device):
             if isinstance(translator, OfflineTranslator):
-                args['offline_model'] = getattr(translator, 'model_name', translator.__class__.__name__)
-            if hasattr(translator, 'key_manager'):
-                model = getattr(translator.key_manager, 'current_model', None)
-                if model:
-                    args['gemini_model'] = model
-            model = getattr(translator, 'model_name', None) or getattr(translator, 'model', None) or getattr(translator, 'MODEL', None)
-            if isinstance(model, str):
-                args['translator_model'] = model
-        if unload:
-            await translator.unload(device)
-        return translated
+                await translator.load('auto', tgt_lang, device)
+            if translator_config:
+                translator.parse_args(translator_config)
+            operation = _translate_with_context(key, translator, 'auto', tgt_lang, queries, use_mtpe, args)
+            translated = await (
+                _wait_for_gpt_translation(operation)
+                if key in GPT_TRANSLATORS
+                else operation
+            )
+            if args is not None:
+                if isinstance(translator, OfflineTranslator):
+                    args['offline_model'] = getattr(translator, 'model_name', translator.__class__.__name__)
+                if hasattr(translator, 'key_manager'):
+                    model = getattr(translator.key_manager, 'current_model', None)
+                    if model:
+                        args['gemini_model'] = model
+                model = getattr(translator, 'model_name', None) or getattr(translator, 'model', None) or getattr(translator, 'MODEL', None)
+                if isinstance(model, str):
+                    args['translator_model'] = model
+            if unload:
+                await translator.unload(device)
+            return translated
 
     # API clients keep worker-local state and never hold the shared model lane.
     if key in OFFLINE_TRANSLATORS:
@@ -170,26 +187,8 @@ async def dispatch_structured(
     args: Optional[Context] = None,
     device: str = "cpu",
 ) -> dict[str, str]:
-    """Translate ID-tagged values while preserving IDs through translator chains."""
-    values = dict(items)
-    for key, target_lang in chain.chain:
-        translator = get_translator(key)
-        if translator_config:
-            translator.parse_args(translator_config)
-        if key in GPT_TRANSLATORS:
-            values = await translate_structured(translator, target_lang, values.items())
-        else:
-            translated = await _translate_with_context(
-                key, translator, "auto", target_lang, list(values.values()), False, args
-            )
-            if len(translated) != len(values):
-                raise ValueError("Translator returned an incorrect number of results")
-            values = dict(zip(values, translated))
-        if args is not None:
-            model = getattr(translator, "model_name", None) or getattr(translator, "model", None) or getattr(translator, "MODEL", None)
-            if isinstance(model, str):
-                args["translator_model"] = model
-    return values
+    from .structured_dispatch import dispatch_structured as implementation
+    return await implementation(chain, items, translator_config, args, device)
 
 
 async def dispatch_batch(chain: TranslatorChain, batch_queries: List[List[str]], translator_config: Optional[TranslatorConfig] = None, use_mtpe: bool = False, args:Optional[Context] = None, device: str = 'cpu') -> List[List[str]]:

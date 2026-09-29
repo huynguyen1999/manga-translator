@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 import re
 from types import SimpleNamespace
@@ -13,6 +14,91 @@ from manga_translator.professional_translation import (
 
 
 class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_request_holds_and_releases_network_lease(self):
+        events = []
+
+        async def acquire(is_offline, device):
+            events.append(("acquire", is_offline, device))
+            return "network", "slot"
+
+        async def release(resource, slot):
+            events.append(("release", resource, slot))
+
+        async def request(_to_lang, _prompt):
+            events.append(("request",))
+            return "response"
+
+        translator = SimpleNamespace(parse_args=lambda _: None, _request_translation=request)
+        engine = ProfessionalTranslator(
+            TranslatorConfig(translator="deepseek", target_lang="ENG", translation_quality="professional"),
+            resource_acquire=acquire,
+            resource_release=release,
+        )
+        with patch("manga_translator.professional_translation.get_translator", return_value=translator):
+            result = await engine._request_with(Translator.deepseek, "prompt")
+
+        self.assertEqual(result, "response")
+        self.assertEqual(events, [
+            ("acquire", False, "cpu"), ("request",), ("release", "network", "slot"),
+        ])
+
+    async def test_provider_request_releases_network_lease_on_failure(self):
+        events = []
+
+        async def acquire(is_offline, device):
+            events.append(("acquire", is_offline, device))
+            return "network", "slot"
+
+        async def release(resource, slot):
+            events.append(("release", resource, slot))
+
+        async def request(_to_lang, _prompt):
+            events.append(("request",))
+            raise RuntimeError("provider failed")
+
+        translator = SimpleNamespace(parse_args=lambda _: None, _request_translation=request)
+        engine = ProfessionalTranslator(
+            TranslatorConfig(translator="deepseek", target_lang="ENG", translation_quality="professional"),
+            resource_acquire=acquire,
+            resource_release=release,
+        )
+        with patch("manga_translator.professional_translation.get_translator", return_value=translator):
+            with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                await engine._request_with(Translator.deepseek, "prompt")
+
+        self.assertEqual(events[-1], ("release", "network", "slot"))
+
+    async def test_provider_request_releases_network_lease_on_cancellation(self):
+        events = []
+        started = asyncio.Event()
+
+        async def acquire(is_offline, device):
+            events.append(("acquire", is_offline, device))
+            return "network", "slot"
+
+        async def release(resource, slot):
+            events.append(("release", resource, slot))
+
+        async def request(_to_lang, _prompt):
+            events.append(("request",))
+            started.set()
+            await asyncio.Event().wait()
+
+        translator = SimpleNamespace(parse_args=lambda _: None, _request_translation=request)
+        engine = ProfessionalTranslator(
+            TranslatorConfig(translator="deepseek", target_lang="ENG", translation_quality="professional"),
+            resource_acquire=acquire,
+            resource_release=release,
+        )
+        with patch("manga_translator.professional_translation.get_translator", return_value=translator):
+            task = asyncio.create_task(engine._request_with(Translator.deepseek, "prompt"))
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        self.assertEqual(events[-1], ("release", "network", "slot"))
+
     async def test_analysis_prompt_keeps_honorific_example_as_literal_text(self):
         config = TranslatorConfig(translator="deepseek", target_lang="ENG", translation_quality="professional")
         engine = ProfessionalTranslator(config)
@@ -186,15 +272,45 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed_json_mode, [True])
         self.assertFalse(hasattr(translator, "_professional_json_mode"))
 
-    async def test_legacy_draft_translator_does_not_change_professional_llm(self):
+    async def test_analysis_translator_routes_analysis_to_configured_model(self):
         config = TranslatorConfig(
             translator="chatgpt",
-            draft_translator="gemini",
+            analysis_translator="gemini",
             target_lang="ENG",
             translation_quality="professional",
         )
         engine = ProfessionalTranslator(config)
         self.assertEqual(engine.primary, Translator.chatgpt)
+        self.assertEqual(engine.analysis_translator, Translator.gemini)
+
+        requested_keys = []
+
+        class MockTranslator:
+            def __init__(self, key):
+                self.key = key
+
+            def parse_args(self, _):
+                pass
+
+            async def _request_translation(self, _to_lang, _prompt):
+                requested_keys.append(self.key)
+                return '{"regions": []}'
+
+        with patch("manga_translator.professional_translation.get_translator", side_effect=lambda key: MockTranslator(key)):
+            await engine._json_request("translation", "translation prompt")
+            await engine._json_request("analysis", "analysis prompt")
+
+        self.assertEqual(requested_keys, [Translator.chatgpt, Translator.gemini])
+
+    async def test_default_analysis_translator_uses_primary_model(self):
+        config = TranslatorConfig(
+            translator="chatgpt",
+            target_lang="ENG",
+            translation_quality="professional",
+        )
+        engine = ProfessionalTranslator(config)
+        self.assertEqual(engine.primary, Translator.chatgpt)
+        self.assertIsNone(engine.analysis_translator)
 
         requested_keys = []
 
@@ -239,7 +355,7 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
         dispatched_calls = []
 
         async def fake_dispatch_one(key, tgt_lang, queries, cfg, use_mtpe, args, device, unload=False):
-            dispatched_calls.append((key, tgt_lang, queries))
+            dispatched_calls.append((key, tgt_lang, queries, args, device))
             if args is not None:
                 args["offline_model"] = "SugoiTranslator"
             return ["Hello", "Goodbye"]
@@ -248,8 +364,46 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
             await engine.localize_story(analysis["stories"][0], pages)
 
         self.assertEqual(len(dispatched_calls), 1)
+        self.assertIsNone(dispatched_calls[0][3]["_batch_resource_acquire"])
+        self.assertIsNone(dispatched_calls[0][3]["_batch_resource_release"])
+        self.assertEqual(dispatched_calls[0][4], "cpu")
         self.assertEqual(pages[0]["regions"][0]["final"], "Hello")
         self.assertEqual(pages[0]["regions"][1]["final"], "Goodbye")
+
+    async def test_professional_offline_dispatch_receives_batch_callbacks_and_device(self):
+        async def acquire(_is_offline, _device):
+            return "resource", "slot"
+
+        async def release(_resource, _slot):
+            pass
+
+        region = SimpleNamespace(text="こんにちは", region_id="r1")
+        ctx = SimpleNamespace(
+            text_regions=[region], result_documents={}, manual_review_required=False,
+            panel_detections=[], _batch_resource_acquire=acquire,
+            _batch_resource_release=release, _batch_translation_device="cuda:1",
+        )
+        config = SimpleNamespace(
+            page_order=1,
+            translator=TranslatorConfig(
+                translator="sugoi", target_lang="ENG", translation_quality="professional"
+            ),
+            render=None,
+        )
+        dispatched = []
+
+        async def fake_dispatch_one(key, tgt_lang, queries, cfg, use_mtpe, args, device, unload=False):
+            dispatched.append((key, args, device))
+            return ["Hello"]
+
+        with patch("manga_translator.professional_translation._dispatch_one", side_effect=fake_dispatch_one):
+            await translate_professionally([(ctx, config)])
+
+        self.assertEqual(dispatched[0][0], Translator.sugoi)
+        self.assertIs(dispatched[0][1]["_batch_resource_acquire"], acquire)
+        self.assertIs(dispatched[0][1]["_batch_resource_release"], release)
+        self.assertEqual(dispatched[0][2], "cuda:1")
+        self.assertEqual(region.translation, "Hello")
 
     async def test_legacy_draft_setting_does_not_override_non_llm_primary(self):
         config = TranslatorConfig(
@@ -334,9 +488,9 @@ class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
 
         await engine.analyze(pages, None)
         self.assertIn("[PANEL p1_01 | PANEL ORDER 1]", recorded_prompts["analysis"])
-        self.assertIn("[r1 | estimated order 1]\nこんにちは", recorded_prompts["analysis"])
+        self.assertIn("こんにちは", recorded_prompts["analysis"])
         self.assertIn("[UNASSIGNED REGIONS]", recorded_prompts["analysis"])
-        self.assertIn("[r2 | estimated order 1]\nナレーション", recorded_prompts["analysis"])
+        self.assertIn("ナレーション", recorded_prompts["analysis"])
 
         story = {"start_page": 1, "end_page": 1, "confidence": 1.0}
         async def fake_translation_request(stage, prompt):

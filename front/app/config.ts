@@ -33,21 +33,25 @@ export const summaryModelOptions = [
   { value: "gemini", label: "Google Gemini" },
 ];
 
+export const storyAnalysisModelOptions = [
+  { value: "", label: "Auto (Same as Translation Engine)" },
+  { value: "deepseek", label: "DeepSeek" }, { value: "gemini", label: "Google Gemini" },
+  { value: "openai", label: "OpenAI GPT" }, { value: "claude", label: "Claude" },
+  { value: "groq", label: "Groq" }, { value: "openrouter", label: "OpenRouter" },
+  { value: "sakura", label: "Sakura" }, { value: "custom_openai", label: "Custom OpenAI (Local/Ollama)" },
+];
+
 export const detectionResolutions = [1024, 1536, 2048, 2560];
 
 export const inpaintingSizes = [516, 1024, 2048, 2560];
 
 export const textDetectorOptions = [
-  { value: "default", label: "Default" },
-  { value: "ctd", label: "CTD" },
-  { value: "paddle", label: "Paddle" },
+  { value: "default", label: "Default" }, { value: "ctd", label: "CTD" }, { value: "paddle", label: "Paddle" },
 ];
 
 export const ocrOptions = [
-  { value: "32px", label: "32px" },
-  { value: "48px", label: "48px (recommended)" },
-  { value: "48px_ctc", label: "48px CTC" },
-  { value: "mocr", label: "Manga OCR" },
+  { value: "32px", label: "32px" }, { value: "48px", label: "48px (recommended)" },
+  { value: "48px_ctc", label: "48px CTC" }, { value: "mocr", label: "Manga OCR" },
 ];
 
 export const inpainterOptions = [
@@ -73,10 +77,8 @@ export const upscalerOptions = [
 ];
 
 export const upscaleRatioOptions = [
-  { value: "", label: "Disabled" },
-  { value: "2", label: "2x" },
-  { value: "3", label: "3x" },
-  { value: "4", label: "4x" },
+  { value: "", label: "Disabled" }, { value: "2", label: "2x" },
+  { value: "3", label: "3x" }, { value: "4", label: "4x" },
 ];
 
 export const fontOptions = [
@@ -90,11 +92,6 @@ export const fontOptions = [
   { value: "msyh", label: "MS YaHei (Chinese)" },
 ];
 
-export const imageMimeTypes = [
-  "image/png",
-  "image/jpeg",
-  "image/bmp",
-  "image/webp",
-];
+export const imageMimeTypes = ["image/png", "image/jpeg", "image/bmp", "image/webp"];
 
 export const MANGA_TITLE_MAX_LENGTH = 200;

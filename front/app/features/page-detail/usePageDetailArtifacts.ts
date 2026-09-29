@@ -9,24 +9,25 @@ export async function loadDiscoveredBubbleMaskUrl(
   bubbleMaskUrl: string | null,
   folder: string | null,
 ): Promise<string | null> {
-  if (isOriginal || bubbleMaskUrl || !folder) return null;
-  const maskUrl = apiUrl(`/result/${encodeURIComponent(folder)}/bubble_mask.png`);
-  try {
-    const response = await fetch(maskUrl, { method: "HEAD", cache: "no-store" });
-    return response.ok ? maskUrl : null;
-  } catch {
-    return null;
+  if (bubbleMaskUrl || !folder) return null;
+  const candidates = [
+    apiUrl(`/result/${encodeURIComponent(folder)}/bubble_mask.png`),
+    apiUrl(`/api/result/${encodeURIComponent(folder)}/panel_detections.json`),
+    apiUrl(`/api/result/${encodeURIComponent(folder)}/bubble_detections.json`),
+  ];
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url, { method: "HEAD", cache: "no-store" });
+      if (res.ok) return url;
+    } catch {}
   }
+  return null;
 }
 
 export async function loadPipelineManifest(folder: string): Promise<PipelineRunManifest | null> {
-  const response = await fetch(apiUrl(`/pipeline-runs/${encodeURIComponent(folder)}/manifest`), {
-    cache: "no-store",
-  });
+  const response = await fetch(apiUrl(`/pipeline-runs/${encodeURIComponent(folder)}/manifest`), { cache: "no-store" });
   if (response.ok) return response.json();
-  const fallback = await fetch(apiUrl(`/result/${encodeURIComponent(folder)}/pipeline_manifest.json`), {
-    cache: "no-store",
-  });
+  const fallback = await fetch(apiUrl(`/result/${encodeURIComponent(folder)}/pipeline_manifest.json`), { cache: "no-store" });
   return fallback.ok ? fallback.json() : null;
 }
 
@@ -36,12 +37,8 @@ export async function loadTranslationArtifacts(
 ): Promise<[Record<string, unknown> | null, ProfessionalTranslationAudit | null]> {
   if (!shouldLoadTranslationArtifacts(sourceType)) return [null, null];
   return Promise.all([
-    fetch(apiUrl(`/result/${encodeURIComponent(folder)}/translation_detail.json`), {
-      cache: "no-store",
-    }).then((response) => response.ok ? response.json() : null),
-    fetch(apiUrl(`/result/${encodeURIComponent(folder)}/professional_translation.json`), {
-      cache: "no-store",
-    }).then((response) => response.ok ? response.json() : null),
+    fetch(apiUrl(`/result/${encodeURIComponent(folder)}/translation_detail.json`), { cache: "no-store" }).then((res) => res.ok ? res.json() : null),
+    fetch(apiUrl(`/result/${encodeURIComponent(folder)}/professional_translation.json`), { cache: "no-store" }).then((res) => res.ok ? res.json() : null),
   ]);
 }
 
@@ -64,9 +61,7 @@ export function usePageDetailArtifacts(
     void loadDiscoveredBubbleMaskUrl(isOriginal, bubbleMaskUrl, folder).then((url) => {
       if (!cancelled && url) setDiscoveredBubbleMaskUrl(url);
     });
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [bubbleMaskUrl, folder, isOriginal]);
 
   useEffect(() => {
@@ -74,20 +69,12 @@ export function usePageDetailArtifacts(
     setPipelineManifest(null);
     setIsPipelineTimingLoading(false);
     if (!folder) return;
-
     setIsPipelineTimingLoading(true);
     loadPipelineManifest(folder)
-      .then((manifest) => {
-        if (!cancelled && manifest) setPipelineManifest(manifest);
-      })
+      .then((manifest) => { if (!cancelled && manifest) setPipelineManifest(manifest); })
       .catch(() => {})
-      .finally(() => {
-        if (!cancelled) setIsPipelineTimingLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
+      .finally(() => { if (!cancelled) setIsPipelineTimingLoading(false); });
+    return () => { cancelled = true; };
   }, [folder]);
 
   useEffect(() => {
@@ -96,7 +83,6 @@ export function usePageDetailArtifacts(
     setProfessionalAudit(null);
     setIsTranslationDetailLoading(false);
     if (!folder || !shouldLoadTranslationArtifacts(sourceType)) return;
-
     setIsTranslationDetailLoading(true);
     loadTranslationArtifacts(folder, sourceType)
       .then(([detail, audit]) => {
@@ -105,13 +91,8 @@ export function usePageDetailArtifacts(
         if (audit?.regions?.length || audit?.analysis?.stories?.length) setProfessionalAudit(audit);
       })
       .catch(() => {})
-      .finally(() => {
-        if (!cancelled) setIsTranslationDetailLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
+      .finally(() => { if (!cancelled) setIsTranslationDetailLoading(false); });
+    return () => { cancelled = true; };
   }, [folder, sourceType]);
 
   return {

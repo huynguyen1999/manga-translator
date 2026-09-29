@@ -142,39 +142,23 @@ async def generate_manga_summary(
             )
             raise HTTPException(400, detail=str(exc)) from exc
         has_group_text = any(bool(read_page_text(page)) for page in pages)
-        missing_page_count = (
-            page_count
-            if data.refreshText
-            else sum(not is_page_text_extracted(page, has_group_text=has_group_text) for page in pages)
-        )
+        is_orig = any(p.get("meta", {}).get("sourceType") == "original" or p.get("sourceType") == "original" for p in pages)
+        missing_page_count = page_count if data.refreshText else sum(not is_page_text_extracted(page, has_group_text=has_group_text) for page in pages)
         cached_page_count = page_count - missing_page_count
         extraction_required = missing_page_count > 0
         pages_with_text = 0 if data.refreshText else sum(bool(read_page_text(page)) for page in pages)
         initial_stage = "detecting" if extraction_required else "concatenating"
+        method_label = "via Chrome Lens" if is_orig else "text"
         if data.refreshText:
-            initial_message = f"Re-reading text · all {page_count} pages will be replaced"
+            initial_message = f"Re-reading {method_label} · all {page_count} pages will be replaced"
         elif extraction_required:
-            initial_message = (
-                f"Detecting text · {missing_page_count} pages need extraction; "
-                f"{cached_page_count} cached pages reused"
-            )
+            initial_message = f"Detecting {method_label} · {missing_page_count} pages need extraction; {cached_page_count} cached pages reused"
         else:
             initial_message = f"Reusing text from all {page_count} cached pages"
         await _update_summary_job_for(
-            store,
-            group_value,
-            clean_title,
-            "generating",
-            None,
-            initial_stage,
-            0 if extraction_required else 70,
-            initial_message,
-            0,
-            page_count,
-            pages_with_text,
-            extraction_required,
-            summary_provider,
-            summary_model,
+            store, group_value, clean_title, "generating", None, initial_stage,
+            0 if extraction_required else 70, initial_message, 0, page_count,
+            pages_with_text, extraction_required, summary_provider, summary_model,
             stage_passed_count=cached_page_count,
         )
         target_language = _summary_target_language(pages)
@@ -386,16 +370,19 @@ async def generate_manga_summary(
                 group_value,
                 clean_title,
                 "error",
-                str(exc),
+                error_detail,
                 "summarizing",
                 85,
-                str(exc),
+                error_detail,
                 page_count,
                 page_count,
                 pages_with_text,
                 extraction_required,
             )
-            raise HTTPException(502, detail=f"{summary_provider.title()} synopsis generation failed: {exc}") from exc
+            raise HTTPException(
+                502,
+                detail=f"{summary_provider.title()} synopsis generation failed: {error_detail}",
+            ) from exc
 
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         record = {
@@ -404,6 +391,7 @@ async def generate_manga_summary(
             "summary": summary,
             "language": target_language,
             "generatedAt": now,
+            "jobCreatedAt": status.get("jobCreatedAt") or now,
             "sourceFingerprint": snapshot["fingerprint"],
             "pageCount": len(pages),
             "textPageCount": sum(bool(entry["texts"]) for entry in snapshot["entries"]),

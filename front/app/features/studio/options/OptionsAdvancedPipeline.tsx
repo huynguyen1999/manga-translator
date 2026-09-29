@@ -6,7 +6,6 @@ import {
   textDetectorOptions,
   inpaintingSizes,
   inpainterOptions,
-  summaryModelOptions,
 } from "@/config";
 import { LabeledInput } from "@/components/LabeledInput";
 import { LabeledSelect } from "@/components/LabeledSelect";
@@ -36,8 +35,6 @@ interface OptionsAdvancedPipelineProps {
   setBubbleDetection: (val: boolean) => void;
   bubbleConfidence: number;
   setBubbleConfidence: (val: number) => void;
-  summaryModel: string;
-  setSummaryModel: (val: string) => void;
 }
 
 export const OptionsAdvancedPipeline: React.FC<OptionsAdvancedPipelineProps> = ({
@@ -65,8 +62,6 @@ export const OptionsAdvancedPipeline: React.FC<OptionsAdvancedPipelineProps> = (
   setBubbleDetection,
   bubbleConfidence,
   setBubbleConfidence,
-  summaryModel,
-  setSummaryModel,
 }) => {
   return (
     <div className="border-t border-zinc-100 pt-1 dark:border-zinc-800/80">
@@ -232,35 +227,6 @@ export const OptionsAdvancedPipeline: React.FC<OptionsAdvancedPipelineProps> = (
                 onChange={setBubbleConfidence}
                 tooltip="Minimum confidence threshold (0.05–0.95) for speech bubble and frame detection. Detections with confidence below this are discarded."
               />
-            </div>
-          </div>
-
-          {/* Synopsis & Auxiliary Sub-card */}
-          <div className="rounded-lg border border-zinc-200/60 bg-zinc-50/40 p-3 dark:border-zinc-800/60 dark:bg-zinc-800/20">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-              <div className="space-y-0.5">
-                <div className="flex items-center space-x-1.5 text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                  <Icon icon="carbon:document-sentiment" className="h-3.5 w-3.5" />
-                  <span>Manga Synopsis Model</span>
-                </div>
-                <p className="text-[11px] text-zinc-400">
-                  Global model used for generating manga series summaries in the Gallery.
-                </p>
-              </div>
-              <div className="w-full sm:w-64">
-                <select
-                  id="summaryModel"
-                  value={summaryModel}
-                  onChange={(e) => setSummaryModel(e.target.value)}
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-800 shadow-xs focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-                >
-                  {summaryModelOptions.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
             </div>
           </div>
         </div>

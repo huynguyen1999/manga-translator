@@ -21,11 +21,14 @@ class TestProfessionalPanels(unittest.TestCase):
             {"id": "r1", "panel_index": 1, "text": "hello"},
             {"id": "r2", "panel_index": 0, "text": "world"},
             {"id": "r3", "panel_index": 99, "text": "invalid index"},
+            {"id": "r4", "panel_index": None, "text": "none index", "xywh": [10, 10, 20, 20]},
+            {"id": "r5", "region": SimpleNamespace(panel_index=None), "text": "nested none", "center": (150, 150)},
+            SimpleNamespace(id="r6", panel_index=None, center=(500, 500)),
         ]
         grouped, unassigned = assign_regions_to_panels(regions, panels)
-        self.assertEqual([r["id"] for r in grouped[0]], ["r2"])
-        self.assertEqual([r["id"] for r in grouped[1]], ["r1"])
-        self.assertEqual([r["id"] for r in unassigned], ["r3"])
+        self.assertEqual([r["id"] if isinstance(r, dict) else r.id for r in grouped[0]], ["r2", "r4"])
+        self.assertEqual([r["id"] if isinstance(r, dict) else r.id for r in grouped[1]], ["r1", "r5"])
+        self.assertEqual([r["id"] if isinstance(r, dict) else r.id for r in unassigned], ["r3", "r6"])
 
     def test_assign_regions_to_panels_by_geometric_containment(self):
         panels = [

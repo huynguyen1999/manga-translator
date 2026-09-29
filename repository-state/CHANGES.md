@@ -2,6 +2,69 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-30 — Unified multi-model text detection and fine-grained character stroke segmentation
+ 
+- Reason: Developers and researchers need a unified tool to benchmark and switch between different state-of-the-art text detection and segmentation models (`PP-OCRv6_manga v0.2`, core app `DBNet ResNet-34`, `Comic Text Detector / CTD`, and `ContemporaryCat / Manga-Text-Segmentation`) across pages and datasets with visual overlays, confidence badges, coarse text masks, and fine-grained character stroke/glyph masks (white ink characters on pure black background).
+- Added multi-model support in `devscripts/detect_text.py` and `devscripts/detect_text_ppocrv6.py` with `--model` / `--detector` switching across `ppocrv6`, `default`, `ctd`, and `contemporarycat`.
+- Upgraded stroke segmentation (`--stroke-mask`, `--stroke-overlay`) with adaptive Otsu binarization, polarity detection, connected-component noise cleaning, and polygon boundary spatial gating to isolate crisp, individual character glyphs and radicals without solid block fills.
+- Standardized output geometries, confidence scoring, binary text mask generation, and visual overlays across all 4 detection engines with Apple Silicon MPS/CoreML, CUDA, and CPU acceleration.
+
+
+
+
+## 2026-09-30 — Distinguish Gemini blocks in synopsis and professional story analysis
+
+- Reason: `BLOCK_NONE` does not eliminate every policy block, and professional story analysis could retry or fall back to another provider after Gemini returned a blocked response.
+- Capture Gemini prompt/candidate block reasons, finish messages, and safety ratings across synopsis and translation-context analysis. Stop retries and automatic provider fallback for recognized Gemini blocks; phrase the analysis prompt as neutral, transformation-focused metadata.
+
+## 2026-09-29 — Apply shared Gemini safety settings to manga synopsis
+
+- Reason: Gemini synopsis requests used the OpenAI-compatible endpoint, which did not apply the `BLOCK_NONE` safety settings already used by translation; blocked or empty results therefore lacked the same generation configuration.
+- Route Gemini synopsis chunks through the native `google-genai` API with the shared `DEFAULT_GEMINI_SAFETY_SETTINGS`, while preserving the 90-second request timeout and 8192-token output limit. DeepSeek and Groq remain on their existing OpenAI-compatible paths.
+- Preserve Gemini finish reasons, prompt feedback, safety ratings, HTTP error status/message, and request ID in synopsis errors and failed job status.
+
+## 2026-09-29 — Stable job ordering in Active and In-Progress drawer groups
+
+- Reason: When a summary job and a translation batch executed concurrently, their positions in the Active group of `JobsDrawer` constantly oscillated and swapped places on every progress event. Sorting by `updatedAt` caused each progress tick (OCR/detection page updates, translation chunks, etc.) to bump that job to the top of the group.
+- Updated [`JobsDrawer.tsx`](file:///Users/ice-h/Source/manga-image-translator/front/app/components/JobsDrawer.tsx) (`sortJobEntries`) to sort active, queued, and attention sections by stable creation timestamp (`addedAt` for translation batches, `createdAt` / `jobCreatedAt` for summary jobs, with first-seen timestamp fallback) and deterministic ID tie-breaking, reserving `updatedAt` sorting strictly for completed jobs.
+- Added `jobCreatedAt` field persistence across PostgreSQL (`server/summary_repository.py`) and disk JSON (`server/manga_summary.py`, `server/summary_generation.py`), exposing `createdAt` in `SummaryJob` and `jobCreatedAt` in `MangaSummary` (`front/app/types.ts`).
+- Added unit tests in [`JobsDrawer.test.ts`](file:///Users/ice-h/Source/manga-image-translator/front/app/components/JobsDrawer.test.ts) verifying that active jobs maintain stable ordering across sequential progress updates.
+
+## 2026-09-29 — Page Detail Frames overlay and bubble/panel detection persistence for summary OCR
+
+- Reason: Manga pages processed through summary OCR (Flow 2 / Flow 3) generate panel and speech bubble detections (`panel_detections.json`, `bubble_detections.json`). Previously, these detection artifacts were only saved to disk without PostgreSQL document persistence for original pages, and the Page Detail modal only enabled the "Frames" overlay button for translated result pages (`!isOriginal`). Users viewing original manga pages with summary/detection artifacts could not inspect the detected panel frames and speech bubbles.
+- Persist `panel_detections.json` and `bubble_detections.json` in PostgreSQL document store during summary OCR in [`server/summary_ocr.py`](file:///Users/ice-h/Source/manga-image-translator/server/summary_ocr.py).
+- Updated [`server/result_queries.py`](file:///Users/ice-h/Source/manga-image-translator/server/result_queries.py), [`server/manga_repository.py`](file:///Users/ice-h/Source/manga-image-translator/server/manga_repository.py), and [`server/api/routes/result_pages.py`](file:///Users/ice-h/Source/manga-image-translator/server/api/routes/result_pages.py) to recognize `panel_detections.json` and `bubble_detections.json` when setting `has_bubble_mask`.
+- Updated [`usePageDetailArtifacts.ts`](file:///Users/ice-h/Source/manga-image-translator/front/app/features/page-detail/usePageDetailArtifacts.ts) to discover detection and mask artifacts for original pages in addition to translated pages.
+- Updated [`PageDetailHeader.tsx`](file:///Users/ice-h/Source/manga-image-translator/front/app/features/page-detail/PageDetailHeader.tsx) and [`PageDetailModal.tsx`](file:///Users/ice-h/Source/manga-image-translator/front/app/features/page-detail/PageDetailModal.tsx) to render the "Frames" button for original pages with detection artifacts, toggling between "speech-bubbles" (displaying panel polygons and bubble boxes) and "original" view modes.
+- Fixed `TypeError: '<=' not supported between instances of 'int' and 'NoneType'` in [`manga_translator/professional_panels.py`](file:///Users/ice-h/Source/manga-image-translator/manga_translator/professional_panels.py) when region dictionaries have `panel_index: None`.
+- Added test coverage in [`PageDetailModal.test.ts`](file:///Users/ice-h/Source/manga-image-translator/front/app/components/PageDetailModal.test.ts), [`usePageDetailArtifacts.test.ts`](file:///Users/ice-h/Source/manga-image-translator/front/app/features/page-detail/usePageDetailArtifacts.test.ts), and [`test_professional_panels.py`](file:///Users/ice-h/Source/manga-image-translator/test/test_professional_panels.py).
+
+## 2026-09-29 — Add configurable Story Analysis & Manga Synopsis models to Translation & AI Engine
+
+- Reason: Users want to configure which AI models perform the in-pipeline story analysis pass (Professional localization) and global manga series synopses (Gallery summaries) directly within the primary Translation & AI Engine workspace.
+- Added "Story Analysis Model" (defaulting to "Auto (Same as Translation Engine)") and "Manga Synopsis Model" dropdowns directly to the Translation & AI Engine card in Web Studio options ([`OptionsPanel.tsx`](file:///Users/ice-h/Source/manga-image-translator/front/app/components/OptionsPanel.tsx)).
+- Updated [`TranslatorConfig`](file:///Users/ice-h/Source/manga-image-translator/manga_translator/config.py) and [`ProfessionalTranslator`](file:///Users/ice-h/Source/manga-image-translator/manga_translator/professional_translation.py) to accept `analysis_translator`, routing narrative context / story analysis calls to the designated model while preserving chunk translation on the primary engine (and running story analysis when paired with offline/direct translators like Sugoi V4).
+- Added unit tests in `test/test_professional_translation.py` and `test/test_config.py`.
+
+## 2026-09-29 — Cap GPT translation requests at one minute
+
+- Reason: A slow model request could remain active through provider retries and exceed one minute, leaving a page in translation too long.
+- Apply a 60-second deadline to ordinary, structured batch, and professional GPT model calls. A timed-out fast request fails the affected page without another translation retry; offline model execution is unchanged.
+
+## 2026-09-29 — Tri-flow manga summary generation with Chrome Lens OCR
+
+- Reason: Manga summary generation previously lacked dedicated routing for original (untranslated) manga and relied solely on sequential local OCR models which could be slow and less accurate on complex Japanese typography or unextracted pages. Furthermore, the summary pipeline needed distinct, optimized pathways for: (1) already-extracted manga text in DB/filesystem, (2) translated manga requiring local neural OCR and bubble/panel segmentation, and (3) original untranslated manga requiring high-accuracy Google Lens OCR via `chrome-lens-py` executed with bounded concurrency.
+- Implemented `server/summary_chrome_lens.py` to handle Flow 3: concurrent Google Lens OCR dispatch (`Lens(cookies=None)` with semaphore-bounded parallelism and exponential backoff retry), pixel bounding box and polygon normalization from relative Lens geometries, YOLO26 speech bubble and panel segmentation, geometric spatial containment matching (intersecting bubble masks, smallest enclosing panel), fallback recovery for bubbleless text, and persistence to `text_regions.json`, `panel_detections.json`, and `bubble_detections.json`.
+- Updated `server/summary_ocr_execution.py` and `server/summary_ocr.py` to route original manga jobs to Flow 3, support panel/bubble detection persistence in PostgreSQL and disk caches, and maintain progress reporting across detection, OCR, textline merge, and panel grouping stages.
+- Added comprehensive unit and end-to-end integration tests in `test/test_summary_chrome_lens.py`, `test/test_summary_flows.py`, and `test/test_summary_ocr.py`.
+
+## 2026-09-29 — Overlap batch pages across resource families
+
+- Reason: The batch-wide stage barrier left CPU, accelerator, and network resources idle while pages waited at different stages.
+- The in-process scheduler now dispatches ready pages across different resource families. `--workers` limits pages per resource lane, with isolated batch translator slots sharing model weights; GPU work remains capped by model-executor concurrency. CPU-light/heavy stages share one lane, resource classes follow configured models and effective devices, and translation leases switch per engine in mixed API/offline chains.
+- Within each lane, earlier queued stages take priority while other resource families continue concurrently. Fast translation fills `translationBatchSize` except for a smaller final group; professional translation waits for every active page before story analysis and chunking.
+
 ## 2026-09-29 — Read from selected page in Manga Detail and Gallery
 
 - Reason: When clicking "Read from here" on a specific page in manga detail or library view, users expect the reader to start reading directly at that selected page. The reader previously ignored `initialPageIndex` in infinite scroll mode and restored the previous last read position or remained at the start.

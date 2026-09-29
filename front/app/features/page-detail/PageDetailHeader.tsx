@@ -207,35 +207,19 @@ export const PageDetailHeader: React.FC<PageDetailHeaderProps> = ({
               {resolvedBubbleMaskUrl && (
                 <button
                   type="button"
-                  onClick={() => {
-                    setShowBubbleBoxes(false);
-                    setShowOriginalRegions(false);
-                    setViewMode("speech-bubbles");
-                  }}
-                  className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${
-                    viewMode === "speech-bubbles"
-                      ? "bg-violet-600 text-white shadow-xs"
-                      : "text-zinc-300 hover:bg-white/10 hover:text-white"
-                  }`}
+                  onClick={() => { setShowBubbleBoxes(false); setShowOriginalRegions(false); setViewMode("speech-bubbles"); }}
+                  className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${viewMode === "speech-bubbles" ? "bg-violet-600 text-white shadow-xs" : "text-zinc-300 hover:bg-white/10 hover:text-white"}`}
                   title="Show saved frame & speech bubble regions over the original page"
-                >
-                  Frames
-                </button>
+                >Frames</button>
               )}
 
               {resolvedOriginalUrl && (
                 <button
                   type="button"
                   onClick={() => setViewMode("original")}
-                  className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${
-                    viewMode === "original"
-                      ? "bg-indigo-600 text-white shadow-xs"
-                      : "text-zinc-300 hover:bg-white/10 hover:text-white"
-                  }`}
+                  className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${viewMode === "original" ? "bg-indigo-600 text-white shadow-xs" : "text-zinc-300 hover:bg-white/10 hover:text-white"}`}
                   title="Show original input image"
-                >
-                  Original
-                </button>
+                >Original</button>
               )}
 
               {resolvedOriginalUrl && (
@@ -248,37 +232,30 @@ export const PageDetailHeader: React.FC<PageDetailHeaderProps> = ({
                   onTouchEnd={() => setIsHoldingOriginal(false)}
                   className="flex min-h-8 select-none items-center gap-1 rounded bg-zinc-800/80 px-2 text-xs font-semibold text-amber-300 transition-colors hover:bg-zinc-700 active:bg-amber-500 active:text-black cursor-pointer"
                   title="Hold button to peek at original image"
-                >
-                  Hold Peek
-                </button>
+                >Hold Peek</button>
               )}
             </>
             )}
 
+            {isOriginal && resolvedBubbleMaskUrl && (
               <button
                 type="button"
-                onClick={() => {
-                  setShowBubbleBoxes((prev) => !prev);
-                }}
-                className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${
-                  showBubbleBoxes
-                    ? "bg-amber-600 text-white shadow-xs"
-                    : "text-zinc-300 hover:bg-white/10 hover:text-white"
-                }`}
-                title={isOriginal
-                  ? (showBubbleBoxes ? "Hide detected text" : "Show detected text")
-                  : (showBubbleBoxes ? "Hide speech bubble boxes" : "Show speech bubble boxes")}
+                onClick={() => { setShowBubbleBoxes(false); setShowOriginalRegions(false); setViewMode((prev) => (prev === "speech-bubbles" ? "original" : "speech-bubbles")); }}
+                className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${viewMode === "speech-bubbles" ? "bg-violet-600 text-white shadow-xs" : "text-zinc-300 hover:bg-white/10 hover:text-white"}`}
+                title="Show saved frame & speech bubble regions over the original page"
+              >Frames</button>
+            )}
+
+              <button
+                type="button"
+                onClick={() => setShowBubbleBoxes((prev) => !prev)}
+                className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer ${showBubbleBoxes ? "bg-amber-600 text-white shadow-xs" : "text-zinc-300 hover:bg-white/10 hover:text-white"}`}
+                title={isOriginal ? (showBubbleBoxes ? "Hide detected text" : "Show detected text") : (showBubbleBoxes ? "Hide speech bubble boxes" : "Show speech bubble boxes")}
               >
                 <Icon icon="carbon:chat" className="h-3.5 w-3.5" />
                 <span>{isOriginal ? "Detected text" : "Bubbles"}</span>
                 {bubbleCount !== null && bubbleCount > 0 && (
-                  <span
-                    className={`rounded-full px-1.5 py-0.2 text-[10px] ${
-                      showBubbleBoxes ? "bg-amber-700/80 text-white" : "bg-zinc-800 text-zinc-300"
-                    }`}
-                  >
-                    {bubbleCount}
-                  </span>
+                  <span className={`rounded-full px-1.5 py-0.2 text-[10px] ${showBubbleBoxes ? "bg-amber-700/80 text-white" : "bg-zinc-800 text-zinc-300"}`}>{bubbleCount}</span>
                 )}
               </button>
 
@@ -290,32 +267,14 @@ export const PageDetailHeader: React.FC<PageDetailHeaderProps> = ({
                 type="button"
                 disabled={!originalRegionCount}
                 onClick={() => setShowOriginalRegions((prev) => !prev)}
-                className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
-                  showOriginalRegions
-                    ? "bg-amber-600 text-white shadow-xs"
-                    : "text-zinc-300 hover:bg-white/10 hover:text-white"
-                }`}
-                title={
-                  originalRegionCount === null
-                    ? "Loading original detector regions…"
-                    : originalRegionCount > 0
-                    ? showOriginalRegions
-                      ? "Hide original detector regions"
-                      : "Show original detector regions"
-                    : "Original detector regions are not available for this result"
-                }
+                className={`flex min-h-8 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${showOriginalRegions ? "bg-amber-600 text-white shadow-xs" : "text-zinc-300 hover:bg-white/10 hover:text-white"}`}
+                title={originalRegionCount === null ? "Loading original detector regions…" : originalRegionCount > 0 ? showOriginalRegions ? "Hide original detector regions" : "Show original detector regions" : "Original detector regions are not available for this result"}
                 aria-pressed={showOriginalRegions}
               >
                 <Icon icon="carbon:scan" className="h-3.5 w-3.5" />
                 <span>Original regions</span>
                 {originalRegionCount !== null && originalRegionCount > 0 && (
-                  <span
-                    className={`rounded-full px-1.5 py-0.2 text-[10px] ${
-                      showOriginalRegions ? "bg-amber-700/80 text-white" : "bg-zinc-800 text-zinc-300"
-                    }`}
-                  >
-                    {originalRegionCount}
-                  </span>
+                  <span className={`rounded-full px-1.5 py-0.2 text-[10px] ${showOriginalRegions ? "bg-amber-700/80 text-white" : "bg-zinc-800 text-zinc-300"}`}>{originalRegionCount}</span>
                 )}
               </button>
 

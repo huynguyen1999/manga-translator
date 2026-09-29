@@ -10,7 +10,89 @@ import SummaryJobRow from "./SummaryJobRow";
 import { useModalEscape } from "@/utils/useModalEscape";
 
 type AsyncAction = () => void | Promise<void>;
-type JobSection = "active" | "queued" | "attention" | "completed";
+export type JobSection = "active" | "queued" | "attention" | "completed";
+
+export type JobEntry = {
+  type: "batch" | "summary";
+  value: TranslationBatch | SummaryJob;
+};
+
+const jobFirstSeenTimestamps = new Map<string, number>();
+
+export const getJobCreationTimestamp = (entry: JobEntry): number => {
+  if (entry.type === "batch") {
+    const batch = entry.value as TranslationBatch;
+    const added = batch.addedAt instanceof Date
+      ? batch.addedAt.getTime()
+      : typeof batch.addedAt === "number"
+      ? batch.addedAt
+      : typeof batch.addedAt === "string"
+      ? Date.parse(batch.addedAt)
+      : 0;
+    if (!Number.isNaN(added) && added > 0) return added;
+    const updated = batch.updatedAt instanceof Date
+      ? batch.updatedAt.getTime()
+      : typeof batch.updatedAt === "number"
+      ? batch.updatedAt
+      : typeof batch.updatedAt === "string"
+      ? Date.parse(batch.updatedAt)
+      : 0;
+    if (!Number.isNaN(updated) && updated > 0) return updated;
+    return 0;
+  }
+  const job = entry.value as SummaryJob;
+  if (job.createdAt) {
+    const created = Date.parse(job.createdAt);
+    if (!Number.isNaN(created) && created > 0) return created;
+  }
+  const existingFirstSeen = jobFirstSeenTimestamps.get(job.id);
+  if (existingFirstSeen !== undefined) return existingFirstSeen;
+  const initial = job.updatedAt ? Date.parse(job.updatedAt) : Date.now();
+  const timestamp = !Number.isNaN(initial) && initial > 0 ? initial : Date.now();
+  jobFirstSeenTimestamps.set(job.id, timestamp);
+  return timestamp;
+};
+
+export const getJobCompletionTimestamp = (entry: JobEntry): number => {
+  if (entry.type === "batch") {
+    const batch = entry.value as TranslationBatch;
+    const updated = batch.updatedAt instanceof Date
+      ? batch.updatedAt.getTime()
+      : typeof batch.updatedAt === "number"
+      ? batch.updatedAt
+      : typeof batch.updatedAt === "string"
+      ? Date.parse(batch.updatedAt)
+      : 0;
+    if (!Number.isNaN(updated) && updated > 0) return updated;
+    return getJobCreationTimestamp(entry);
+  }
+  const job = entry.value as SummaryJob;
+  if (job.updatedAt) {
+    const updated = Date.parse(job.updatedAt);
+    if (!Number.isNaN(updated) && updated > 0) return updated;
+  }
+  return getJobCreationTimestamp(entry);
+};
+
+export const isJobPriority = (entry: JobEntry): boolean =>
+  entry.type === "batch" && Boolean((entry.value as TranslationBatch).priority);
+
+export const sortJobEntries = (entries: JobEntry[], section: JobSection): JobEntry[] =>
+  entries.slice().sort((a, b) => {
+    const prioDiff = (isJobPriority(b) ? 1 : 0) - (isJobPriority(a) ? 1 : 0);
+    if (prioDiff !== 0) return prioDiff;
+
+    if (section === "completed") {
+      const timeDiff = getJobCompletionTimestamp(b) - getJobCompletionTimestamp(a);
+      if (timeDiff !== 0) return timeDiff;
+      return b.value.id.localeCompare(a.value.id);
+    }
+
+    const timeDiff = getJobCreationTimestamp(b) - getJobCreationTimestamp(a);
+    if (timeDiff !== 0) return timeDiff;
+
+    return b.value.id.localeCompare(a.value.id);
+  });
 
 export const batchSection = (batch: TranslationBatch): JobSection => {
   if (batch.status === "error" || (batch.status === "completed" && Boolean(batch.failedCount))) return "attention";
@@ -187,15 +269,11 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
   }, []);
 
   const groups = useMemo(() => {
-    const result: Record<JobSection, { type: "batch" | "summary"; value: TranslationBatch | SummaryJob }[]> = { active: [], queued: [], attention: [], completed: [] };
+    const result: Record<JobSection, JobEntry[]> = { active: [], queued: [], attention: [], completed: [] };
     batches.filter((batch) => !batch.dismissed).forEach((batch) => result[batchSection(batch)].push({ type: "batch", value: batch }));
     summaryJobs.forEach((job) => result[summarySection(job)].push({ type: "summary", value: job }));
     for (const section of Object.keys(result) as JobSection[]) {
-      result[section].sort((a, b) => {
-        const aTime = a.type === "batch" ? (a.value as TranslationBatch).updatedAt?.getTime() || 0 : Date.parse((a.value as SummaryJob).updatedAt || "") || 0;
-        const bTime = b.type === "batch" ? (b.value as TranslationBatch).updatedAt?.getTime() || 0 : Date.parse((b.value as SummaryJob).updatedAt || "") || 0;
-        return bTime - aTime;
-      });
+      result[section] = sortJobEntries(result[section], section);
     }
     result.completed = result.completed.slice(0, 20);
     return result;

@@ -168,7 +168,7 @@ async def execute_retry_stage(
             if panel_data is not None and ctx.img_rgb is not None:
                 from ..detection.panel import deserialize_panel_detections
                 ctx.panel_detections = deserialize_panel_detections(panel_data, ctx.img_rgb.shape)
-            elif not defer_bubble_detection:
+            if bubble_data is None and not defer_bubble_detection:
                 await translator._detect_speech_bubbles(config, ctx, report_progress=False)
             if (bubble_data is not None or not defer_bubble_detection
                     or not config.bubble_detection.enabled):

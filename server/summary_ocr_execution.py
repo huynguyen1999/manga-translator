@@ -35,11 +35,8 @@ async def run_summary_ocr_job(
     job: SummaryOCRJob,
     runtime: SummaryGenerationRuntime,
 ) -> tuple[int, list[str], dict[str, str]]:
-    request = job.request
     pages = job.pages
-    target_language = job.target_language
-    worker = job.worker
-    pause_event = job.pause_event
+    page_count = len(pages)
     store = job.store
     group_value = job.group_value
     clean_title = job.clean_title
@@ -47,7 +44,7 @@ async def run_summary_ocr_job(
     refresh_text = job.refresh_text
     extraction_required = job.extraction_required
     pages_with_text = job.pages_with_text
-    page_count = len(pages)
+    pause_event = job.pause_event
 
     _summary_log = runtime.summary_log
     _update_summary_job_for = runtime.update_summary_job_for
@@ -60,6 +57,15 @@ async def run_summary_ocr_job(
     task_queue = runtime.task_queue
     wait_in_queue = runtime.wait_in_queue
     empty_device_cache = runtime.empty_device_cache
+
+    # Flow 3: Check if this manga is original (untranslated) manga
+    is_original_manga = any(
+        p.get("meta", {}).get("sourceType") == "original" or p.get("sourceType") == "original"
+        for p in pages
+    )
+    if extraction_required and is_original_manga:
+        from server.summary_chrome_lens import run_chrome_lens_summary_job
+        return await run_chrome_lens_summary_job(job, runtime)
 
     failed_pages = []
     ocr_errors = {}
@@ -124,11 +130,8 @@ async def run_summary_ocr_job(
                         current_page = index + 1
                         try:
                             _summary_log(
-                                "ocr_started",
-                                clean_title,
-                                group_value,
-                                page=f"{current_page}/{page_count}",
-                                file=page["name"],
+                                "ocr_started", clean_title, group_value,
+                                page=f"{current_page}/{page_count}", file=page["name"],
                             )
                             if error is not None:
                                 raise error
@@ -137,34 +140,22 @@ async def run_summary_ocr_job(
                                     await report_stage(stage, page_number=current_page)
 
                                 regions = await _run_summary_ocr(
-                                    request,
-                                    page,
-                                    target_language,
-                                    page_progress,
-                                    active_worker,
-                                    overwrite=refresh_text,
+                                    job.request, page, job.target_language,
+                                    page_progress, active_worker, overwrite=refresh_text,
                                 )
                             page["textRegions"] = regions
                             if regions:
                                 pages_with_text += 1
                             _summary_log(
-                                "ocr_completed",
-                                clean_title,
-                                group_value,
-                                page=f"{current_page}/{page_count}",
-                                file=page["name"],
-                                regions=len(regions),
-                                elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                                "ocr_completed", clean_title, group_value,
+                                page=f"{current_page}/{page_count}", file=page["name"],
+                                regions=len(regions), elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
                             )
                         except Exception as exc:
                             _summary_log(
-                                "ocr_failed",
-                                clean_title,
-                                group_value,
-                                level=logging.WARNING,
-                                exc_info=True,
-                                page=f"{current_page}/{page_count}",
-                                file=page["name"],
+                                "ocr_failed", clean_title, group_value,
+                                level=logging.WARNING, exc_info=True,
+                                page=f"{current_page}/{page_count}", file=page["name"],
                                 elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
                                 error=str(exc),
                             )
@@ -174,18 +165,9 @@ async def run_summary_ocr_job(
                         last_progress = max(last_progress, round(current_page / max(1, page_count) * 70))
                         passed_count = cached_page_count + pending_positions[index]
                         await _update_summary_job_for(
-                            store,
-                            group_value,
-                            clean_title,
-                            "generating",
-                            None,
-                            "textline_merge",
-                            last_progress,
-                            f"Merging text lines · {passed_count}/{page_count} pages",
-                            current_page,
-                            page_count,
-                            pages_with_text,
-                            extraction_required,
+                            store, group_value, clean_title, "generating", None, "textline_merge",
+                            last_progress, f"Merging text lines · {passed_count}/{page_count} pages",
+                            current_page, page_count, pages_with_text, extraction_required,
                             stage_passed_count=passed_count,
                         )
 
@@ -201,30 +183,19 @@ async def run_summary_ocr_job(
                             async def batch_progress(stage: str, position: int) -> None:
                                 index, _ = chunk[position]
                                 await report_stage(
-                                    stage,
-                                    page_number=index + 1,
-                                    batch_position=position + 1,
-                                    batch_size=len(chunk),
-                                    batch_number=0,
-                                    batch_count=1,
+                                    stage, page_number=index + 1, batch_position=position + 1,
+                                    batch_size=len(chunk), batch_number=0, batch_count=1,
                                 )
 
                             try:
                                 batch_results = await _run_summary_ocr_batch(
-                                    [page for _, page in chunk],
-                                    target_language,
-                                    active_worker,
-                                    batch_size,
-                                    batch_progress,
+                                    [page for _, page in chunk], job.target_language,
+                                    active_worker, batch_size, batch_progress,
                                 )
                             except Exception as exc:
                                 _summary_log(
-                                    "ocr_batch_fallback",
-                                    clean_title,
-                                    group_value,
-                                    level=logging.WARNING,
-                                    pages=len(chunk),
-                                    error=str(exc),
+                                    "ocr_batch_fallback", clean_title, group_value,
+                                    level=logging.WARNING, pages=len(chunk), error=str(exc),
                                 )
 
                         for offset, (index, page) in enumerate(chunk):
@@ -237,7 +208,6 @@ async def run_summary_ocr_job(
                                     index, page, started_at_by_index[index], regions, error
                                 )
             finally:
-                # Reclaim memory on the active worker and clear accelerator cache
                 reclaim = getattr(active_worker, "reclaim_memory", None)
                 if reclaim is not None:
                     try:
@@ -247,8 +217,8 @@ async def run_summary_ocr_job(
                 empty_device_cache()
                 gc.collect()
 
-        if worker is not None:
-            await _execute_ocr(worker)
+        if job.worker is not None:
+            await _execute_ocr(job.worker)
         else:
             ocr_task = SummaryQueueElement(_execute_ocr)
             _summary_controller.register_ocr_task(group_value, ocr_task)
@@ -259,19 +229,9 @@ async def run_summary_ocr_job(
                 _summary_controller.unregister_ocr_task(group_value)
     else:
         await _update_summary_job_for(
-            store,
-            group_value,
-            clean_title,
-            "generating",
-            None,
-            "concatenating",
-            70,
-            f"Reused cached text · all {page_count} pages",
-            page_count,
-            page_count,
-            pages_with_text,
-            extraction_required,
-            stage_passed_count=page_count,
+            store, group_value, clean_title, "generating", None, "concatenating",
+            70, f"Reused cached text · all {page_count} pages", page_count, page_count,
+            pages_with_text, extraction_required, stage_passed_count=page_count,
         )
 
     return pages_with_text, failed_pages, ocr_errors

@@ -10,7 +10,13 @@ import asyncio
 from typing import List, Optional, Any
 from .common import MissingAPIKeyException, InvalidServerResponse
 from .keys import GEMINI_API_KEY, GEMINI_API_KEYS, GEMINI_MODEL, GEMINI_MODELS
-from .gemini_keys import GeminiKeyManager, GeminiRetryExhausted, get_current_retry_budget, mask_key
+from .gemini_keys import (
+    GeminiBlockedResponse,
+    GeminiKeyManager,
+    GeminiRetryExhausted,
+    get_current_retry_budget,
+    mask_key,
+)
 from .common_gpt import CommonGPTTranslator, _CommonGPTTranslator_JSON
 from .constants import DEFAULT_GEMINI_SAFETY_SETTINGS
 
@@ -609,13 +615,57 @@ class GeminiTranslator(CommonGPTTranslator):
             self.token_count += getattr(response.usage_metadata, 'prompt_token_count', 0) or 0
             self.token_count_last = getattr(response.usage_metadata, 'total_token_count', 0) or 0
 
+        candidates = getattr(response, 'candidates', None) or []
+        candidate = candidates[0] if candidates else None
+        details = []
+        prompt_feedback = getattr(response, 'prompt_feedback', None)
+        prompt_reason = getattr(prompt_feedback, 'block_reason', None)
+        prompt_ratings = getattr(prompt_feedback, 'safety_ratings', None) or []
+        prompt_has_blocked_rating = any(getattr(rating, 'blocked', False) for rating in prompt_ratings)
+        if prompt_reason is not None:
+            reason = getattr(prompt_reason, 'name', None) or str(prompt_reason).rsplit('.', 1)[-1]
+            if reason not in {'BLOCK_REASON_UNSPECIFIED', 'UNSPECIFIED', 'NONE'}:
+                details.append(f'prompt_block_reason={reason}')
+        if prompt_has_blocked_rating:
+            if not details:
+                details.append('prompt_block_type=SAFETY')
+            details.append(f'prompt_safety_ratings={str(prompt_ratings).replace(chr(10), " ")[:500]}')
+
+        finish_reason = getattr(candidate, 'finish_reason', None)
+        candidate_ratings = getattr(candidate, 'safety_ratings', None) or []
+        candidate_has_blocked_rating = any(getattr(rating, 'blocked', False) for rating in candidate_ratings)
+        if finish_reason is not None:
+            reason = getattr(finish_reason, 'name', None) or str(finish_reason).rsplit('.', 1)[-1]
+            if reason in {
+                'SAFETY', 'PROHIBITED_CONTENT', 'RECITATION', 'LANGUAGE',
+                'BLOCKLIST', 'SPII', 'IMAGE_SAFETY', 'CONTENT_BLOCKED',
+            }:
+                details.append(f'candidate_finish_reason={reason}')
+                finish_message = getattr(candidate, 'finish_message', None)
+                if finish_message:
+                    details.append(f'finish_message={str(finish_message).replace(chr(10), " ")[:500]}')
+        if candidate_has_blocked_rating:
+            if not any(detail.startswith('candidate_finish_reason=') for detail in details):
+                details.append('candidate_block_type=SAFETY')
+            details.append(f'candidate_safety_ratings={str(candidate_ratings).replace(chr(10), " ")[:500]}')
+
+        if details:
+            for name, value in (
+                ('response_id', getattr(response, 'response_id', None)),
+                ('model_version', getattr(response, 'model_version', None)),
+            ):
+                if value:
+                    details.append(f'{name}={value}')
+            detail = ', '.join(details)
+            self.logger.warning('Gemini returned a blocked response (%s)', detail)
+            raise GeminiBlockedResponse(f'Gemini blocked response ({detail})')
+
         try:
             resp_text = response.text
         except Exception:
             resp_text = None
 
-        if resp_text is None and hasattr(response, 'candidates') and response.candidates:
-            candidate = response.candidates[0]
+        if resp_text is None and candidate is not None:
             if hasattr(candidate, 'content') and candidate.content:
                 parts = getattr(candidate.content, 'parts', None) or []
                 parts_text = [getattr(p, 'text', '') for p in parts if getattr(p, 'text', None)]
@@ -623,7 +673,12 @@ class GeminiTranslator(CommonGPTTranslator):
                     resp_text = "".join(parts_text)
             if resp_text is None:
                 finish_reason = getattr(candidate, 'finish_reason', 'UNKNOWN')
-                self.logger.warning(f"Gemini response has no text content (finish_reason: {finish_reason}).")
+                finish_message = getattr(candidate, 'finish_message', None)
+                self.logger.warning(
+                    "Gemini response has no text content (finish_reason: %s%s).",
+                    finish_reason,
+                    f", finish_message: {finish_message}" if finish_message else "",
+                )
 
         return resp_text if resp_text is not None else ""
 
@@ -739,7 +794,7 @@ class GeminiTranslator(CommonGPTTranslator):
                 self.logger.debug(f'-- GPT Response (Key: {mask_key(key)}, Model: {model}) --\n{log_text}')
                 return resp_str
 
-            except GeminiRetryExhausted:
+            except (GeminiBlockedResponse, GeminiRetryExhausted):
                 raise
             except Exception as ex:
                 await self._handle_request_error(ex, key, model, budget)
@@ -891,7 +946,7 @@ class _GeminiTranslator_json (_CommonGPTTranslator_JSON):
                 )
                 return resp_str
 
-            except GeminiRetryExhausted:
+            except (GeminiBlockedResponse, GeminiRetryExhausted):
                 raise
             except Exception as ex:
                 await self.translator._handle_request_error(ex, key, model, budget, mode_label=" in JSON mode")

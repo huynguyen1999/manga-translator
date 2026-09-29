@@ -21,6 +21,7 @@ bitsandbytes==0.50.2
 certifi==2026.7.22
 cffi==2.1.1
 charset-normalizer==3.5.1
+chrome-lens-py>=3.5.3
 click==8.5.0
 cloudpickle==3.1.2
 colorama==0.4.6
@@ -110,7 +111,7 @@ polars==1.44.2
 polars-runtime-32==1.44.2
 portalocker==3.2.0
 propcache==0.5.2
-protobuf==4.25.9
+protobuf>=6.33.4
 psutil==7.2.2
 py-spy==0.4.2
 py3langid==0.2.2

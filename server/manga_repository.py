@@ -85,7 +85,8 @@ class MangaRepository:
         if include_cover:
             item["coverUrl"] = f"{base}/cover.webp{suffix}"
         if not slim:
-            has_bubble_mask = (self.result_root / row["folder"] / "bubble_mask.png").is_file()
+            folder_dir = self.result_root / row["folder"]
+            has_bubble_mask = (folder_dir / "bubble_mask.png").is_file() or (folder_dir / "panel_detections.json").is_file() or (folder_dir / "bubble_detections.json").is_file()
             item.update(
                 {
                     "inpaintedUrl": f"/result/{row['id']}/inpainted.jpg" if row["has_inpainted"] else None,

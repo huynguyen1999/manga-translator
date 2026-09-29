@@ -18,7 +18,14 @@ from .professional_prompts import (
     build_analysis_prompt,
     build_translation_prompt,
 )
-from .translators import GPT_TRANSLATORS, _dispatch_one, get_translator
+from .translators import (
+    GPT_TRANSLATORS,
+    _dispatch_one,
+    _translation_resource_lease,
+    _wait_for_gpt_translation,
+    get_translator,
+)
+from .translators.gemini_keys import GeminiBlockedResponse
 from .utils import is_preserved_region
 
 
@@ -144,21 +151,35 @@ class ProfessionalTranslator:
         self,
         config: TranslatorConfig,
         progress: Callable[[str], Awaitable[None]] | None = None,
+        resource_acquire: Callable[..., Awaitable[Any]] | None = None,
+        resource_release: Callable[..., Awaitable[None]] | None = None,
+        device: str = "cpu",
     ):
         if config.target_lang != "ENG":
             raise ValueError("Professional translation currently supports Japanese to English only")
         self.config = config
         self.primary = config.translator
+        self.analysis_translator = getattr(config, "analysis_translator", None)
         self.provenance: list[dict[str, str]] = []
         self._last_model: str | None = None
         self._progress = progress
+        self._resource_args = {
+            "_batch_resource_acquire": resource_acquire,
+            "_batch_resource_release": resource_release,
+        }
+        self._device = device or "cpu"
+
+    def _target_for(self, stage: str) -> Translator:
+        if stage.startswith("analysis") and self.analysis_translator:
+            return self.analysis_translator
+        return self.primary
 
     async def _translate_direct(self, key: Translator, queries: list[str]) -> list[str]:
         indices = [i for i, q in enumerate(queries) if q and q.strip()]
         if not indices:
             return ["" for _ in queries]
-        ctx_args: dict[str, Any] = {}
-        sub = await _dispatch_one(key, self.config.target_lang, [queries[i] for i in indices], self.config, False, ctx_args, "cpu")
+        ctx_args = self._resource_args.copy()
+        sub = await _dispatch_one(key, self.config.target_lang, [queries[i] for i in indices], self.config, False, ctx_args, self._device)
         model = ctx_args.get("offline_model") or ctx_args.get("gemini_model") or ctx_args.get("translator_model")
         self._last_model = str(model) if model else None
         results = ["" for _ in queries]
@@ -178,12 +199,14 @@ class ProfessionalTranslator:
             await self._progress(state)
 
     async def _request(self, stage: str, prompt: str) -> tuple[str, str]:
-        target = self.primary
+        target = self._target_for(stage)
         try:
             raw = await self._request_with(target, prompt, stage)
             if _is_refusal(raw):
                 raise PermissionError(raw)
             return raw, _provider_name(target)
+        except GeminiBlockedResponse:
+            raise
         except Exception as exc:
             if not _is_refusal(exc) or target == Translator.deepseek:
                 raise
@@ -214,7 +237,8 @@ class ProfessionalTranslator:
         if original_cache_flag is not None:
             translator._canUseCache = False
         try:
-            raw = await request("English", prompt)
+            async with _translation_resource_lease(self._resource_args, False, self._device):
+                raw = await _wait_for_gpt_translation(request("English", prompt))
             current_model = getattr(getattr(translator, "key_manager", None), "current_model", None)
             model = current_model or getattr(translator, "model_name", None) or getattr(translator, "model", None) or getattr(translator, "MODEL", None)
             self._last_model = str(model) if model else None
@@ -230,7 +254,7 @@ class ProfessionalTranslator:
                 translator._canUseCache = original_cache_flag
 
     async def _json_request(self, stage: str, prompt: str) -> tuple[dict[str, Any], str]:
-        target = self.primary
+        target = self._target_for(stage)
         last_error: Exception | None = None
         for _ in range(2):
             try:
@@ -242,6 +266,10 @@ class ProfessionalTranslator:
                 self.provenance.append(provenance)
                 return data, provider
             except PermissionError:
+                raise
+            except GeminiBlockedResponse:
+                raise
+            except TimeoutError:
                 raise
             except Exception as exc:
                 last_error = exc
@@ -285,7 +313,8 @@ class ProfessionalTranslator:
         else:
             manual_ranges = parse_story_ranges(override, len(pages))
 
-        if self.primary not in GPT_TRANSLATORS:
+        target_for_analysis = self._target_for("analysis")
+        if target_for_analysis not in GPT_TRANSLATORS:
             expected = manual_ranges or [(1, len(pages))]
             return {
                 "stories": [
@@ -502,7 +531,14 @@ async def translate_professionally(
 ) -> list[tuple]:
     ordered = sorted(contexts_with_configs, key=lambda pair: pair[1].page_order or 0)
     config = ordered[0][1].translator
-    engine = ProfessionalTranslator(config, progress=progress)
+    first_context = ordered[0][0]
+    engine = ProfessionalTranslator(
+        config,
+        progress=progress,
+        resource_acquire=getattr(first_context, "_batch_resource_acquire", None),
+        resource_release=getattr(first_context, "_batch_resource_release", None),
+        device=getattr(first_context, "_batch_translation_device", "cpu"),
+    )
     pages = []
     for number, (ctx, _) in enumerate(ordered, 1):
         regions = []

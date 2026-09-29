@@ -46,40 +46,32 @@ def find_ready_translation_group(
     size: int,
     settings: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]] | None:
-    if scheduler._current_batch_stage(items) != "translation":
+    if any(item.get("status") == "error" for item in items):
         return None
     if (settings or {}).get("translationQuality") == "professional":
-        story_plan = (settings or {}).get("storyPlan")
-        segments = story_plan.get("segments") if isinstance(story_plan, dict) else None
-        if not segments or not story_plan.get("enabled", True) or story_plan.get("mergeAllPages"):
-            segments = [{"startPage": 1, "endPage": len(items)}]
-        for segment in segments:
-            start, end = segment.get("startPage"), segment.get("endPage")
-            if not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start:
-                continue
-            story_items = items[start - 1:end]
-            if len(story_items) != end - start + 1:
-                continue
-            active_story_items = [item for item in story_items if item.get("status") != "completed"]
-            if all(
-                item.get("stage") == "awaiting_translation"
-                and (batch_id, item.get("id")) not in scheduler._running_items
-                for item in active_story_items
-            ) and active_story_items:
-                return active_story_items
+        active_items = [item for item in items if item.get("status") != "completed" and item.get("id")]
+        if active_items and all(
+            item.get("stage") == "awaiting_translation"
+            and (batch_id, item["id"]) not in scheduler._running_items
+            for item in active_items
+        ):
+            return active_items
         return None
 
     uncompleted = [
         item for item in items
-        if item.get("status") not in {"completed", "error"} and item.get("id")
+        if item.get("status") != "completed" and item.get("id")
     ]
     if not uncompleted:
         return None
 
-    translation_items = [
+    translation_pending = [
         item for item in uncompleted
-        if scheduler._item_batch_stage(item) == "translation"
+        if _BATCH_STAGE_ORDER.index(scheduler._item_batch_stage(item))
+        <= _BATCH_STAGE_ORDER.index("translation")
     ]
+    if not translation_pending:
+        return None
 
     ready_group = [
         item for item in uncompleted
@@ -87,13 +79,8 @@ def find_ready_translation_group(
         and (batch_id, item["id"]) not in scheduler._running_items
     ]
 
-    if len(ready_group) >= size:
-        return ready_group[:size]
-
-    if len(ready_group) == len(translation_items):
-        return ready_group
-
-    return None
+    required = min(max(1, size), len(translation_pending))
+    return ready_group[:required] if len(ready_group) >= required else None
 
 
 def story_plan_for_group(

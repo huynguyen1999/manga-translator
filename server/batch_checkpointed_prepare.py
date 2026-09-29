@@ -10,7 +10,6 @@ from PIL import Image
 from manga_translator import Context
 from manga_translator.config import Config
 from manga_translator.pipeline.run import PipelineRun
-from manga_translator.pipeline.stages import PipelineStage, ResourceClass
 from manga_translator.utils.image_storage import save_jpeg
 from server.batch_resources import _stage_resource
 from server.image_variants import final_file
@@ -76,8 +75,7 @@ async def process_checkpointed_prepare_item(
     run = None
     batch_finished = False
     page_completed = False
-    resource_slot = None
-    resource_class = None
+    resource_slot = resource_class = None
     resource_acquired = False
     token = correlation_id_ctx.set(f"batch-{log_token(batch_id)}/stage-{log_token(item_id)}")
     try:
@@ -85,12 +83,12 @@ async def process_checkpointed_prepare_item(
         item = next(item for item in batch["items"] if item["id"] == item_id)
         pipeline_stage = item.get("pipelineStage") or "initialize"
         translator = instance.translator
-        if _stage_resource(pipeline_stage) == ResourceClass.GPU:
-            resource_class = ResourceClass.GPU
-            resource_slot = await scheduler._acquire_stage_resource(pipeline_stage)
-        else:
-            resource_class = _stage_resource(pipeline_stage)
-            resource_slot = await scheduler._acquire_stage_resource(pipeline_stage)
+        config = scheduler._config_for(batch, item)
+        device = "cpu" if pipeline_stage == "translation" and getattr(
+            translator, "_gpu_limited_memory", False
+        ) else getattr(translator, "device", "cpu")
+        resource_class = _stage_resource(pipeline_stage, config, device)
+        resource_slot = await scheduler._acquire_stage_resource(pipeline_stage, resource_class)
         resource_acquired = True
         if not item.get("resultFolder"):
             await scheduler._set_stage(batch_id, item_id, "initialize")
@@ -102,7 +100,6 @@ async def process_checkpointed_prepare_item(
                         return True
                 return False
             await scheduler.store.mutate(batch_id, mark_checkpointed)
-        config = scheduler._config_for(batch, item)
         folder = item.get("resultFolder")
         if not isinstance(folder, str):
             folder = None
@@ -151,16 +148,18 @@ async def process_checkpointed_prepare_item(
             )
 
             if stage_id is not None and stage_id != "translation":
-                if (
-                    _stage_resource(stage_id) == ResourceClass.GPU
-                    and resource_class != ResourceClass.GPU
-                ):
+                next_resource = _stage_resource(stage_id, config, device)
+                if next_resource != resource_class:
                     scheduler._release_stage_resource(
                         pipeline_stage, resource_slot, resource_class
                     )
                     resource_acquired = False
-                    resource_class = ResourceClass.GPU
-                    resource_slot = await scheduler._acquire_stage_resource(stage_id)
+                    resource_class = next_resource
+                    scheduler._running_stage_resources[(batch_id, item_id)] = (stage_id, resource_class)
+                    resource_slot = await scheduler._acquire_stage_resource(
+                        stage_id, resource_class
+                    )
+                    pipeline_stage = stage_id
                     resource_acquired = True
                 await scheduler._set_stage(batch_id, item_id, stage_id)
 
@@ -295,6 +294,6 @@ async def process_checkpointed_prepare_item(
             scheduler._release_stage_resource(pipeline_stage, resource_slot, resource_class)
         if batch_finished:
             await scheduler._reclaim_batch_memory(batch_id, instance)
-        await scheduler.executors.free_executor(instance)
+        await scheduler.stage_executors.free_executor(instance)
         scheduler._wake.set()
         correlation_id_ctx.reset(token)

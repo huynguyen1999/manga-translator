@@ -115,17 +115,20 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             while True:
                 request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
                 started = time.time()
-                while not request_task.done():
-                    await asyncio.sleep(0.1)
-                    if time.time() - started > self._TIMEOUT + (timeout_attempt * self._TIMEOUT / 2):
-                        # Server takes too long to respond
-                        if timeout_attempt >= self._TIMEOUT_RETRY_ATTEMPTS:
-                            raise Exception('ollama servers did not respond quickly enough.')
-                        timeout_attempt += 1
-                        self.logger.warning(f'Restarting request due to timeout. Attempt: {timeout_attempt}')
-                        request_task.cancel()
-                        request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
-                        started = time.time()
+                try:
+                    while not request_task.done():
+                        await asyncio.sleep(0.1)
+                        if time.time() - started > self._TIMEOUT + (timeout_attempt * self._TIMEOUT / 2):
+                            # Server takes too long to respond
+                            if timeout_attempt >= self._TIMEOUT_RETRY_ATTEMPTS:
+                                raise Exception('ollama servers did not respond quickly enough.')
+                            timeout_attempt += 1
+                            self.logger.warning(f'Restarting request due to timeout. Attempt: {timeout_attempt}')
+                            request_task.cancel()
+                            request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
+                            started = time.time()
+                finally:
+                    request_task.cancel()
                 try:
                     response = await request_task
                     break

@@ -228,17 +228,11 @@ class NumericOcrPreservationTests(unittest.IsolatedAsyncioTestCase):
             localized_pages.extend(pages)
             for page in pages:
                 for item in page["regions"]:
-                    item.update(draft="NAKAMOTO", confidence=1.0, review_reasons=[])
-
-        async def edit(_self, _story, pages, *_metadata):
-            for page in pages:
-                for item in page["regions"]:
-                    item.update(final="NAKAMOTO")
+                    item.update(final="NAKAMOTO", confidence=1.0, review_reasons=[])
 
         with (
             patch.object(ProfessionalTranslator, "analyze", analyze),
             patch.object(ProfessionalTranslator, "localize_story", localize),
-            patch.object(ProfessionalTranslator, "edit_story", edit),
         ):
             await translate_professionally([(ctx, config)])
 

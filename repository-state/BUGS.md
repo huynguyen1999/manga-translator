@@ -2,6 +2,61 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-29 — Layout fallback exhausts free-text search
+
+- Symptom: Six saved pages spent 18.1–57.2 seconds in Layout; the longest `layout_page` CPU-stage run was 57.0 seconds.
+- Root cause: When the fast ideal free-text placement fails renderability checks, fallback walks one-pixel font sizes down to the minimum and searches offsets for each typography candidate without a work budget. Example: page `1790698805417-a04ee7a7-2048-ENG-deepl`, region `b23871b41e2944ce848ca5463f41d610`, generated 830 candidates and 48,589 rejected positions from a 145px source-font estimate. Page `1790698338792-3e2f500d-2048-ENG-deepl` generated 1,241 candidates across seven free-text regions. On page `1790698805417`, completed empty bubble detection also routed every region to free-text after `1ded73b` disabled bubble inference for completed empty results.
+- Fix: No code change in this diagnosis. Page `1790698339244` is not isolated by free-text counters (103 candidates); its nine bubble regions make bubble candidate generation the likely remaining cost, but saved artifacts lack per-mode timings.
+- Prevention: Bound or coarsen typography/offset fallback after validating layout quality, and retain per-mode timing counters plus extreme OCR-geometry regressions.
+
+## 2026-09-29 — PostgreSQL summary retry crashed with `NameError: name 'value' is not defined`
+
+- Symptom: `POST /results/group/summary` raised `NameError` while marking a retry queued, and the UI showed `Failed to fetch`.
+- Root cause: `SummaryRepository.update_summary_job()` used the existing summary payload to preserve synopsis data and update job metadata, but the payload load was missing before the new `jobCreatedAt` logic accessed `value`.
+- Fix: Restore `value = await self.get_summary_payload(group_id) or {}` before mutating and saving the payload.
+- Prevention: When changing PostgreSQL summary-job metadata, preserve the file-backed update's load-mutate-save sequence so prior summary payload and job fields remain available.
+
+## 2026-09-29 — Summary job and translation job swapped order back and forth in Active group
+
+- Symptom: When a summary job and a translation batch ran concurrently, their positions in the Active drawer group constantly swapped back and forth on every progress event.
+- Root cause: `JobsDrawer.tsx` sorted job entries by `updatedAt`. As each active job streamed progress ticks (page recognition, OCR, translation chunks, etc.), its `updatedAt` timestamp was continuously updated to `Date.now()`, repeatedly inverting `bTime - aTime` comparison.
+- Fix:
+  1. Updated `JobsDrawer.tsx` to sort active, queued, and attention jobs by immutable creation timestamp (`addedAt` for translation batches, `createdAt` / `jobCreatedAt` for summary jobs, with first-seen timestamp fallback) and deterministic ID tie-breaking, reserving `updatedAt` sorting strictly for completed jobs.
+  2. Added `jobCreatedAt` tracking across PostgreSQL and file-backed summary persistence in `server/summary_repository.py`, `server/manga_summary.py`, and `server/summary_generation.py`, exposing `createdAt` in `SummaryJob` and `jobCreatedAt` in `MangaSummary`.
+- Prevention: Active and in-progress job queues must always sort by stable submission/creation time or explicit priority rather than transient progress update timestamps.
+
+## 2026-09-29 — GPT translation requests could run longer than one minute
+
+- Symptom: A page could remain in model translation for more than a minute (observed at 1m 46s).
+- Root cause: GPT translator retry loops and structured batch translation had no shared deadline; page validation and batch recovery could retry a timed-out request again.
+- Fix: Cap each active GPT model call at 60 seconds in ordinary, structured, and professional translation paths. Treat timeout as terminal for that request so fast-mode recovery does not immediately retry it; local/offline models keep their existing execution behavior.
+- Prevention: Cover both ordinary and structured dispatch timeouts, cancellation of internal retries, and one-shot page failure after a request timeout.
+
+## 2026-09-29 — Summary job failed with `TypeError: '<=' not supported between instances of 'int' and 'NoneType'` in `assign_regions_to_panels`
+
+- Symptom: Summary generation failed during `source_snapshot` with `TypeError: '<=' not supported between instances of 'int' and 'NoneType'` when processing pages with detected panels and text regions.
+- Root cause: `assign_regions_to_panels()` evaluated `0 <= item["panel_index"] < len(panels)` without verifying that `item["panel_index"]` was not `None`. When regions were created without enclosing panels (e.g. `panel_index: None` in `server/summary_chrome_lens.py`), the chained comparison attempted `0 <= None`.
+- Fix: Checked that `pi = item.get("panel_index")` or `item.panel_index` is a valid `int` or `float` (and not `bool`) before checking index bounds `0 <= int(pi) < len(panels)`, allowing unassigned / bubbleless regions to safely fall back to geometric containment and unassigned lists.
+- Prevention: Always check for `None` or validate numeric types before performing chained range comparisons on optional metadata attributes.
+
+## 2026-09-29 — Original manga summary failed with `RuntimeError: chrome-lens-py is not available`
+
+- Symptom: Running summary generation on an original manga raised `RuntimeError: chrome-lens-py is not available` across all pages in `server/summary_chrome_lens.py`.
+- Root cause:
+  1. `chrome-lens-py` was initially installed into the shell's default conda `dev` environment rather than the repository's `.venv/bin/python` interpreter used to run `server/main.py`.
+  2. `chrome-lens-py` v3.5.3 generated protobuf descriptors with `protoc 6.33.4`, which raised `google.protobuf.runtime_version.VersionError` against `.venv`'s `protobuf 5.29.6`, and `server/summary_chrome_lens.py` only caught `ImportError` at module import time.
+- Fix:
+  1. Installed `chrome-lens-py==3.5.3` and upgraded `protobuf>=6.33.4` (`7.36.2`) in `.venv/bin/python` and recorded both in `requirements.txt`.
+  2. Updated `create_lens_api()` in `server/summary_chrome_lens.py` to catch broad import/runtime errors and support lazy re-import when the package becomes available.
+- Prevention: Always check the active server process's Python interpreter (`ps aux` / `.venv/bin/python`) when installing dependencies and verify module import directly in that interpreter to catch transitive runtime version checks like `protobuf` gencode validation.
+
+## 2026-09-29 — Batch stage dispatch skipped earlier work in a resource lane
+
+- Symptom: Ready work overlapped across resource families, but could start a later stage before an earlier queued stage in the same lane. Fast translation could also send a partial group before its configured batch size, and professional translation could begin a story segment before all pages were ready.
+- Root cause: Dispatch eligibility checked active resource conflicts but not earlier queued stages in that family; fast-mode tail detection only counted pages that had already reached translation, and professional selection released story segments independently.
+- Fix: Preserve checkpointed page transitions and cross-family overlap while giving earlier queued same-family stages priority. Fast translation waits for its configured group size unless all remaining pre-translation/translation pages fit in a smaller tail; professional translation waits for all active pages before story analysis and chunking. In-process stages use isolated per-lane translator slots sharing model weights, CPU-light/heavy share one lane, GPU work is capped by model-executor concurrency, and active resource leases follow effective model settings.
+- Prevention: Cover same-family stage priority alongside cross-family overlap, fast full-size and tail groups, professional full-batch readiness, resumed stage tracking, worker/GPU caps, model-specific resources, mixed API/offline translation leases, and stop-on-error behavior.
+
 ## 2026-09-29 — Reader ignored "Read from here" page selection and opened at start or previous read
 
 - Symptom: In manga detail or library view, clicking "Read from here" on a specific page (e.g. Page 10) opened the reader at Page 1 (if unread) or resumed from the previous last read position instead of starting at the selected page.
@@ -1682,3 +1737,10 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 - Root cause: A tab held HTML referencing a hashed stylesheet removed by a frontend rebuild; stale-asset recovery only reloads for missing JavaScript.
 - Fix: Reload once when a same-origin bundled stylesheet fails, and clear the retry guard after a stylesheet loads.
 - Prevention: Cover missing CSS assets as well as missing JavaScript when handling stale frontend builds.
+
+## 2026-09-29 — Gemini synopsis failures hid response diagnostics
+
+- Symptom: A successful Gemini HTTP response with no completion text was logged only as `Gemini returned no text`, while translation-context analysis could retry or fall back after an API policy block.
+- Root cause: The synopsis adapter omitted some candidate feedback, and the translation adapter reduced blocked responses to empty text; professional analysis retried generic parse failures and could fall back to another provider.
+- Fix: Preserve HTTP status, response/model IDs, prompt block reason, candidate finish reason/message, safety ratings, and API error metadata. Raise a typed terminal error for recognized Gemini blocks so professional analysis does not retry or automatically route the same request to another provider.
+- Prevention: Preserve provider response metadata at the API adapter boundary and keep policy blocks distinct from malformed output and transient API errors.

@@ -7,6 +7,7 @@ from typing import Any
 from manga_translator import Context
 from manga_translator.detection.panel import deserialize_panel_detections
 from manga_translator.pipeline.run import deserialize_textblocks, serialize_regions
+from server.batch_translation_resources import resource_callbacks
 
 
 async def process_translation_group(
@@ -16,16 +17,16 @@ async def process_translation_group(
     item_ids = [item["id"] for item in claimed]
     hook = None
     owns_translation_lock = False
-    owns_network_slot = False
     batch_finished = False
     translation_runs = {}
+    contexts_with_configs = []
+
     lock = scheduler._translation_locks.setdefault(batch_id, asyncio.Lock())
     main_loop = asyncio.get_running_loop()
+    acquire_resource, release_resource = resource_callbacks(scheduler, main_loop)
     token = correlation_id_ctx.set(f"batch-{log_token(batch_id)}/trans-{log_token(item_ids[0])}")
     logger.info(f"Starting batch translation for items {item_ids} (batch {batch_id})")
     try:
-        network_slot = await scheduler._acquire_stage_resource("translation")
-        owns_network_slot = True
         batch = await scheduler.store.get_batch(batch_id)
         current = {item["id"]: item for item in batch["items"]}
         configs = [scheduler._config_for(batch, current[item_id]) for item_id in item_ids]
@@ -52,7 +53,6 @@ async def process_translation_group(
                 run._memory_begin("translation")
             translation_runs[item_id] = run
 
-        contexts_with_configs = []
         for item_id, config in zip(item_ids, configs):
             item_entry = current[item_id]
             folder = item_entry.get("resultFolder")
@@ -77,6 +77,9 @@ async def process_translation_group(
             panel_data = saved_documents.get("panel_detections.json")
 
             ctx = Context()
+            ctx["_batch_resource_acquire"] = acquire_resource
+            ctx["_batch_resource_release"] = release_resource
+            ctx["_batch_translation_device"] = "cpu" if getattr(translator, "_gpu_limited_memory", False) else getattr(translator, "device", None) or "cpu"
             ctx.text_regions = deserialize_textblocks(merged_data) if merged_data else []
             ctx.result_documents = saved_documents
             ctx.panel_detections = deserialize_panel_detections(panel_data) if panel_data else []
@@ -223,11 +226,9 @@ async def process_translation_group(
                 translator._progress_hooks.remove(hook)
             if batch_finished:
                 await scheduler._reclaim_batch_memory(batch_id, instance)
-            await scheduler.executors.free_executor(instance)
+            await scheduler.stage_executors.free_executor(instance)
         if owns_translation_lock:
             lock.release()
-        if owns_network_slot:
-            scheduler._release_stage_resource("translation", network_slot)
         scheduler._reserved_items.difference_update((batch_id, item_id) for item_id in item_ids)
         for item_id in item_ids:
             scheduler._running_items.discard((batch_id, item_id))

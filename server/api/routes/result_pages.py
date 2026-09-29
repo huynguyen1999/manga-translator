@@ -98,7 +98,7 @@ def create_result_pages_router(
         urls = image_urls(folder_name, asset_version(folder_path), page_input_file)
         has_inpainted = find_asset(folder_path, "inpainted") is not None
         has_regions = (folder_path / "text_regions.json").exists()
-        has_bubble_mask = (folder_path / "bubble_mask.png").is_file()
+        has_bubble_mask = (folder_path / "bubble_mask.png").is_file() or (folder_path / "panel_detections.json").is_file() or (folder_path / "bubble_detections.json").is_file()
         page_review_status = review_status(meta, folder_path)
 
         return {

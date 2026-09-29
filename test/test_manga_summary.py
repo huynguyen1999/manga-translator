@@ -286,40 +286,32 @@ class TestMangaSummaryPerformance(unittest.IsolatedAsyncioTestCase):
     async def test_merge_prompt_deduplicates_without_joining_unrelated_stories(self):
         calls = []
 
-        class Completions:
-            async def create(self, **kwargs):
+        class Models:
+            async def generate_content(self, **kwargs):
                 calls.append(kwargs)
-                return SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content="summary"))]
-                )
+                return SimpleNamespace(text="summary", candidates=[])
 
-        client = SimpleNamespace(
-            with_options=lambda **_kwargs: SimpleNamespace(
-                chat=SimpleNamespace(completions=Completions())
-            )
-        )
+        client = SimpleNamespace(aio=SimpleNamespace(models=Models()))
 
         await _summary_completion(client, "ENG", "partials", True, "gemini-test", "gemini")
 
-        prompt = calls[0]["messages"][0]["content"]
+        prompt = calls[0]["config"].system_instruction
         self.assertIn("Deduplicate overlapping events", prompt)
         self.assertIn("never combine unrelated stories or invent continuity", prompt)
         self.assertIn("keep every detail attached to the correct story", prompt)
 
     async def test_summary_completion_handles_missing_response_message(self):
-        class Completions:
-            async def create(self, **_kwargs):
+        class Models:
+            async def generate_content(self, **_kwargs):
                 return SimpleNamespace(
-                    choices=[SimpleNamespace(message=None, finish_reason="SAFETY")]
+                    candidates=[SimpleNamespace(finish_reason="SAFETY")],
+                    prompt_feedback=None,
+                    text=None,
                 )
 
-        client = SimpleNamespace(
-            with_options=lambda **_kwargs: SimpleNamespace(
-                chat=SimpleNamespace(completions=Completions())
-            )
-        )
+        client = SimpleNamespace(aio=SimpleNamespace(models=Models()))
 
-        with self.assertRaisesRegex(RuntimeError, "Gemini returned no text"):
+        with self.assertRaisesRegex(RuntimeError, "Gemini returned no text .*finish_reason=SAFETY"):
             await _summary_completion(client, "ENG", "text", False, "gemini-test", "gemini")
 
     async def test_summary_chunks_are_generated_concurrently(self):
@@ -362,10 +354,12 @@ class TestMangaSummaryPerformance(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(max_active, 2)
         self.assertEqual(set(models), {"deepseek-flash"})
 
-    async def test_synopsis_uses_groq_and_gemini_endpoints(self):
+    async def test_synopsis_uses_groq_openai_and_gemini_native_endpoints(self):
         from manga_translator.translators import keys
 
         calls = []
+        gemini_client_args = []
+        gemini_requests = []
         response = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content="summary"))]
         )
@@ -384,26 +378,49 @@ class TestMangaSummaryPerformance(unittest.IsolatedAsyncioTestCase):
             calls.append(kwargs)
             return client
 
+        class GeminiModels:
+            async def generate_content(self, **kwargs):
+                gemini_requests.append(kwargs)
+                return SimpleNamespace(text="summary", candidates=[])
+
+        gemini_client = SimpleNamespace(
+            aio=SimpleNamespace(models=GeminiModels(), aclose=AsyncMock()),
+            close=lambda: None,
+        )
+
+        def make_gemini_client(**kwargs):
+            gemini_client_args.append(kwargs)
+            return gemini_client
+
         with patch.object(keys, "GROQ_MODEL", "groq-test"), patch.object(keys, "GROQ_API_KEY", "groq-key"), \
              patch.object(keys, "GEMINI_MODEL", "gemini-test"), patch.object(keys, "GEMINI_API_KEY", "gemini-key"), \
-             patch("server.manga_summary.openai", SimpleNamespace(AsyncOpenAI=make_client)):
+             patch("server.manga_summary.openai", SimpleNamespace(AsyncOpenAI=make_client)), \
+             patch("google.genai.Client", make_gemini_client):
             self.assertEqual(resolve_summary_model("groq")[:2], ("groq", "groq-test"))
             self.assertEqual(resolve_summary_model("gemini")[:2], ("gemini", "gemini-test"))
             self.assertEqual(await generate_synopsis(["text"], "ENG", len, "groq"), "summary")
             self.assertEqual(await generate_synopsis(["text"], "ENG", len, "gemini"), "summary")
 
-        self.assertEqual(calls, [
-            {
-                "api_key": "groq-key",
-                "base_url": "https://api.groq.com/openai/v1",
-                "max_retries": 0,
-            },
-            {
-                "api_key": "gemini-key",
-                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-                "max_retries": 0,
-            },
-        ])
+        self.assertEqual(calls, [{
+            "api_key": "groq-key",
+            "base_url": "https://api.groq.com/openai/v1",
+            "max_retries": 0,
+        }])
+        self.assertEqual(gemini_client_args[0]["api_key"], "gemini-key")
+        http_options = gemini_client_args[0]["http_options"]
+        self.assertEqual(http_options.timeout, 90_000)
+        config = gemini_requests[0]["config"]
+        settings = {
+            (
+                getattr(setting.category, "value", setting.category),
+                getattr(setting.threshold, "value", setting.threshold),
+            )
+            for setting in config.safety_settings
+        }
+        self.assertTrue(
+            ("HARM_CATEGORY_SEXUALLY_EXPLICIT", "BLOCK_NONE") in settings
+        )
+        self.assertEqual(gemini_requests[0]["model"], "gemini-test")
 
     def test_legacy_deepseek_synopsis_models_use_current_model(self):
         self.assertEqual(resolve_summary_model("deepseek-chat")[1], "deepseek-flash")
@@ -569,7 +586,7 @@ class TestSummaryExtractionProgress(unittest.IsolatedAsyncioTestCase):
                 json.dumps({
                     "mangaTitle": "Series",
                     "originalName": "page.png",
-                    "sourceType": "original",
+                    "sourceType": "translated",
                 }),
                 encoding="utf-8",
             )
@@ -584,7 +601,7 @@ class TestSummaryExtractionProgress(unittest.IsolatedAsyncioTestCase):
                 json.dumps({
                     "mangaTitle": "Series",
                     "originalName": "page-2.png",
-                    "sourceType": "original",
+                    "sourceType": "translated",
                 }),
                 encoding="utf-8",
             )

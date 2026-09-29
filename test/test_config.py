@@ -42,23 +42,29 @@ class TestConfig(unittest.TestCase):
         config = Config.model_validate({
             "translator": {
                 "translation_quality": "professional",
+                "analysis_translator": "gemini",
                 "draft_translator": "gemini",
             }
         })
+        self.assertEqual(config.translator.analysis_translator, Translator.gemini)
         self.assertEqual(config.translator.draft_translator, Translator.gemini)
 
         config_empty = Config.model_validate({
             "translator": {
+                "analysis_translator": "auto",
                 "draft_translator": "",
             }
         })
+        self.assertIsNone(config_empty.translator.analysis_translator)
         self.assertIsNone(config_empty.translator.draft_translator)
 
         config_none = Config.model_validate({
             "translator": {
+                "analysis_translator": "none",
                 "draft_translator": "none",
             }
         })
+        self.assertIsNone(config_none.translator.analysis_translator)
         self.assertIsNone(config_none.translator.draft_translator)
 
     def test_story_plan_is_preserved(self):

@@ -37,7 +37,6 @@ async def batch_translate_contexts(
     for batch_index, batch in enumerate(batches):
         logger.info(f'Processing translation batch {batch_index + 1}/{len(batches)}')
 
-        # 收集当前批次的所有文本
         all_texts = []
         all_text_ids = []
 
@@ -60,11 +59,9 @@ async def batch_translate_contexts(
                 all_text_ids.append(region.region_id)
 
         if not all_texts:
-            # 当前批次没有需要翻译的文本
             results.extend(batch)
             continue
 
-        # 批量翻译
         trans_start_time = time.monotonic()
         trans_start_iso = datetime.now(timezone.utc).isoformat()
         try:
@@ -72,7 +69,6 @@ async def batch_translate_contexts(
             # 使用第一个配置进行翻译（假设批次内配置相同）
             sample_config = batch[0][1] if batch else None
             if sample_config:
-                # 支持批量翻译 - 传递所有批次上下文
                 batch_contexts = [ctx for ctx, config in batch]
                 translated_texts = await owner._batch_translate_texts(
                     all_texts, sample_config, batch[0][0], batch_contexts,
@@ -273,6 +269,11 @@ async def batch_translate_contexts(
 
             results.extend(batch)
 
+        except TimeoutError as exc:
+            logger.error(f"Batch translation request timed out: {exc}")
+            for ctx, _ in batch:
+                ctx.translation_error, ctx.result = str(exc), None
+            results.extend(batch)
         except StructuredTranslationError as e:
             logger.error(f"Incomplete structured batch translation: {e}")
             for ctx, config in batch:
@@ -325,7 +326,6 @@ async def batch_translate_contexts(
                         ctx.result = None
                 results.append((ctx, config))
 
-        # 强制垃圾回收以释放内存
         owner._empty_device_cache()
 
     return results

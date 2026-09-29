@@ -7,6 +7,7 @@ from typing import Any
 import cv2
 from PIL import Image
 
+from server.batch_stage_eligibility import acquire_stage_resource
 
 async def process_prepare_item(
     scheduler, batch_id: str, item_id: str, instance: Any,
@@ -144,15 +145,14 @@ async def process_checkpointed_ocr_group(
     *, log_token, correlation_id_ctx, logger, deserialize_textlines,
 ) -> None:
     item_ids = [item["id"] for item in claimed]
-    pages = []
-    completed_textless_ids = set()
+    pages, completed_textless_ids = [], set()
     batch_finished = False
     slot = None
     token = correlation_id_ctx.set(f"batch-{log_token(batch_id)}/ocr-{log_token(item_ids[0])}")
     try:
         translator = instance.translator
-        slot = await scheduler._acquire_stage_resource("ocr")
         batch = await scheduler.store.get_batch(batch_id)
+        slot = await acquire_stage_resource(scheduler, batch, claimed[0], "ocr", instance)
         for item in claimed:
             folder = item.get("resultFolder")
             if not isinstance(folder, str):
@@ -254,7 +254,7 @@ async def process_checkpointed_ocr_group(
             scheduler._release_stage_resource("ocr", slot)
         if batch_finished:
             await scheduler._reclaim_batch_memory(batch_id, instance)
-        await scheduler.executors.free_executor(instance)
+        await scheduler.stage_executors.free_executor(instance)
         scheduler._wake.set()
         correlation_id_ctx.reset(token)
 
@@ -281,8 +281,8 @@ async def process_checkpointed_model_group(
     translator = getattr(instance, "translator", None)
     token = correlation_id_ctx.set(f"batch-{log_token(batch_id)}/{stage_id}-{log_token(item_ids[0])}")
     try:
-        slot = await scheduler._acquire_stage_resource(stage_id)
         batch = await scheduler.store.get_batch(batch_id)
+        slot = await acquire_stage_resource(scheduler, batch, claimed[0], stage_id, instance)
         for item in claimed:
             folder = item.get("resultFolder")
             if not isinstance(folder, str):
@@ -424,6 +424,6 @@ async def process_checkpointed_model_group(
             scheduler._release_stage_resource(stage_id, slot)
         if batch_finished:
             await scheduler._reclaim_batch_memory(batch_id, instance)
-        await scheduler.executors.free_executor(instance)
+        await scheduler.stage_executors.free_executor(instance)
         scheduler._wake.set()
         correlation_id_ctx.reset(token)

@@ -101,7 +101,7 @@ async def translate_page_with_retries(owner, config, ctx, translations=None, *, 
             logger.warning('Page translation validation failed on attempt %s/%s: %s', attempt + 1, attempts, reason)
         except GeminiRetryExhausted:
             raise
-        except TranslationProviderUnavailable:
+        except (TranslationProviderUnavailable, TimeoutError):
             raise
         except Exception as exc:
             last_error = exc

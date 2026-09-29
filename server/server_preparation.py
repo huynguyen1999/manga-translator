@@ -25,6 +25,7 @@ def prepare_server(args, runtime):
     runtime.batch_resource_limits = runtime.stage_resource_limits(
         num_workers, cpu_workers, gpu_concurrency=runtime.model_executor_concurrency
     )
+    runtime.batch_stage_executors = runtime.executor_instances
     runtime.logger.info(
         "Pipeline resources: workers=%d inference-page-batch=%d CPU-heavy=%d CPU-light=%d GPU=%d network=%d I/O=%d local-model/process=%d",
         num_workers,
@@ -40,5 +41,9 @@ def prepare_server(args, runtime):
     if not args.start_instance:
         return []
     if executor_mode == runtime.EXECUTOR_MODE_INPROCESS:
-        return runtime._setup_inprocess_workers(args, num_workers, runtime.model_executor_concurrency)
+        procs = runtime._setup_inprocess_workers(args, num_workers, runtime.model_executor_concurrency)
+        runtime.batch_stage_executors = runtime._create_batch_stage_executors(
+            runtime.batch_resource_limits
+        )
+        return procs
     return runtime._setup_subprocess_workers(args, num_workers)

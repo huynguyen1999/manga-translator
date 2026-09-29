@@ -50,7 +50,6 @@ from server.batch_claims import (
 from server.batch_resources import (
     BatchResourceManager,
     MODEL_EXECUTOR_CONCURRENCY,
-    _stage_resource,
     stage_resource_limits,
 )
 from server.batch_memory_limits import inference_page_limit
@@ -97,14 +96,19 @@ class BatchScheduler:
         result_root: str | Path,
         resource_limits: dict[ResourceClass, int] | None = None,
         inference_page_batch_size: int = 2,
+        stage_executors: Any = None,
     ):
         self.store = store
         self.executors = executors
+        self.stage_executors = stage_executors or executors
         self.result_root = Path(result_root).resolve()
         self._wake = asyncio.Event()
         self._loop_task: asyncio.Task | None = None
         self._running: dict[tuple[str, str], asyncio.Task] = {}
         self._running_items: set[tuple[str, str]] = set()
+        self._running_stage_resources: dict[
+            tuple[str, str], tuple[str, ResourceClass]
+        ] = {}
         self._remove_tasks: dict[str, asyncio.Task] = {}
         self._stopping_batches: set[str] = set()
         self._translation_locks: dict[str, asyncio.Lock] = {}
@@ -146,8 +150,10 @@ class BatchScheduler:
     ) -> asyncio.Semaphore:
         return await self._resource_manager.acquire(stage_id, resource)
 
-    async def _acquire_stage_resource(self, stage_id: str) -> asyncio.Semaphore:
-        return await self._resource_manager.acquire_stage(stage_id)
+    async def _acquire_stage_resource(
+        self, stage_id: str, resource: ResourceClass | None = None
+    ) -> asyncio.Semaphore:
+        return await self._resource_manager.acquire_stage(stage_id, resource)
 
     def _release_stage_resource(
         self, stage_id: str, slot: asyncio.Semaphore, resource: ResourceClass | None = None
@@ -155,11 +161,11 @@ class BatchScheduler:
         self._resource_manager.release_stage(stage_id, slot, resource)
 
     async def _find_stage_executor(self) -> Any | None:
-        for _ in range(self.executors.free_executors()):
-            instance = await self.executors.find_executor()
+        for _ in range(self.stage_executors.free_executors()):
+            instance = await self.stage_executors.find_executor()
             if callable(getattr(instance, "_run_translation", None)) and getattr(instance, "translator", None) is not None:
                 return instance
-            await self.executors.free_executor(instance)
+            await self.stage_executors.free_executor(instance)
         return None
 
     async def start(self) -> None:

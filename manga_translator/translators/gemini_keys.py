@@ -12,6 +12,10 @@ class GeminiRetryExhausted(RuntimeError):
     """A Gemini page reached a terminal retry-policy failure."""
 
 
+class GeminiBlockedResponse(RuntimeError):
+    """Gemini returned a prompt or candidate policy block; do not retry it."""
+
+
 class GeminiRequestBudget:
     """Shared per-page budget for all Gemini API requests."""
 

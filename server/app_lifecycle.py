@@ -66,6 +66,7 @@ def create_lifespan(runtime):
                 runtime.SERVER_RESULT_ROOT,
                 resource_limits=runtime.batch_resource_limits,
                 inference_page_batch_size=runtime.inference_page_batch_size,
+                stage_executors=getattr(runtime, "batch_stage_executors", None),
             )
             runtime.set_result_indexer(runtime.postgres_store.sync_result_folder)
             runtime.set_request_lookup(runtime.postgres_store.find_request)
@@ -81,6 +82,7 @@ def create_lifespan(runtime):
                 runtime.SERVER_RESULT_ROOT,
                 resource_limits=runtime.batch_resource_limits,
                 inference_page_batch_size=runtime.inference_page_batch_size,
+                stage_executors=getattr(runtime, "batch_stage_executors", None),
             )
             runtime.set_document_saver(None)
             runtime.set_result_indexer(None)

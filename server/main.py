@@ -63,6 +63,7 @@ from server.worker_runtime import (
     start_translator_client_proc as _start_translator_client_proc_impl,
     supervise_subprocess_workers as _supervise_subprocess_workers_impl,
 )
+from server.batch_stage_workers import create_batch_stage_executors as _create_batch_stage_executors_impl
 from server.server_preparation import prepare_server as _prepare_server_runtime
 from server.myqueue import SummaryQueueElement, task_queue, wait_in_queue
 from server.request_extraction import (
@@ -257,6 +258,7 @@ batch_scheduler = BatchScheduler(
     resource_limits=batch_resource_limits,
     inference_page_batch_size=inference_page_batch_size,
 )
+batch_stage_executors = executor_instances
 summary_scheduler: SummaryScheduler | None = None
 
 
@@ -441,6 +443,10 @@ def _setup_inprocess_workers(args, num_workers: int, model_concurrency: int):
         cpu_threads_per_worker_fn=_cpu_threads_per_worker,
     )
 
+
+def _create_batch_stage_executors(resource_limits):
+    return _create_batch_stage_executors_impl(resource_limits, executor_instances)
+
 def _supervise_subprocess_workers():
     return _supervise_subprocess_workers_impl(
         worker_procs,
@@ -603,8 +609,13 @@ def _summary_input_file(page: dict) -> Path:
     return _summary_input_file_impl(page, _input_file, final_file)
 
 
-async def _persist_summary_ocr(page: dict, regions: list[dict]) -> None:
-    return await _summary_persist_ocr(page, regions, get_store=lambda: _postgres())
+async def _persist_summary_ocr(
+    page: dict,
+    regions: list[dict],
+    panels: list[dict] | None = None,
+    bubbles: list[dict] | None = None,
+) -> None:
+    return await _summary_persist_ocr(page, regions, panels=panels, bubbles=bubbles, get_store=lambda: _postgres())
 
 
 async def _run_summary_ocr_batch(
@@ -819,7 +830,12 @@ if __name__ == '__main__':
     finally:
         shutting_down = True
         model_executors = set()
-        for instance in executor_instances.list:
+        all_executors = list(executor_instances.list)
+        all_executors.extend(
+            instance for instance in batch_stage_executors.list
+            if instance not in all_executors
+        )
+        for instance in all_executors:
             if hasattr(instance, '_model_executor'):
                 model_executors.add(instance._model_executor)
                 instance.close()

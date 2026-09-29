@@ -1,12 +1,14 @@
 """Translate page text with the existing history and provider behavior."""
 
 from .config import Config, Translator
-from .translators import dispatch as dispatch_translation
+from .translators import (
+    dispatch as dispatch_translation,
+    _translation_resource_lease,
+    _wait_for_gpt_translation,
+)
 
 
 async def dispatch_with_context(owner, config: Config, texts: list[str], ctx, *, logger):
-    # 计算实际要使用的上下文页数和跳过的空页数
-    # Calculate the actual number of context pages to use and empty pages to skip
     done_pages = owner.all_page_translations
     if owner.context_size > 0 and done_pages:
         pages_expected = min(owner.context_size, len(done_pages))
@@ -22,12 +24,8 @@ async def dispatch_with_context(owner, config: Config, texts: list[str], ctx, *,
     if owner.context_size > 0:
         logger.info(f"Context-aware translation enabled with {owner.context_size} pages of history")
 
-    # 构建上下文字符串
-    # Build the context string
     prev_ctx = owner._build_prev_context()
 
-    # 如果是 ChatGPT 翻译器，则专门处理上下文注入
-    # Special handling for ChatGPT translator: inject context
     if config.translator.translator == Translator.chatgpt:
         from .translators.chatgpt import OpenAITranslator
         translator = OpenAITranslator()
@@ -41,7 +39,8 @@ async def dispatch_with_context(owner, config: Config, texts: list[str], ctx, *,
         if skipped > 0:
             logger.warning(f"Skipped {skipped} pages with no sentences")
 
-        translated = await translator._translate(ctx.from_lang, config.translator.target_lang, texts)
+        async with _translation_resource_lease(ctx, False, 'cpu' if owner._gpu_limited_memory else owner.device):
+            translated = await _wait_for_gpt_translation(translator._translate(ctx.from_lang, config.translator.target_lang, texts))
         model = getattr(translator, 'model', None) or getattr(translator, 'MODEL', None)
         if isinstance(model, str):
             ctx['translator_model'] = model
@@ -54,7 +53,7 @@ async def dispatch_with_context(owner, config: Config, texts: list[str], ctx, *,
         config.translator,
         owner.use_mtpe,
         ctx,
-        'cpu' if owner._gpu_limited_memory else owner.device
+        'cpu' if owner._gpu_limited_memory else owner.device,
     )
     if ctx.get('offline_model'):
         await owner._report_progress(f'offline_model:{ctx.offline_model}')

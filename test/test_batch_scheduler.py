@@ -9,8 +9,16 @@ from unittest.mock import ANY, AsyncMock, Mock, patch
 
 from PIL import Image
 
+from manga_translator import Config
 from manga_translator.pipeline.stages import ResourceClass
 from server.batch_scheduler import BatchScheduler, stage_resource_limits
+from server.batch_resources import MODEL_EXECUTOR_CONCURRENCY, _stage_resource
+from server.batch_stage_eligibility import (
+    acquire_stage_resource,
+    can_schedule_stage,
+    eligible_queued_items,
+    stage_resource_for,
+)
 from server.batch_store import BatchStore
 
 
@@ -155,7 +163,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(scheduler, "_checkpoint_run", AsyncMock(return_value=run)),
-            patch.object(BatchScheduler, "_config_for", return_value=object()),
+            patch.object(BatchScheduler, "_config_for", return_value=Config()),
         ):
             await scheduler._process_checkpointed_ocr_group(
                 "manga-a", [{"id": "p1", "resultFolder": "page-1"}], instance
@@ -186,14 +194,14 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(item["pipelineStage"] == "detection" for item in claimed))
             self.assertTrue(all(item["stage"] == "detection" for item in claimed))
 
-    async def test_checkpointed_page_stage_runs_on_executor_loop(self):
+    async def test_checkpointed_initialize_updates_resource_before_waiting_for_next_stage(self):
         class Store:
             def __init__(self, input_path):
                 self.input_file = input_path
                 self.manifest = {
                     "id": "manga-a", "status": "waiting", "items": [{
                         "id": "p1", "name": "1.webp", "status": "queued",
-                        "stage": "layout", "pipelineStage": "layout",
+                        "stage": "initialize", "pipelineStage": "initialize",
                         "resultFolder": "page-1",
                     }],
                 }
@@ -214,12 +222,12 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
                     {"id": "input", "status": "completed"},
                     {"id": "colorization", "status": "skipped"},
                     {"id": "upscaling", "status": "skipped"},
-                    {"id": "detection", "status": "completed"},
-                    {"id": "ocr", "status": "completed"},
-                    {"id": "textline_merge", "status": "completed"},
-                    {"id": "bubble_detection", "status": "completed"},
-                    {"id": "translation", "status": "completed"},
-                    {"id": "mask_generation", "status": "completed"},
+                    {"id": "detection", "status": "pending"},
+                    {"id": "ocr", "status": "pending"},
+                    {"id": "textline_merge", "status": "pending"},
+                    {"id": "bubble_detection", "status": "pending"},
+                    {"id": "translation", "status": "pending"},
+                    {"id": "mask_generation", "status": "pending"},
                     {"id": "layout", "status": "pending"},
                     {"id": "inpainting", "status": "pending"},
                     {"id": "rendering", "status": "pending"},
@@ -285,19 +293,30 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             claimed = await scheduler._claim_prepare_item("manga-a", "p1")
             self.assertIsNotNone(claimed)
             self.assertIsNone(claimed.get("stageStartedAt"))
+            scheduler._running_items.add(("manga-a", "p1"))
+            scheduler._running_stage_resources[("manga-a", "p1")] = (
+                "initialize", ResourceClass.IO
+            )
 
-            slot = await scheduler._acquire_stage_resource("layout")
+            slot = await scheduler._acquire_stage_resource(
+                "detection", ResourceClass.CPU_HEAVY
+            )
             waiting_for_slot = asyncio.Event()
             acquire = scheduler._acquire_stage_resource
 
-            async def tracked_acquire(stage_id):
+            async def tracked_acquire(stage_id, resource=None):
+                if stage_id == "detection":
+                    self.assertEqual(
+                        scheduler._running_stage_resources[("manga-a", "p1")],
+                        ("detection", ResourceClass.CPU_HEAVY),
+                    )
                 waiting_for_slot.set()
-                return await acquire(stage_id)
+                return await acquire(stage_id, resource)
 
             scheduler._acquire_stage_resource = tracked_acquire
             with (
                 patch.object(scheduler, "_checkpoint_run", AsyncMock(return_value=run)),
-                patch.object(BatchScheduler, "_config_for", return_value=object()),
+                patch.object(BatchScheduler, "_config_for", return_value=Config()),
             ):
                 process = asyncio.create_task(
                     scheduler._process_checkpointed_prepare_item("manga-a", "p1", instance)
@@ -306,14 +325,16 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
                 try:
                     self.assertNotIn("stageStartedAt", store.manifest["items"][0])
                 finally:
-                    scheduler._release_stage_resource("layout", slot)
+                    scheduler._release_stage_resource(
+                        "detection", slot, ResourceClass.CPU_HEAVY
+                    )
                 await process
 
             self.assertTrue(run.called_on_executor)
-            self.assertEqual(run.called_stage, "layout")
+            self.assertEqual(run.called_stage, "detection")
             self.assertIsNotNone(run.started_at)
-            self.assertEqual(store.manifest["items"][0]["stage"], "inpainting")
-            self.assertEqual(store.manifest["items"][0]["pipelineStage"], "inpainting")
+            self.assertEqual(store.manifest["items"][0]["stage"], "ocr")
+            self.assertEqual(store.manifest["items"][0]["pipelineStage"], "ocr")
 
     async def test_stage_resource_slots_cap_gpu_at_two_and_allow_cpu_work(self):
         limits = stage_resource_limits(4, 3)
@@ -345,7 +366,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
                 scheduler._release_stage_resource("mask_generation", cpu_slot)
 
     async def test_checkpointed_model_group_keeps_stage_retry_and_manifest_transition(self):
-        config = object()
+        config = Config()
         image = Image.new("RGB", (2, 2))
         context = SimpleNamespace(input=image, img_rgb=object(), img_colorized=None, upscaled=None)
 
@@ -417,6 +438,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
     def test_stage_resource_limits_accept_single_gpu_slot(self):
         limits = stage_resource_limits(2, 2, gpu_concurrency=1)
         self.assertEqual(limits[ResourceClass.GPU], 1)
+        self.assertEqual(stage_resource_limits(1, 1, gpu_concurrency=3)[ResourceClass.GPU], 1)
 
     def test_group_progress_only_updates_current_page_outside_translation(self):
         translator = SimpleNamespace(_current_image_context={"request_id": "manga-a:page-2"})
@@ -481,7 +503,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(batch["items"][1]["stage"], "translating")
             self.assertEqual(batch["items"][2]["stage"], "translating")
 
-    def test_professional_translation_waits_for_complete_story_and_job_barrier(self):
+    def test_professional_translation_waits_for_every_page_before_story_analysis(self):
         scheduler = BatchScheduler(None, None, tempfile.gettempdir())
         settings = {
             "translationQuality": "professional",
@@ -505,12 +527,11 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
 
         items[2]["stage"] = "awaiting_translation"
         ready = scheduler._find_ready_translation_group("batch", items, 4, settings)
-        self.assertEqual([item["id"] for item in ready], ["p1", "p2"])
+        self.assertEqual([item["id"] for item in ready], ["p1", "p2", "p3", "p4"])
         items[1].update(status="error", stage="ocr")
-        ready = scheduler._find_ready_translation_group("batch", items, 4, settings)
-        self.assertIsNone(ready)
+        self.assertIsNone(scheduler._find_ready_translation_group("batch", items, 4, settings))
 
-    def test_translation_waits_until_every_page_reaches_the_global_barrier(self):
+    def test_translation_group_is_ready_while_other_pages_finish_preparation(self):
         scheduler = BatchScheduler(None, None, tempfile.gettempdir())
         items = [
             {"id": "p1", "status": "queued", "stage": "detection", "pipelineStage": "detection"},
@@ -520,7 +541,8 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
         ]
 
         self.assertEqual(scheduler._current_batch_stage(items), "detection")
-        self.assertIsNone(scheduler._find_ready_translation_group("batch", items, 2, {}))
+        ready = scheduler._find_ready_translation_group("batch", items, 2, {})
+        self.assertEqual([item["id"] for item in ready], ["p2", "p3"])
 
         for item in items:
             item.update(status="processing", stage="awaiting_translation")
@@ -529,7 +551,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([item["id"] for item in ready], ["p1", "p2"])
 
-    def test_translation_tail_group_ignores_pages_already_past_translation(self):
+    def test_fast_translation_waits_for_batch_size_or_all_remaining_pages(self):
         scheduler = BatchScheduler(None, None, tempfile.gettempdir())
         items = [
             {"id": f"p{i}", "status": "queued", "stage": "queued", "pipelineStage": "mask_generation"}
@@ -543,6 +565,10 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
 
         items.append({"id": "p61", "status": "queued", "stage": "queued", "pipelineStage": "translation"})
         self.assertIsNone(scheduler._find_ready_translation_group("batch", items, 12, {}))
+
+        items[-1].update(status="processing", stage="awaiting_translation")
+        ready = scheduler._find_ready_translation_group("batch", items, 12, {})
+        self.assertEqual([item["id"] for item in ready], ["p60", "p61"])
 
     def test_prepare_stops_after_text_grouping_and_bubble_detection(self):
         scheduler = BatchScheduler(None, None, tempfile.gettempdir())
@@ -571,7 +597,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
         ]})
         self.assertEqual(scheduler._next_batch_stage(next_stage), "textline_merge")
 
-    def test_professional_without_story_segments_keeps_whole_batch_barrier(self):
+    def test_professional_translation_waits_when_a_story_page_fails(self):
         scheduler = BatchScheduler(None, None, tempfile.gettempdir())
         items = [
             {"id": "p1", "status": "processing", "stage": "awaiting_translation"},
@@ -1435,7 +1461,7 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
                 task.cancel()
             await asyncio.gather(*scheduler._running.values(), return_exceptions=True)
 
-    def test_batch_stage_advances_only_after_every_page_clears_the_barrier(self):
+    def test_failed_page_keeps_batch_stage_selection_blocked(self):
         scheduler = BatchScheduler(None, None, tempfile.gettempdir())
         items = [
             {"id": "p1", "status": "queued", "pipelineStage": "translation"},
@@ -1467,6 +1493,350 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(config3.ocr.prob)
         self.assertEqual(BatchScheduler._config_for({}, {"id": "page-1", "name": "1.png"}).ocr.ocr, "48px_ctc")
+
+
+class BatchResourceSchedulingTest(unittest.IsolatedAsyncioTestCase):
+    def test_resource_mapping_follows_effective_model_settings(self):
+        self.assertEqual(
+            _stage_resource("translation", Config(), "cuda"),
+            ResourceClass.NETWORK,
+        )
+        sugoi = Config(translator={"translator_chain": "sugoi:ENG"})
+        self.assertEqual(_stage_resource("translation", sugoi, "cuda"), ResourceClass.GPU)
+        self.assertEqual(_stage_resource("translation", sugoi, "cpu"), ResourceClass.CPU_HEAVY)
+
+        ctd = Config(detector={"detector": "ctd"})
+        self.assertEqual(_stage_resource("detection", ctd, "cuda"), ResourceClass.GPU)
+        self.assertEqual(_stage_resource("detection", ctd, "cpu"), ResourceClass.CPU_HEAVY)
+        paddle = Config(detector={"detector": "paddle"})
+        self.assertEqual(_stage_resource("detection", paddle, "cuda"), ResourceClass.CPU_HEAVY)
+
+        vulkan = Config(upscale={"upscaler": "esrgan", "upscale_ratio": 4})
+        ultrasharp = Config(upscale={"upscaler": "4xultrasharp", "upscale_ratio": 4})
+        self.assertEqual(_stage_resource("upscaling", vulkan, "cpu"), ResourceClass.GPU)
+        self.assertEqual(_stage_resource("upscaling", ultrasharp, "cuda"), ResourceClass.GPU)
+        self.assertEqual(
+            _stage_resource("upscaling", Config(upscale={"upscale_ratio": 1}), "cuda"),
+            ResourceClass.CPU_LIGHT,
+        )
+        self.assertEqual(
+            _stage_resource("upscaling", Config(upscale={"upscale_ratio": 0}), "cuda"),
+            ResourceClass.CPU_LIGHT,
+        )
+        self.assertEqual(
+            _stage_resource("bubble_detection", Config(bubble_detection={"enabled": False}), "cuda"),
+            ResourceClass.CPU_LIGHT,
+        )
+
+    async def test_cpu_stages_share_one_resource_lane_and_gpu_cap(self):
+        limits = stage_resource_limits(3, 2, gpu_concurrency=5)
+        self.assertEqual(limits[ResourceClass.NETWORK], 3)
+        self.assertEqual(limits[ResourceClass.IO], 3)
+
+        scheduler = BatchScheduler(
+            None,
+            None,
+            tempfile.gettempdir(),
+            resource_limits=stage_resource_limits(4, 4, gpu_concurrency=8),
+        )
+        manager = scheduler._resource_manager
+
+        self.assertIs(manager.slots[ResourceClass.CPU_LIGHT], manager.slots[ResourceClass.CPU_HEAVY])
+        self.assertEqual(manager.resource_limits[ResourceClass.GPU], MODEL_EXECUTOR_CONCURRENCY)
+        slot = await manager.acquire("text_grouping", ResourceClass.CPU_LIGHT)
+        self.assertEqual(manager.active_resources("text_grouping"), {ResourceClass.CPU_HEAVY})
+        manager.release_stage("text_grouping", slot, ResourceClass.CPU_LIGHT)
+        self.assertFalse(manager.active_resources("text_grouping"))
+
+    def test_different_resource_stage_can_overlap_but_cpu_family_stays_serial(self):
+        instance = SimpleNamespace(
+            translator=SimpleNamespace(device="cuda", _gpu_limited_memory=False)
+        )
+        scheduler = BatchScheduler(None, SimpleNamespace(list=[instance]), tempfile.gettempdir())
+        with patch.object(scheduler, "_config_for", return_value=Config()):
+            items = [
+                {"id": "api", "status": "processing", "pipelineStage": "translation"},
+                {"id": "layout", "status": "queued", "pipelineStage": "layout"},
+            ]
+            scheduler._running_items.add(("batch", "api"))
+            layout_resource = stage_resource_for(scheduler, {"settings": {}}, items[1], "layout")
+            self.assertTrue(
+                can_schedule_stage(scheduler, "batch", {"settings": {}}, items, "layout", layout_resource)
+            )
+
+            items[1].update(status="processing")
+            scheduler._running_items.add(("batch", "layout"))
+            merge_resource = stage_resource_for(
+                scheduler, {"settings": {}}, {"id": "merge", "settings": {}, "pipelineStage": "textline_merge"},
+                "textline_merge",
+            )
+            self.assertFalse(
+                can_schedule_stage(
+                    scheduler,
+                    "batch", {"settings": {}}, items, "textline_merge", merge_resource
+                )
+            )
+
+    def test_earlier_ready_stage_wins_within_a_resource_lane(self):
+        instance = SimpleNamespace(
+            translator=SimpleNamespace(device="cuda", _gpu_limited_memory=False)
+        )
+        scheduler = BatchScheduler(None, SimpleNamespace(list=[instance]), tempfile.gettempdir())
+        items = [
+            {"id": "gpu", "status": "processing", "stage": "detection", "pipelineStage": "detection"},
+            {"id": "first-cpu", "status": "queued", "stage": "mask_generation", "pipelineStage": "mask_generation"},
+            {"id": "later-cpu", "status": "queued", "stage": "layout", "pipelineStage": "layout"},
+        ]
+        scheduler._running_items.add(("batch", "gpu"))
+
+        eligible = eligible_queued_items(
+            scheduler, "batch", {"settings": {}}, items, instance
+        )
+
+        self.assertEqual(eligible[1]["status"], "queued")
+        self.assertEqual(eligible[2]["status"], "blocked")
+        self.assertEqual(
+            scheduler._find_next_queued_item("batch", eligible)["id"], "first-cpu"
+        )
+
+    async def test_stale_initialize_tracking_uses_runtime_gpu_stage_and_launches_network(self):
+        batch = {
+            "id": "batch",
+            "status": "processing",
+            "settings": {},
+            "items": [
+                {"id": "active", "status": "processing", "pipelineStage": "initialize", "stage": "detection"},
+                {"id": "gpu", "status": "queued", "pipelineStage": "ocr"},
+                {"id": "network", "status": "queued", "pipelineStage": "translation"},
+            ],
+        }
+
+        class Store:
+            async def list_batches(self):
+                return [batch]
+
+            async def mutate(self, _batch_id, mutator):
+                mutator(batch)
+                return batch
+
+        instance = SimpleNamespace(
+            translator=SimpleNamespace(device="cuda", _gpu_limited_memory=False),
+            _run_translation=AsyncMock(),
+        )
+
+        class Executors:
+            list = [instance]
+
+            def free_executors(self):
+                return 1
+
+            async def find_executor(self):
+                return instance
+
+            async def free_executor(self, _instance):
+                pass
+
+        started = asyncio.Event()
+        launched = []
+
+        async def process(_batch_id, item_id, _instance):
+            launched.append(item_id)
+            started.set()
+            await asyncio.Event().wait()
+
+        with patch("server.batch_resource_policy.MODEL_EXECUTOR_CONCURRENCY", 2):
+            scheduler = BatchScheduler(
+                Store(),
+                Executors(),
+                tempfile.gettempdir(),
+                resource_limits=stage_resource_limits(2, 2, gpu_concurrency=2),
+            )
+            gpu_permit = await scheduler._acquire_stage_resource("detection", ResourceClass.GPU)
+            scheduler._running_items.add(("batch", "active"))
+            scheduler._running_stage_resources[("batch", "active")] = (
+                "initialize",
+                ResourceClass.IO,
+            )
+            scheduler._process_prepare_item = process
+
+            try:
+                with patch.object(scheduler, "_config_for", return_value=Config()):
+                    gpu_resource = stage_resource_for(scheduler, batch, batch["items"][1], "ocr", instance)
+                    network_resource = stage_resource_for(
+                        scheduler, batch, batch["items"][2], "translation", instance
+                    )
+                    self.assertEqual(gpu_resource, ResourceClass.GPU)
+                    self.assertEqual(network_resource, ResourceClass.NETWORK)
+                    self.assertFalse(
+                        can_schedule_stage(scheduler, "batch", batch, batch["items"], "ocr", gpu_resource)
+                    )
+                    self.assertTrue(
+                        can_schedule_stage(
+                            scheduler, "batch", batch, batch["items"], "translation", network_resource
+                        )
+                    )
+
+                    self.assertTrue(await scheduler._launch_available())
+                    await asyncio.wait_for(started.wait(), timeout=1)
+                    self.assertEqual(launched, ["network"])
+                    self.assertEqual(batch["items"][1]["status"], "queued")
+            finally:
+                tasks = list(scheduler._running.values())
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                scheduler._release_stage_resource("detection", gpu_permit, ResourceClass.GPU)
+
+    def test_failed_page_keeps_batch_stage_selection_blocked(self):
+        scheduler = BatchScheduler(None, None, tempfile.gettempdir())
+        items = [
+            {"id": "failed", "status": "error", "pipelineStage": "translation"},
+            {"id": "ready", "status": "queued", "pipelineStage": "layout"},
+        ]
+
+        self.assertIsNone(scheduler._current_batch_stage(items))
+
+    async def test_scheduler_launches_ready_next_stage_across_resource_boundary(self):
+        batch = {
+            "id": "batch",
+            "status": "processing",
+            "settings": {},
+            "items": [
+                {"id": "api", "status": "processing", "pipelineStage": "translation", "stage": "translating"},
+                {"id": "layout", "status": "queued", "pipelineStage": "layout"},
+            ],
+        }
+
+        class Store:
+            async def list_batches(self):
+                return [batch]
+
+            async def mutate(self, _batch_id, _mutator):
+                return batch
+
+        class Executors:
+            def __init__(self):
+                self.instance = SimpleNamespace(
+                    translator=SimpleNamespace(device="cuda", _gpu_limited_memory=False),
+                    _run_translation=AsyncMock(),
+                )
+                self.list = [self.instance]
+
+            def free_executors(self):
+                return 1
+
+            async def find_executor(self):
+                return self.instance
+
+            async def free_executor(self, _instance):
+                pass
+
+        stage_executors = Executors()
+        direct_executors = Executors()
+        scheduler = BatchScheduler(
+            Store(),
+            direct_executors,
+            tempfile.gettempdir(),
+            stage_executors=stage_executors,
+        )
+        direct_executors.free = 0
+        direct_executors.free_executors = lambda: direct_executors.free
+        direct_executors.find_executor = AsyncMock(side_effect=AssertionError("direct pool is busy"))
+        scheduler._running_items.add(("batch", "api"))
+        scheduler._claim_prepare_item = AsyncMock(return_value=batch["items"][1])
+        scheduler._process_prepare_item = AsyncMock()
+
+        self.assertTrue(await scheduler._launch_available())
+        await asyncio.sleep(0)
+        self.assertEqual(direct_executors.free_executors(), 0)
+        scheduler._process_prepare_item.assert_awaited_once_with("batch", "layout", ANY)
+        for task in scheduler._running.values():
+            task.cancel()
+        await asyncio.gather(*scheduler._running.values(), return_exceptions=True)
+
+    async def _assert_launch_uses_claimed_worker(self, executor_order, active_device, queued_device):
+        workers = {
+            device: SimpleNamespace(
+                translator=SimpleNamespace(device=device, _gpu_limited_memory=False),
+                _run_translation=AsyncMock(),
+            )
+            for device in {active_device, queued_device}
+        }
+        batch = {
+            "id": "batch",
+            "status": "processing",
+            "settings": {},
+            "items": [
+                {"id": "active", "status": "processing", "pipelineStage": "detection"},
+                {"id": "queued", "status": "queued", "pipelineStage": "ocr"},
+            ],
+        }
+
+        class Store:
+            async def list_batches(self):
+                return [batch]
+
+            async def mutate(self, _batch_id, mutator):
+                mutator(batch)
+                return batch
+
+        class Executors:
+            def __init__(self):
+                self.list = [workers[device] for device in executor_order]
+                self.available = [workers[queued_device]]
+
+            def free_executors(self):
+                return len(self.available)
+
+            async def find_executor(self):
+                return self.available.pop(0)
+
+            async def free_executor(self, instance):
+                self.available.append(instance)
+
+        executors = Executors()
+        scheduler = BatchScheduler(Store(), executors, tempfile.gettempdir())
+        scheduler._running_items.add(("batch", "active"))
+        config = Config(detector={"detector": "ctd"})
+        active_resource = (
+            ResourceClass.GPU if active_device == "cuda" else ResourceClass.CPU_HEAVY
+        )
+
+        called = asyncio.Event()
+
+        async def process(_batch_id, _item_id, instance):
+            scheduler.selected_instance = instance
+            called.set()
+            await executors.free_executor(instance)
+
+        scheduler._process_prepare_item = process
+        with patch.object(scheduler, "_config_for", return_value=config):
+            permit = await acquire_stage_resource(
+                scheduler, batch, batch["items"][0], "detection", workers[active_device]
+            )
+            self.assertEqual(
+                scheduler._resource_manager.active_resources("detection"), {active_resource}
+            )
+            try:
+                self.assertTrue(await scheduler._launch_available())
+                await called.wait()
+                self.assertIs(scheduler.selected_instance, workers[queued_device])
+                queued_resource = stage_resource_for(
+                    scheduler, batch, batch["items"][1], "ocr", workers[queued_device]
+                )
+                self.assertEqual(
+                    queued_resource,
+                    ResourceClass.GPU if queued_device == "cuda" else ResourceClass.CPU_HEAVY,
+                )
+            finally:
+                scheduler._release_stage_resource("detection", permit)
+                await asyncio.gather(*scheduler._running.values(), return_exceptions=True)
+
+    async def test_cpu_first_pool_uses_claimed_gpu_for_permit_and_overlap(self):
+        await self._assert_launch_uses_claimed_worker(["cpu", "cuda"], "cpu", "cuda")
+
+    async def test_gpu_first_pool_uses_claimed_cpu_for_permit_and_overlap(self):
+        await self._assert_launch_uses_claimed_worker(["cuda", "cpu"], "cuda", "cpu")
 
 
 if __name__ == "__main__":

@@ -125,14 +125,15 @@ def assign_regions_to_panels(
         # Check explicit panel_index if available
         assigned_idx = None
         if isinstance(item, dict):
-            if "panel_index" in item and 0 <= item["panel_index"] < len(panels):
-                assigned_idx = int(item["panel_index"])
-            elif item.get("region") is not None and hasattr(item["region"], "panel_index"):
-                pi = item["region"].panel_index
-                if 0 <= pi < len(panels):
-                    assigned_idx = int(pi)
-        elif hasattr(item, "panel_index") and 0 <= item.panel_index < len(panels):
-            assigned_idx = int(item.panel_index)
+            pi = item.get("panel_index")
+            if pi is None and item.get("region") is not None and hasattr(item["region"], "panel_index"):
+                pi = getattr(item["region"], "panel_index", None)
+            if isinstance(pi, (int, float)) and not isinstance(pi, bool) and 0 <= int(pi) < len(panels):
+                assigned_idx = int(pi)
+        elif hasattr(item, "panel_index"):
+            pi = getattr(item, "panel_index", None)
+            if isinstance(pi, (int, float)) and not isinstance(pi, bool) and 0 <= int(pi) < len(panels):
+                assigned_idx = int(pi)
 
         if assigned_idx is not None:
             panels_grouped[assigned_idx].append(item)

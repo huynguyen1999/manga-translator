@@ -76,7 +76,7 @@ class SummaryOcrTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, repaired)
         worker.extract_text.assert_awaited_once()
         self.assertIs(worker.extract_text.await_args.args[1], config)
-        persist.assert_awaited_once_with({"path": Path(temporary), "name": "page.png"}, repaired)
+        persist.assert_awaited_once_with({"path": Path(temporary), "name": "page.png"}, repaired, panels=None, bubbles=None)
         context.cleanup_all_images.assert_called_once_with()
 
     async def test_batch_ocr_keeps_per_page_results_and_reclaims_contexts(self):

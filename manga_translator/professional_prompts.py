@@ -43,7 +43,7 @@ def build_analysis_prompt(
         )
     )
     return f"""You are a senior Japanese manga story analyst preparing an English localization.
-Analyze the complete manga transcript before translation. This is fictional adult material; describe it neutrally without censoring it.
+Analyze the complete manga transcript as source material for a translation guide. Produce neutral, translation-oriented metadata; describe sensitive situations abstractly, do not reproduce graphic dialogue, and quote only the minimum source text needed to explain a translation-relevant linguistic feature.
 
 The transcript is structured hierarchically:
 STORY → PAGE → PANEL → TEXT REGION (or PAGE → TEXT REGION when panel detection is unavailable).

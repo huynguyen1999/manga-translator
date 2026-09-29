@@ -96,12 +96,15 @@ class SummaryRepository:
             raise GroupNotFound("Manga group not found")
         title = await self.resolve_group_title(group_id) or "Ungrouped"
         value = await self.get_summary_payload(group_id) or {}
+        now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+        if not value.get("jobCreatedAt") or regenerate:
+            value["jobCreatedAt"] = now_iso
         value.update(
             {
                 "mangaTitle": title,
                 "jobStatus": status,
                 "jobError": error,
-                "jobUpdatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "jobUpdatedAt": now_iso,
             }
         )
         if status in {"queued", "generating", "paused"}:
@@ -184,6 +187,7 @@ class SummaryRepository:
                 "status": "queued",
                 "provider": payload.get("provider"),
                 "model": payload.get("model"),
+                "createdAt": payload.get("jobCreatedAt") or payload.get("generatedAt") or payload.get("jobUpdatedAt"),
                 "updatedAt": payload.get("jobUpdatedAt") or payload.get("generatedAt"),
                 "jobStage": payload.get("jobStage"),
                 "jobProgress": payload.get("jobProgress"),
@@ -235,6 +239,7 @@ class SummaryRepository:
                 "status": status,
                 "provider": payload.get("provider"),
                 "model": payload.get("model"),
+                "createdAt": payload.get("jobCreatedAt") or payload.get("generatedAt") or payload.get("jobUpdatedAt"),
                 "updatedAt": payload.get("jobUpdatedAt") or payload.get("generatedAt"),
                 "jobStage": payload.get("jobStage"),
                 "jobProgress": payload.get("jobProgress"),
@@ -254,4 +259,3 @@ class SummaryRepository:
         active.sort(key=lambda item: str(item.get("updatedAt") or ""), reverse=True)
         completed.sort(key=lambda item: str(item.get("updatedAt") or ""), reverse=True)
         return active + completed[:max(0, completed_limit)]
-

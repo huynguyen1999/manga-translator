@@ -506,21 +506,24 @@ class OpenAITranslator(ConfigGPT, CommonTranslator):
 
             try:
                 # 等待请求
-                while not req_task.done():
-                    await asyncio.sleep(0.1)
-                    if time.time() - started > self._TIMEOUT:
-                        # 超时 => 取消请求并重试
-                        timeout_attempt += 1
-                        if timeout_attempt > self._TIMEOUT_RETRY_ATTEMPTS:
-                            raise TimeoutError(
-                                f"OpenAI request timed out after {self._TIMEOUT_RETRY_ATTEMPTS} attempts."
-                            )
-                        self.logger.warning(f"Request timed out, retrying... (attempt={timeout_attempt})")
-                        req_task.cancel()
-                        break
-                else:
-                    # 如果正常完成了
-                    return req_task.result()
+                try:
+                    while not req_task.done():
+                        await asyncio.sleep(0.1)
+                        if time.time() - started > self._TIMEOUT:
+                            # 超时 => 取消请求并重试
+                            timeout_attempt += 1
+                            if timeout_attempt > self._TIMEOUT_RETRY_ATTEMPTS:
+                                raise TimeoutError(
+                                    f"OpenAI request timed out after {self._TIMEOUT_RETRY_ATTEMPTS} attempts."
+                                )
+                            self.logger.warning(f"Request timed out, retrying... (attempt={timeout_attempt})")
+                            req_task.cancel()
+                            break
+                    else:
+                        # 如果正常完成了
+                        return req_task.result()
+                finally:
+                    req_task.cancel()
 
             except openai.RateLimitError:
                 # 限流 => 重试

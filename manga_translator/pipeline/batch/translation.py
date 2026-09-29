@@ -9,6 +9,8 @@ from manga_translator.translators import (
     GPT_TRANSLATORS,
     dispatch as dispatch_translation,
     dispatch_structured as dispatch_structured_translation,
+    _translation_resource_lease,
+    _wait_for_gpt_translation,
 )
 from manga_translator.utils import is_preserved_region
 
@@ -65,8 +67,8 @@ async def concurrent_translate_contexts(owner, contexts_with_configs, *, logger)
                         batch_index=batch_index,
                         batch_original_texts=batch_original_texts
                     )
-                except Exception:
-                    if owner._uses_gemini(config):
+                except Exception as exc:
+                    if owner._uses_gemini(config) or isinstance(exc, TimeoutError):
                         raise
                     translated = []
                 for i, value in zip(translatable_indices, translated):
@@ -259,7 +261,7 @@ async def batch_translate_texts(
 
     # 如果是ChatGPT翻译器，需要处理上下文
     if config.translator.translator == Translator.chatgpt:
-        from .translators.chatgpt import OpenAITranslator
+        from ...translators.chatgpt import OpenAITranslator
         translator = OpenAITranslator()
 
         # 确定是否使用并发模式和原文上下文
@@ -298,11 +300,8 @@ async def batch_translate_texts(
         if skipped > 0:
             logger.warning(f"Skipped {skipped} pages with no sentences")
 
-        return await translator._translate(
-            ctx.from_lang,
-            config.translator.target_lang,
-            texts
-        )
+        async with _translation_resource_lease(ctx, False, 'cpu' if owner._gpu_limited_memory else owner.device):
+            return await _wait_for_gpt_translation(translator._translate(ctx.from_lang, config.translator.target_lang, texts))
 
     else:
         # 使用通用翻译调度器

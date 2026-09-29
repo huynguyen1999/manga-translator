@@ -131,17 +131,20 @@ class DeepseekTranslator(CommonGPTTranslator):
         request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
         started = time.time()
         timeout_attempt = 0
-        while not request_task.done():
-            await asyncio.sleep(0.1)
-            if time.time() - started > self._TIMEOUT + (timeout_attempt * self._TIMEOUT / 2):
-                if timeout_attempt >= self._TIMEOUT_RETRY_ATTEMPTS:
-                    raise Exception('deepseek servers did not respond quickly enough.')
-                timeout_attempt += 1
-                self.logger.warning(f'Restarting request due to timeout. Attempt: {timeout_attempt}')
-                request_task.cancel()
-                request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
-                started = time.time()
-        return await request_task
+        try:
+            while not request_task.done():
+                await asyncio.sleep(0.1)
+                if time.time() - started > self._TIMEOUT + (timeout_attempt * self._TIMEOUT / 2):
+                    if timeout_attempt >= self._TIMEOUT_RETRY_ATTEMPTS:
+                        raise Exception('deepseek servers did not respond quickly enough.')
+                    timeout_attempt += 1
+                    self.logger.warning(f'Restarting request due to timeout. Attempt: {timeout_attempt}')
+                    request_task.cancel()
+                    request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
+                    started = time.time()
+            return await request_task
+        finally:
+            request_task.cancel()
 
     def _parse_deepseek_batch_response(
         self, response: str, prompt_queries: List[str], query_size: int, attempt: int
@@ -338,7 +341,6 @@ class DeepseekTranslator(CommonGPTTranslator):
                 self.token_count += total_tokens
                 self.token_count_last = total_tokens
             
-            # 获取响应文本
             # Get the response text
             for choice in response.choices:
                 if hasattr(choice, 'text') and choice.text:
@@ -346,7 +348,6 @@ class DeepseekTranslator(CommonGPTTranslator):
                 if isinstance(choice, dict) and 'text' in choice and choice['text']:
                     return choice['text']
 
-            # 如果响应中包含推理内容，记录下来
             # Log reasoning content if available
             first_choice = response.choices[0] if response.choices else None
             msg = getattr(first_choice, 'message', None) if first_choice is not None else None
@@ -370,7 +371,6 @@ class DeepseekTranslator(CommonGPTTranslator):
                     return content
                 
             # If no response with text is found, return the first response's content (which may be empty)
-            # 如果没有找到包含文本的响应，则返回第一个响应的内容（可能为空）
             return response.choices[0].message.content
         
         except Exception as e:

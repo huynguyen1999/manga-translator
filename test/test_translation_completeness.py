@@ -215,6 +215,13 @@ class TranslationCompletenessTests(unittest.TestCase):
         with self.assertRaisesRegex(TranslationProviderUnavailable, 'bridge unavailable'):
             asyncio.run(translator._translate_page_with_retries(config, ctx))
         translator._dispatch_with_context.assert_awaited_once()
+
+    def test_translation_request_timeout_is_not_retried(self):
+        translator, config, ctx = setup_page()
+        translator._dispatch_with_context.side_effect = TimeoutError('request exceeded 60 seconds')
+        with self.assertRaisesRegex(TimeoutError, 'request exceeded 60 seconds'):
+            asyncio.run(translator._translate_page_with_retries(config, ctx))
+        translator._dispatch_with_context.assert_awaited_once()
     
     
     def test_complete_values_do_not_call_provider(self):

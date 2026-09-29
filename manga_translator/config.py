@@ -373,8 +373,10 @@ class TranslatorConfig(BaseModel):
     """Language translator to use"""
     target_lang: str = 'ENG' #todo: validate VALID_LANGUAGES #todo: convert to enum
     """Destination language"""
+    analysis_translator: Optional[Translator] = None
+    """LLM used for story boundaries, character voice, and narrative guide in Professional mode."""
     draft_translator: Optional[Translator] = None
-    """Legacy saved setting; accepted for compatibility but unused by professional mode."""
+    """Legacy alias for analysis_translator; accepted for compatibility."""
     translation_quality: str = 'fast'
     """Translation workflow: fast or professional."""
     translation_batch_size: int = 20
@@ -409,14 +411,14 @@ class TranslatorConfig(BaseModel):
     _translator_gen = None
     _gpt_config = None
 
-    @field_validator("draft_translator", mode="before")
+    @field_validator("analysis_translator", "draft_translator", mode="before")
     @classmethod
-    def _validate_draft_translator(cls, value: Any) -> Optional[Translator]:
-        if value in (None, "", "none"):
+    def _validate_analysis_translator(cls, value: Any) -> Optional[Translator]:
+        if value in (None, "", "none", "auto"):
             return None
         if isinstance(value, str):
             val = value.strip().lower()
-            if val in ("", "none"):
+            if val in ("", "none", "auto"):
                 return None
             return Translator(val)
         return value

@@ -3,8 +3,9 @@ import { Icon } from "@iconify/react";
 import type { TranslatorKey } from "@/types";
 import { validTranslators } from "@/types";
 import { getTranslatorName, getTranslatorGroup } from "@/utils/getTranslatorName";
-import { languageOptions, fontOptions } from "@/config";
+import { languageOptions, fontOptions, summaryModelOptions, storyAnalysisModelOptions } from "@/config";
 import { LabeledSelect } from "@/components/LabeledSelect";
+import { LabeledInput } from "@/components/LabeledInput";
 import { OptionsEnhancements } from "@/features/studio/options/OptionsEnhancements";
 import { OptionsAdvancedPipeline } from "@/features/studio/options/OptionsAdvancedPipeline";
 import type { OptionsPanelProps } from "@/features/studio/options/OptionsTypes";
@@ -15,13 +16,15 @@ import type { TranslationSettings } from "@/types";
 export type Props = OptionsPanelProps;
 export type { OptionsPanelProps };
 
-const API_TRANSLATORS: TranslatorKey[] = [
+const BATCH_TRANSLATORS: TranslatorKey[] = [
   "deepseek",
   "gemini",
   "openai",
   "groq",
   "openrouter",
   "custom_openai",
+  "sakura",
+  "deepl",
 ];
 
 export const OptionsPanel: React.FC<OptionsPanelProps> = ({
@@ -35,6 +38,7 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
   summaryModel,
   targetLanguage,
   translationQuality,
+  draftTranslator,
   inpaintingSize,
   customUnclipRatio,
   customBoxThreshold,
@@ -63,6 +67,7 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
   setSummaryModel,
   setTargetLanguage,
   setTranslationQuality,
+  setDraftTranslator,
   setInpaintingSize,
   setCustomUnclipRatio,
   setCustomBoxThreshold,
@@ -113,7 +118,7 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
     setTranslationBatchSize(20);
   };
 
-  const isApiTranslator = API_TRANSLATORS.includes(translator);
+  const isBatchTranslator = BATCH_TRANSLATORS.includes(translator);
 
   const getCurrentSettings = (): TranslationSettings => ({
     detectionResolution,
@@ -245,23 +250,6 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
               <Icon icon="carbon:translate" className="h-3.5 w-3.5" />
               <span>Translation & AI Engine</span>
             </div>
-            {isApiTranslator && (
-              <div className="flex items-center space-x-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                <span>Batch:</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={translationBatchSize}
-                  onChange={(e) =>
-                    setTranslationBatchSize(Math.min(100, Math.max(1, Number(e.target.value) || 1)))
-                  }
-                  className="w-12 rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-center text-xs font-medium text-zinc-800 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-                  title="Maximum pages combined into one AI translation request"
-                />
-                <span className="text-[10px] text-zinc-400">pgs</span>
-              </div>
-            )}
           </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -294,7 +282,7 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
             />
           </div>
 
-          <div className="grid grid-cols-1 gap-3">
+          <div className={`grid grid-cols-1 gap-3 ${isBatchTranslator ? "sm:grid-cols-2" : ""}`}>
             <LabeledSelect
               id="translationQuality"
               label="Translation Quality"
@@ -313,6 +301,46 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
               tooltip="Professional LLMs use story and prior-chunk context for each chunk; offline engines translate directly"
             />
 
+            {isBatchTranslator && (
+              <LabeledInput
+                id="translationBatchSize"
+                label="Batch Translation Size"
+                icon="carbon:layers"
+                title="Maximum pages combined into one AI or DeepL translation request"
+                min={1}
+                max={100}
+                step={1}
+                value={translationBatchSize}
+                onChange={(val) =>
+                  setTranslationBatchSize(Math.min(100, Math.max(1, Number(val) || 1)))
+                }
+                tooltip="Maximum number of pages combined into a single LLM or DeepL translation request (1–100 pages, default 20)."
+              />
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <LabeledSelect
+              id="draftTranslator"
+              label="Story Analysis Model"
+              icon="carbon:analytics"
+              title="Story analysis model"
+              value={draftTranslator || ""}
+              onChange={(val) => setDraftTranslator?.(val as TranslatorKey | "")}
+              options={storyAnalysisModelOptions}
+              tooltip="AI model for story boundaries, character voice, and narrative guide in Professional mode."
+            />
+
+            <LabeledSelect
+              id="summaryModel"
+              label="Manga Synopsis Model"
+              icon="carbon:document-sentiment"
+              title="Manga synopsis model"
+              value={summaryModel}
+              onChange={setSummaryModel}
+              options={summaryModelOptions}
+              tooltip="Global model used for generating manga series summaries in the Gallery."
+            />
           </div>
         </div>
 
@@ -412,8 +440,6 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
         setBubbleDetection={setBubbleDetection}
         bubbleConfidence={bubbleConfidence}
         setBubbleConfidence={setBubbleConfidence}
-        summaryModel={summaryModel}
-        setSummaryModel={setSummaryModel}
       />
     </div>
   );

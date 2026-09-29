@@ -4,6 +4,10 @@ import unittest
 from unittest.mock import patch
 
 from server.in_process_executor import InProcessExecutorInstance
+from server.instance import Executors
+from server.batch_resource_policy import batch_stage_executor_count
+from server.batch_stage_workers import create_batch_stage_executors
+from manga_translator.pipeline.stages import ResourceClass
 from server.main import _cpu_stage_worker_count, _cpu_threads_per_worker
 from manga_translator.utils.inference import ModelWrapper
 from manga_translator.utils.model_cache import SharedModelExecutor, get_model_cache, model_operation
@@ -39,6 +43,32 @@ class FakeTranslator:
 
 
 class InProcessExecutorTest(unittest.IsolatedAsyncioTestCase):
+    def test_batch_stage_workers_are_per_resource_lane(self):
+        limits = {
+            ResourceClass.IO: 3,
+            ResourceClass.GPU: 1,
+            ResourceClass.CPU_HEAVY: 3,
+            ResourceClass.CPU_LIGHT: 3,
+            ResourceClass.NETWORK: 3,
+        }
+        self.assertEqual(batch_stage_executor_count(limits), 10)
+
+        class FakeInProcessExecutor:
+            def __init__(self, worker_id, translator_params, model_executor):
+                self.worker_id = worker_id
+                self.translator_params = translator_params
+                self._model_executor = model_executor
+
+        original = FakeInProcessExecutor(0, {"use_gpu": True}, object())
+        base_pool = Executors()
+        base_pool.register(original)
+        with patch("server.batch_stage_workers.InProcessExecutorInstance", FakeInProcessExecutor):
+            stage_pool = create_batch_stage_executors(limits, base_pool)
+
+        self.assertEqual(stage_pool.free_executors(), 10)
+        self.assertEqual(stage_pool.list[-1].worker_id, 10)
+        self.assertTrue(all(worker._model_executor is original._model_executor for worker in stage_pool.list))
+
     def test_cpu_stage_budget_is_worker_and_cpu_bounded(self):
         self.assertEqual(_cpu_stage_worker_count(1, cpu_count=8), 1)
         self.assertEqual(_cpu_stage_worker_count(2, cpu_count=8), 2)

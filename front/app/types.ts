@@ -232,8 +232,7 @@ export interface TranslationSettings {
   ocr?: string;
   renderTextDirection: string;
   letterCase?: "none" | "uppercase" | "lowercase";
-  uppercase?: boolean;
-  lowercase?: boolean;
+  uppercase?: boolean; lowercase?: boolean;
   translator: TranslatorKey;
   summaryModel?: string;
   translatorModel?: string;
@@ -354,6 +353,7 @@ export interface MangaSummary {
   model?: string | null;
   language?: string | null;
   generatedAt?: string | null;
+  jobCreatedAt?: string | null;
   sourceFingerprint?: string | null;
   stale: boolean;
   jobStatus?: "queued" | "generating" | "paused" | "ready" | "error" | null;
@@ -389,6 +389,7 @@ export interface SummaryJob {
   status: "queued" | "generating" | "paused" | "ready" | "error";
   provider?: string | null;
   model?: string | null;
+  createdAt?: string | null;
   updatedAt?: string | null;
   jobStage?: SummaryJobStage | null;
   jobProgress?: number | null;

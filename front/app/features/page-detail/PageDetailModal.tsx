@@ -205,7 +205,7 @@ export const PageDetailModal: React.FC<PageDetailModalProps> = ({
   const model = stepSettings.translation.model;
   const timing = resolveTranslationTiming(pipelineManifest, image.finishedAt, image.startedAt, image.durationMs);
   const originalTextAvailable = Boolean(
-    image.hasTextRegions || image.textRegionsUrl || (bubbleCount !== null && bubbleCount > 0),
+    image.hasTextRegions || image.textRegionsUrl || (bubbleCount !== null && bubbleCount > 0) || resolvedBubbleMaskUrl,
   );
   const handleTextRegionsLoaded = useCallback((blocks: EditableTextBlock[]) => {
     setBubbleCount(blocks.length); setReviewBubbleCount(blocks.filter((block) => block.review_required).length); setOriginalRegionCount(countOriginalTextRegions(blocks));

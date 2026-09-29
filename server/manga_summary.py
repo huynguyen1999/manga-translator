@@ -18,7 +18,7 @@ from manga_translator.professional_panels import (
     read_page_panels,
     read_page_regions,
 )
-from manga_translator.professional_prompts import build_synopsis_system_prompt
+from server.summary_completion import _summary_completion, summary_error_details
 
 try:
     import openai
@@ -52,27 +52,6 @@ def get_summary_chunk_limit(provider: str | None, model: str | None = None) -> i
         default_limit = DEFAULT_SUMMARY_CHUNK_LIMIT
 
     return DEFAULT_SUMMARY_CHUNK_LIMITS.get(normalized_provider, default_limit)
-
-
-def summary_error_details(exc: BaseException) -> str:
-    detail = str(exc).strip() or type(exc).__name__
-    request = getattr(exc, "request", None)
-    method = getattr(request, "method", None)
-    url = getattr(request, "url", None)
-    if method and url:
-        detail += f" request={method} {str(url).split('?', 1)[0]}"
-
-    causes = []
-    cause = exc.__cause__ or exc.__context__
-    while cause is not None:
-        cause_detail = type(cause).__name__
-        if str(cause).strip():
-            cause_detail += f": {str(cause).strip()}"
-        causes.append(cause_detail)
-        cause = cause.__cause__ or cause.__context__
-    if causes:
-        detail += f" cause={' -> '.join(causes)}"
-    return detail
 
 
 def _natural_key(value: str) -> list[int | str]:
@@ -238,11 +217,14 @@ def update_summary_job(
     refresh_text: bool | None = None, regenerate: bool | None = None, stage_passed_count: int | None = None,
 ) -> None:
     value = load_summary(result_root, title) or {}
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    if not value.get("jobCreatedAt") or regenerate:
+        value["jobCreatedAt"] = now_iso
     value.update({
         "mangaTitle": _clean_title(title),
         "jobStatus": status,
         "jobError": error,
-        "jobUpdatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "jobUpdatedAt": now_iso,
     })
     if status in {"queued", "generating", "paused"}:
         value["jobDismissed"] = False
@@ -347,6 +329,7 @@ def list_runnable_summary_jobs(result_root: Path) -> list[dict[str, Any]]:
             "status": "queued",
             "provider": value.get("provider"),
             "model": value.get("model"),
+            "createdAt": value.get("jobCreatedAt") or value.get("generatedAt") or value.get("jobUpdatedAt"),
             "updatedAt": value.get("jobUpdatedAt") or value.get("generatedAt"),
             "jobStage": value.get("jobStage"),
             "jobProgress": value.get("jobProgress"),
@@ -390,6 +373,7 @@ def list_summary_jobs(result_root: Path, completed_limit: int = 20) -> list[dict
             "status": status,
             "provider": value.get("provider"),
             "model": value.get("model"),
+            "createdAt": value.get("jobCreatedAt") or value.get("generatedAt") or value.get("jobUpdatedAt"),
             "updatedAt": value.get("jobUpdatedAt") or value.get("generatedAt"),
             "jobStage": value.get("jobStage"),
             "jobProgress": value.get("jobProgress"),
@@ -457,6 +441,7 @@ def synopsis_status(
         "model": saved.get("model") if saved else None,
         "language": saved.get("language") if saved else None,
         "generatedAt": saved.get("generatedAt") if saved else None,
+        "jobCreatedAt": saved.get("jobCreatedAt") if saved else None,
         "sourceFingerprint": saved.get("sourceFingerprint") if saved else snapshot["fingerprint"],
         "stale": bool(
             saved and saved.get("summary") and saved.get("sourceFingerprint")
@@ -526,9 +511,6 @@ async def generate_synopsis(
     model: str | None = None,
     chunk_limit: int | None = None,
 ) -> str:
-    if openai is None:
-        raise RuntimeError("The OpenAI client is not installed")
-
     provider, resolved_model, api_key, base_url = resolve_summary_model(model)
 
     if chunk_limit is None or chunk_limit <= 0:
@@ -538,11 +520,22 @@ async def generate_synopsis(
     if not chunks:
         raise ValueError("No original text was found in this manga")
 
-    client = openai.AsyncOpenAI(
-        api_key=api_key or "unused",
-        base_url=base_url,
-        max_retries=0,
-    )
+    if provider == "gemini":
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(
+            api_key=api_key or "unused",
+            http_options=types.HttpOptions(timeout=90_000),
+        )
+    else:
+        if openai is None:
+            raise RuntimeError("The OpenAI client is not installed")
+        client = openai.AsyncOpenAI(
+            api_key=api_key or "unused",
+            base_url=base_url,
+            max_retries=0,
+        )
     try:
         concurrency = asyncio.Semaphore(4)
 
@@ -565,15 +558,18 @@ async def generate_synopsis(
             partials = await complete_chunks(merged_chunks, merge=True)
         return partials[0].strip()
     finally:
-        close = getattr(client, "close", None)
-        if close:
-            result = close()
-            if hasattr(result, "__await__"):
-                await result
+        for close in (
+            getattr(getattr(client, "aio", None), "aclose", None),
+            getattr(client, "close", None),
+        ):
+            if close:
+                result = close()
+                if hasattr(result, "__await__"):
+                    await result
 
 
 def resolve_summary_model(model: str | None) -> tuple[str, str, str, str]:
-    """Resolve a UI model value to provider, model, key, and OpenAI-compatible URL."""
+    """Resolve a UI model value to provider, model, key, and API base URL."""
     from manga_translator.translators import keys
 
     raw = (model or "").strip()
@@ -609,48 +605,3 @@ def resolve_summary_model(model: str | None) -> tuple[str, str, str, str]:
 
     default_model, api_key, base_url = defaults[provider]
     return provider, requested_model or default_model, api_key, base_url
-
-
-async def _summary_completion(
-    client,
-    language: str,
-    text: str,
-    merge: bool,
-    model: str,
-    provider: str,
-) -> str:
-    instruction = (
-        "Combine the supplied partial summaries into one spoiler-inclusive synopsis. Deduplicate overlapping "
-        "events and recurring explanations, preserve causal order within each story, keep every detail attached "
-        "to the correct story, and never combine unrelated stories or invent continuity between them."
-        if merge
-        else "Create a detailed, spoiler-inclusive synopsis from the supplied original manga dialogue and narration."
-    )
-    request_options = {
-        "temperature": 0.5,
-        "max_tokens": 8192,
-    }
-    if provider == "deepseek":
-        request_options["extra_body"] = {"thinking": {"type": "disabled"}}
-    response = await client.with_options(timeout=90.0).chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": build_synopsis_system_prompt(instruction, language),
-            },
-            {"role": "user", "content": text},
-        ],
-        **request_options,
-    )
-    choices = getattr(response, "choices", None) or []
-    choice = choices[0] if choices else None
-    message = getattr(choice, "message", None)
-    content = getattr(message, "content", None)
-    if not isinstance(content, str) or not content.strip():
-        finish_reason = getattr(choice, "finish_reason", None)
-        detail = f"{provider.title()} returned no text"
-        if finish_reason:
-            detail += f" (finish reason: {finish_reason})"
-        raise RuntimeError(detail)
-    return content.strip()

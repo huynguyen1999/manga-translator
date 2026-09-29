@@ -7,20 +7,16 @@ import io
 import json
 import os
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from fastapi import Request
 
 from manga_translator.config import Config
 
 
-
 def summary_target_language(pages: list[dict]) -> str:
     """Use the target saved on the naturally last page, as the UI does."""
-    if pages and all(
-        page.get("meta", {}).get("sourceType") == "original"
-        for page in pages
-    ):
+    if pages and all(page.get("meta", {}).get("sourceType") == "original" for page in pages):
         return "ENG"
     valid_languages = {
         "CHS", "CHT", "CSY", "NLD", "ENG", "FRA", "DEU", "HUN", "ITA", "JPN",
@@ -31,10 +27,8 @@ def summary_target_language(pages: list[dict]) -> str:
         settings = pages[-1].get("meta", {}).get("settings", {})
         if isinstance(settings, dict):
             value = settings.get("targetLanguage") or settings.get("target_lang")
-            if isinstance(value, str) and value.strip():
-                value = value.strip().upper()
-                if value in valid_languages:
-                    return value
+            if isinstance(value, str) and value.strip() and value.strip().upper() in valid_languages:
+                return value.strip().upper()
     return "ENG"
 
 
@@ -46,12 +40,10 @@ def safe_setting(value, allowed: set[str], default: str) -> str:
 def ocr_config(page: dict, target_language: str, safe_setting_fn) -> Config:
     from manga_translator.config import Detector, Inpainter, Ocr, Renderer, Translator
 
-    settings = page.get("meta", {}).get("settings", {})
-    settings = settings if isinstance(settings, dict) else {}
+    settings = page.get("meta", {}).get("settings", {}) or {}
     detector = safe_setting_fn(
         settings.get("textDetector") or settings.get("detector"),
-        {item.value for item in Detector},
-        Detector.default.value,
+        {item.value for item in Detector}, Detector.default.value,
     )
     ocr = safe_setting_fn(settings.get("ocr"), {item.value for item in Ocr}, Ocr.ocr48px_ctc.value)
     try:
@@ -71,18 +63,9 @@ def ocr_config(page: dict, target_language: str, safe_setting_fn) -> Config:
     config = Config(
         original_name=page["name"],
         manga_title=page.get("meta", {}).get("mangaTitle"),
-        detector={
-            "detector": detector,
-            "detection_size": detection_size,
-            "box_threshold": box_threshold,
-            "unclip_ratio": unclip_ratio,
-        },
+        detector={"detector": detector, "detection_size": detection_size, "box_threshold": box_threshold, "unclip_ratio": unclip_ratio},
         ocr={"ocr": ocr},
-        translator={
-            "translator": Translator.original.value,
-            "target_lang": "ENG" if source_type == "original" else target_language,
-            "no_text_lang_skip": True,
-        },
+        translator={"translator": Translator.original.value, "target_lang": "ENG" if source_type == "original" else target_language, "no_text_lang_skip": True},
         render={"renderer": Renderer.none.value},
         inpainter={"inpainter": Inpainter.original.value},
         colorizer={"colorizer": "none"},
@@ -112,25 +95,14 @@ def repaired_regions(ctx, json_value_fn=json_value) -> list[dict]:
         text = str(getattr(region, "text", "") or "")
         regions.append({
             "id": f"bubble_{index}",
-            "x": int(x),
-            "y": int(y),
-            "width": int(width),
-            "height": int(height),
+            "x": int(x), "y": int(y), "width": int(width), "height": int(height),
             "lines": json_value_fn(getattr(region, "lines", [])) or [],
-            "original_text": text,
-            "translation": text,
+            "original_text": text, "translation": text,
             "font_size": int(getattr(region, "font_size", 24) or 24),
-            "font_family": "Comic Neue",
-            "fg_color": [0, 0, 0],
-            "bg_color": [255, 255, 255],
-            "stroke_width": 2,
-            "angle": float(getattr(region, "angle", 0) or 0),
-            "direction": "h",
-            "alignment": "center",
-            "line_spacing": 1,
-            "letter_spacing": 1,
-            "bold": False,
-            "italic": False,
+            "font_family": "Comic Neue", "fg_color": [0, 0, 0], "bg_color": [255, 255, 255],
+            "stroke_width": 2, "angle": float(getattr(region, "angle", 0) or 0),
+            "direction": "h", "alignment": "center", "line_spacing": 1, "letter_spacing": 1,
+            "bold": False, "italic": False,
         })
     return regions
 
@@ -145,22 +117,56 @@ def summary_input_file(page: dict, input_file_fn, final_file_fn) -> Path:
     return input_path
 
 
-async def persist_summary_ocr(page: dict, regions: list[dict], *, get_store) -> None:
+async def persist_summary_ocr(
+    page: dict,
+    regions: list[dict],
+    panels: list[dict] | None = None,
+    bubbles: list[dict] | None = None,
+    *,
+    get_store: Callable[..., Any],
+) -> None:
     store = get_store()
     if store is not None and "id" in page:
         if not await store.update_text_regions(page["id"], regions):
             raise FileNotFoundError("page is missing from PostgreSQL")
+    if store is not None and hasattr(store, "save_documents"):
+        folder = page.get("folder") or (page.get("path").name if isinstance(page.get("path"), Path) else None)
+        if folder:
+            docs = {
+                k: v for k, v in [
+                    ("panel_detections.json", panels),
+                    ("bubble_detections.json", bubbles),
+                ] if v is not None
+            }
+            if docs:
+                await store.save_documents(folder, docs)
     path = page.get("path")
     if isinstance(path, Path):
         path.mkdir(parents=True, exist_ok=True)
-        regions_path = path / "text_regions.json"
-        temporary = regions_path.with_suffix(".tmp")
-        await asyncio.to_thread(
-            temporary.write_text,
-            json.dumps(regions, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        await asyncio.to_thread(os.replace, temporary, regions_path)
+        items = [("text_regions.json", regions)]
+        if panels is not None:
+            items.append(("panel_detections.json", panels))
+        if bubbles is not None:
+            items.append(("bubble_detections.json", bubbles))
+        for fname, data in items:
+            p = path / fname
+            tmp = p.with_suffix(".tmp")
+            await asyncio.to_thread(tmp.write_text, json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            await asyncio.to_thread(os.replace, tmp, p)
+
+
+def _extract_page_detections(ctx, page: dict) -> tuple[list[dict] | None, list[dict] | None]:
+    p_docs, b_docs = None, None
+    if getattr(ctx, "panel_detections", None) is not None:
+        from manga_translator.detection.panel import serialize_panel_detections
+        shape = ctx.img_rgb.shape[:2] if getattr(ctx, "img_rgb", None) is not None else None
+        p_docs = serialize_panel_detections(ctx.panel_detections, shape)
+        page["panel_detections"] = p_docs
+    if getattr(ctx, "bubble_detections", None) is not None:
+        from manga_translator.detection.panel import serialize_bubble_detections
+        b_docs = serialize_bubble_detections(ctx.bubble_detections)
+        page["bubble_detections"] = b_docs
+    return p_docs, b_docs
 
 
 async def run_summary_ocr(
@@ -188,7 +194,6 @@ async def run_summary_ocr(
                 if stage is None:
                     return
                 await on_progress(stage)
-
         consumer = asyncio.create_task(consume_progress())
 
     def report_progress(stage: str) -> None:
@@ -198,23 +203,14 @@ async def run_summary_ocr(
     ctx = None
     try:
         if worker is None:
-            ctx = await get_context(
-                request,
-                ocr_config_fn(page, target_language),
-                image_bytes,
-                report_progress if progress_queue is not None else None,
-            )
+            ctx = await get_context(request, ocr_config_fn(page, target_language), image_bytes, report_progress if progress_queue is not None else None)
         else:
             from PIL import Image
-
             with Image.open(io.BytesIO(image_bytes)) as opened:
                 image = opened.convert("RGB")
             try:
                 extract_text = getattr(worker, "extract_text", None)
-                if extract_text is None:
-                    ctx = await worker.sent(image, ocr_config_fn(page, target_language))
-                else:
-                    ctx = await extract_text(image, ocr_config_fn(page, target_language))
+                ctx = await (worker.sent(image, ocr_config_fn(page, target_language)) if extract_text is None else extract_text(image, ocr_config_fn(page, target_language)))
             finally:
                 image.close()
                 del image
@@ -224,10 +220,11 @@ async def run_summary_ocr(
             progress_queue.put_nowait(None)
             await consumer
     regions = repaired_regions_fn(ctx)
+    p_docs, b_docs = _extract_page_detections(ctx, page)
     if hasattr(ctx, 'cleanup_all_images'):
         ctx.cleanup_all_images()
     del ctx
-    await persist_regions(page, regions)
+    await persist_regions(page, regions, panels=p_docs, bubbles=b_docs)
     return regions
 
 
@@ -254,9 +251,7 @@ async def run_summary_ocr_batch(
                 images.append(opened.convert("RGB"))
             del image_bytes
         configs = [ocr_config_fn(page, target_language) for page in pages]
-        contexts = await worker.extract_text_batch(
-            list(zip(images, configs)), batch_size=batch_size, on_progress=on_progress
-        )
+        contexts = await worker.extract_text_batch(list(zip(images, configs)), batch_size=batch_size, on_progress=on_progress)
         if len(contexts) != len(pages):
             raise RuntimeError("Batched summary OCR returned a different number of page results than inputs")
 
@@ -264,7 +259,8 @@ async def run_summary_ocr_batch(
         for page, ctx in zip(pages, contexts):
             try:
                 regions = repaired_regions_fn(ctx)
-                await persist_regions(page, regions)
+                p_docs, b_docs = _extract_page_detections(ctx, page)
+                await persist_regions(page, regions, panels=p_docs, bubbles=b_docs)
                 results.append((regions, None))
             except Exception as error:
                 results.append((None, error))
