@@ -2,7 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-worktree_root="$(git -C "$script_dir/.." rev-parse --show-toplevel)"
+worktree_root="$(git -C "$script_dir" rev-parse --show-toplevel)"
 original_root="/Users/ice-h/Source/manga-image-translator"
 
 die() {
@@ -36,7 +36,7 @@ case "$1" in
     ensure_link "models" "models"
 
     cd "$worktree_root"
-    exec "$original_root/.venv/bin/python" server/main.py --verbose --start-instance --host=127.0.0.1 --port=5003
+    exec "$original_root/.venv/bin/python" server/main.py --workers 2
     ;;
   frontend)
     command -v npm >/dev/null || die "npm is required to run the frontend"
@@ -44,7 +44,7 @@ case "$1" in
     ensure_link "front/node_modules" "front/node_modules"
 
     cd "$worktree_root/front"
-    exec env VITE_BACKEND_URL=http://127.0.0.1:5003 npm run dev
+    exec env VITE_BACKEND_URL=http://127.0.0.1:8000 npm run dev
     ;;
   *)
     die "Usage: $0 {backend|frontend}"
