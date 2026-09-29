@@ -10,10 +10,6 @@ die() {
   exit 1
 }
 
-[[ -d "$original_root/manga_translator/utils/panel/lib" ]] || die "Missing panel library: $original_root/manga_translator/utils/panel/lib"
-[[ -d "$original_root/models" ]] || die "Missing models directory: $original_root/models"
-[[ -x "$original_root/.venv/bin/python" ]] || die "Missing Python venv: $original_root/.venv/bin/python"
-
 ensure_link() {
   local relative_path="$1"
   local target="$original_root/$2"
@@ -28,8 +24,29 @@ ensure_link() {
   ln -s "$target" "$link_path"
 }
 
-ensure_link "manga_translator/utils/panel/lib" "manga_translator/utils/panel/lib"
-ensure_link "models" "models"
+[[ $# -eq 1 ]] || die "Usage: $0 {backend|frontend}"
 
-cd "$worktree_root"
-exec "$original_root/.venv/bin/python" server/main.py --verbose --start-instance --host=127.0.0.1 --port=5003
+case "$1" in
+  backend)
+    [[ -d "$original_root/manga_translator/utils/panel/lib" ]] || die "Missing panel library: $original_root/manga_translator/utils/panel/lib"
+    [[ -d "$original_root/models" ]] || die "Missing models directory: $original_root/models"
+    [[ -x "$original_root/.venv/bin/python" ]] || die "Missing Python venv: $original_root/.venv/bin/python"
+
+    ensure_link "manga_translator/utils/panel/lib" "manga_translator/utils/panel/lib"
+    ensure_link "models" "models"
+
+    cd "$worktree_root"
+    exec "$original_root/.venv/bin/python" server/main.py --verbose --start-instance --host=127.0.0.1 --port=5003
+    ;;
+  frontend)
+    command -v npm >/dev/null || die "npm is required to run the frontend"
+    [[ -d "$original_root/front/node_modules" ]] || die "Missing frontend dependencies: $original_root/front/node_modules"
+    ensure_link "front/node_modules" "front/node_modules"
+
+    cd "$worktree_root/front"
+    exec env VITE_BACKEND_URL=http://127.0.0.1:5003 npm run dev
+    ;;
+  *)
+    die "Usage: $0 {backend|frontend}"
+    ;;
+esac

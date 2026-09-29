@@ -1548,9 +1548,9 @@ Record new features and large changes here. Keep implementation detail in code, 
 
 - Batch item rows now expose the original upload alongside the translated image download.
 
-## 2026-09-29 — Add a worktree server launcher
+## 2026-09-29 — Add a worktree dev server launcher
 
-- Added `devscripts/run_worktree_server.sh` to link ignored panel/model assets from the original checkout and run the active worktree's server with the original venv. This makes new worktrees runnable without copying model files or recreating the Python environment.
+- Added `devscripts/run_worktree_server.sh backend|frontend` to link ignored runtime assets or frontend dependencies from the original checkout and run the selected worktree code. Frontend mode proxies API requests to the worktree backend on port 5003.
 
 ## 2026-09-29 — Default fresh studio users to ALL CAPS lettering
 
