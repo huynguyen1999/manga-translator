@@ -2,6 +2,39 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-29 — Add prompt inspection devscript for synopsis, story analysis, and translation chunks
+
+- Reason: Developers and prompt engineers needed a fast, transparent way to inspect prompt templates and structured LLM payloads (system prompts, hierarchical panel/region transcripts, story localization guides, previous chunk context, and merge consolidation prompts) across standalone sample data, local manga folders, or running server instances.
+- Added `devscripts/show_prompts.py` supporting `-p {all, synopsis, summary, chunk}`, target language customization, chunk sizing, manual story ranges, merge consolidation prompt toggle, and multiple output formats (`pretty` terminal, `markdown`, `json`).
+- Added unit tests in `test/test_show_prompts_script.py`.
+
+## 2026-09-29 — Remove mxbai cross-encoder reranker in favor of standalone Typesense hybrid search
+
+- Reason: The secondary `mixedbread-ai/mxbai-rerank-xsmall-v1` cross-encoder reranker added significant latency (~6–8 seconds per query), consumed secondary device/GPU memory, and introduced arbitrary score thresholding issues (`minScore`) without improving candidate order over Typesense's native hybrid vector + fuzzy keyword rank fusion (`rerank_hybrid_matches`). Removing the cross-encoder streamlines Search Lab to a fast, clean single-stage Typesense hybrid architecture (~50–100 ms per query).
+- Removed `mixedbread-ai/mxbai-rerank-xsmall-v1` model loading, weights caching, `rerank_candidates`, and `SearchEncoders.rerank` from `server/search_embeddings.py`.
+- Removed reranker properties (`reranker_available`, `reranker_default`), query reranking flow, and reranker status info from `server/search_service.py` and `server/search_api.py`.
+- Updated Search Lab frontend (`front/app/components/SearchLab.tsx`, `front/app/utils/searchLabTypes.ts`, `front/app/utils/searchLab.ts`) to remove the neural reranker toggle, min score threshold input, rank delta tags, and reranker status badges, presenting Typesense hybrid results, text match scores, and vector distances directly.
+- Updated benchmark runner (`server/search_benchmark_runner.py`, `server/search_benchmark.py`) and documentation (`docs/search-lab.md`) to evaluate Typesense hybrid retrieval directly.
+- Cleaned up unit and integration tests in `test/test_semantic_search.py`.
+
+## 2026-09-29 — Typesense hybrid retrieval migration and optional neural reranker gate
+
+- Reason: Unified search in Search Lab previously relied on Qdrant for vector retrieval without native typo-tolerant lexical search and hybrid rank fusion. Migrating the storage and retrieval engine to Typesense enables single-engine hybrid search (BGE dense embeddings + fuzzy keyword search with configurable typo tolerance) with server-level and per-query feature gating for optional cross-encoder reranking.
+- Updated `docker-compose.search.yml` to run pinned `typesense/typesense:27.1` on port 8108 with persistent named volume `manga-search-typesense:/data`. Replaced `qdrant-client` with `typesense==2.0.0` in `requirements-search.txt`.
+- Implemented `SearchTypesense` client (`server/search_typesense.py`) managing `manga_search_v2` collection schema (`groupId`, `sourceKey`, `title`, `content`, `chunkIndex`, `start`, `end`, `fingerprint`, `profile`, `published`, `embedding` float[768]), batch document upsert, atomic publication (`published: true`), document deletion, and hybrid vector search via `multi_search.perform` to prevent URL length overflow.
+- Updated `SearchService` (`server/search_service.py`) to execute unified Typesense hybrid queries with candidate grouping by `groupId` (`CANDIDATE_LIMIT = 50`), hybrid rank fusion, typo tolerance (0, 1, 2), and alpha weighting.
+- Added two-level feature gate for cross-encoder reranking (`mixedbread-ai/mxbai-rerank-xsmall-v1`): server availability (`MANGA_SEARCH_RERANKER_ENABLED=1/0`, default enabled) and query-level flag (`rerank: true/false`). Reranker model is lazy-loaded only when requested, with graceful non-fatal fallback to Typesense ranking if neural inference fails.
+- Updated Search Lab frontend (`front/app/components/SearchLab.tsx`, `front/app/utils/searchLab.ts`, `front/app/utils/searchLabTypes.ts`) to expose typo tolerance selector, neural reranker toggle, alpha balance slider, Stage 1 candidate diagnostics (text score, vector distance, rank), and dual-mode result cards.
+- Added dual-experiment benchmark runner (`server/search_benchmark_runner.py`, `server/search_benchmark.py`) evaluating retrieval performance between Stage 1 Typesense Hybrid and Stage 2 Neural Reranking.
+- Added "Select all (N)" bulk selection action in Search Lab and decoupled collection filtering into orthogonal `summary_status` (`all`, `summarized`, `not-summarized`) and `index_status` (`all`, `not-indexed`, `indexed`) dropdowns in `front/app/components/SearchLab.tsx`, `server/search_api.py`, and `server/search_store.py`, enabling immediate filtering and 1-click batch selection of unindexed manga with summaries (`ready-to-embed`).
+- Updated unit and integration tests (`test/test_semantic_search.py`) with `FakeTypesense` hermetic mock, live Typesense container tests, and reranker fallback assertions.
+
+## 2026-09-29 — Return to image detailed view on closing edit page view
+
+- Reason: Closing the visual editor overlay previously closed all overlays back to the gallery base route, losing the page detailed comparison context.
+- Updated `onClose` in `ResultGallery.tsx`'s editor properties to restore `selectedImage`, set `isModalOpen: true`, reset zoom level, and trigger `onOpenPageView(closing.folder)` to return directly to the image detailed view (`PageDetailModal` / `/gallery/pages/:folder`).
+- Added unit test in `front/app/components/ResultGallery.test.ts`.
+
 ## 2026-09-29 — Smallest enclosing panel spatial containment for text blocks
 
 - Reason: When nested or inset panels were detected, text block spatial assignment previously stopped on the first matching panel, causing larger macro container panels to swallow text blocks belonging to smaller sub-panels.

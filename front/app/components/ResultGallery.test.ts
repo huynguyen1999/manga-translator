@@ -1114,4 +1114,48 @@ assert.equal(deletionState.confirmMangas, false);
 assert.equal(deletionState.closedMangaDetail, 1, "Deleting the open manga should close its detail view");
 assert.deepEqual(deletionState.deletingMangas, [true, false]);
 
-console.log("ResultGallery loading, state, bulk deletion, latest-first sorting, reader exit position, thumbnail caching, status filter, empty library filter state, search grouping, and drag auto-scroll tests passed successfully!");
+// Editor close returns to image detailed view contract
+{
+  const editImage: FinishedImage = {
+    id: "img-edit",
+    originalName: "edit.png",
+    result: "/res/edit",
+    mangaTitle: "Manga Test",
+    folder: "folder-edit",
+    finishedAt: new Date(),
+    settings: {},
+  };
+  let editingState: FinishedImage | null = editImage;
+  let selectedState: FinishedImage | null = null;
+  let modalOpenState = false;
+  let zoomState = 2;
+  const pageViewCalls: string[] = [];
+
+  const handleCloseEditor = (
+    image: FinishedImage,
+    onOpenPageView?: (folder: string) => void,
+  ) => {
+    const closing = image;
+    editingState = null;
+    if (closing) {
+      selectedState = closing;
+      modalOpenState = true;
+      zoomState = 1;
+      if (onOpenPageView && closing.folder) {
+        onOpenPageView(closing.folder);
+      }
+    }
+  };
+
+  handleCloseEditor(editImage, (folder) => {
+    pageViewCalls.push(folder);
+  });
+
+  assert.equal(editingState, null, "Editing image must be cleared on close");
+  assert.equal(selectedState, editImage, "Selected image must be set to the closing image for detailed view");
+  assert.equal(modalOpenState, true, "Detailed view modal must be opened on closing the edit view");
+  assert.equal(zoomState, 1, "Zoom level must reset to 1 on opening detailed view");
+  assert.deepEqual(pageViewCalls, ["folder-edit"], "onOpenPageView must be called with closing image folder");
+}
+
+console.log("ResultGallery loading, state, bulk deletion, latest-first sorting, reader exit position, thumbnail caching, status filter, empty library filter state, search grouping, drag auto-scroll, and editor close transition tests passed successfully!");

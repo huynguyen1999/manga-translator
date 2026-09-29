@@ -9,12 +9,10 @@ from pathlib import Path
 
 TEXT_MODEL = "BAAI/bge-base-en-v1.5"
 TEXT_REVISION = "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a"
-RERANK_MODEL = "mixedbread-ai/mxbai-rerank-xsmall-v1"
-RERANK_REVISION = "b5c6e9da73abc3711f593f705371cdbe9e0fe422"
-PROFILE = "bge-base-siglip-base-v1"
-COLLECTION = "manga_search_v1"
+PROFILE = "typesense-bge-base-v1"
+COLLECTION = "manga_search_v2"
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
-VECTOR_NAMES = {"summary": "summary_dense"}
+VECTOR_NAMES = {"summary": "embedding"}
 DIMENSIONS = {"summary": 768}
 CANDIDATE_LIMIT = 50
 
@@ -25,6 +23,9 @@ def fingerprint(value: str | bytes) -> str:
 
 def point_id(source_key: str, version: str, chunk: int) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{PROFILE}:{source_key}:{version}:{chunk}"))
+
+
+document_id = point_id
 
 
 def chunk_summary(text, tokenizer, max_tokens=512, overlap=64):
@@ -71,30 +72,6 @@ def rank_results(summary, limit=CANDIDATE_LIMIT):
     return [(group_id, float(hits[0]["score"])) for group_id, hits in ordered[:limit]]
 
 
-def rerank_candidates(candidates, scores, limit=20, min_score=None):
-    """Attach reranker scores to Stage 1 candidates, filter by min_score, and sort deterministically."""
-    if len(candidates) != len(scores):
-        raise ValueError("Candidate and rerank score counts must match")
-    scored = []
-    for idx, (item, rerank) in enumerate(zip(candidates, scores), 1):
-        initial_rank = item.get("rank", idx)
-        score = float(rerank["score"])
-        logit = float(rerank["logit"])
-        if not (math.isfinite(score) and math.isfinite(logit)):
-            raise ValueError("Reranker returned an invalid score")
-        if min_score is not None and score < min_score:
-            continue
-        scored.append({**item, "initialRank": initial_rank, "rerankScore": score, "rerankLogit": logit})
-    scored.sort(key=lambda row: (
-        -row["rerankScore"],
-        -row["rerankLogit"],
-        -(row.get("summarySimilarity") if row.get("summarySimilarity") is not None else row.get("score", 0.0)),
-        row.get("groupId") or row.get("id") or "",
-    ))
-    return [{**row, "rank": rank, "rankDelta": row["initialRank"] - rank}
-            for rank, row in enumerate(scored[:limit], 1)]
-
-
 class SearchEncoders:
     """Production calls run on the shared model executor; local tools use it directly."""
 
@@ -105,7 +82,7 @@ class SearchEncoders:
 
     def _load(self, modality):
         import torch
-        from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
+        from transformers import AutoModel, AutoTokenizer
 
         if self.device is None:
             if torch.cuda.is_available():
@@ -119,11 +96,6 @@ class SearchEncoders:
             if modality == "summary":
                 self.processors[modality] = AutoTokenizer.from_pretrained(TEXT_MODEL, revision=TEXT_REVISION, cache_dir=cache)
                 self.models[modality] = AutoModel.from_pretrained(TEXT_MODEL, revision=TEXT_REVISION, cache_dir=cache).eval().to(self.device)
-            elif modality == "rerank":
-                self.processors[modality] = AutoTokenizer.from_pretrained(RERANK_MODEL, revision=RERANK_REVISION, cache_dir=cache)
-                self.models[modality] = AutoModelForSequenceClassification.from_pretrained(
-                    RERANK_MODEL, revision=RERANK_REVISION, cache_dir=cache
-                ).eval().to(self.device)
             else:
                 raise ValueError(f"Unsupported search modality: {modality}")
         return self.models[modality], self.processors[modality]
@@ -144,27 +116,6 @@ class SearchEncoders:
                 features = features.pooler_output
             vectors = features.float().cpu().tolist()
         return [validate_vector(vector, DIMENSIONS["summary"]) for vector in vectors]
-
-    def rerank(self, query: str, passages: list[str], batch_size: int = 8) -> list[dict]:
-        import torch
-
-        if not passages:
-            return []
-        model, tokenizer = self._load("rerank")
-        validate_query(query, tokenizer, 512)
-        results = []
-        for offset in range(0, len(passages), batch_size):
-            batch = passages[offset:offset + batch_size]
-            pairs = [[query, passage or ""] for passage in batch]
-            inputs = tokenizer(pairs, padding=True, truncation=True, max_length=512, return_tensors="pt").to(self.device)
-            with torch.inference_mode():
-                logits = model(**inputs).logits.squeeze(-1).float().cpu()
-                if logits.ndim == 0:
-                    logits = logits.unsqueeze(0)
-                probs = torch.sigmoid(logits)
-            for prob, logit in zip(probs.tolist(), logits.tolist()):
-                results.append({"score": float(prob), "logit": float(logit)})
-        return results
 
     def chunks(self, text):
         _, tokenizer = self._load("summary")

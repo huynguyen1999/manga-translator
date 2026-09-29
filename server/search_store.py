@@ -117,7 +117,13 @@ class SearchStore:
             """, group_ids, PROFILE)
         return {"manga": row["manga"], "indexedSummaries": row["indexed_summaries"]}
 
-    async def manga(self, search="", offset=0, limit=25, group_ids=None, status="all"):
+    async def manga(self, search="", offset=0, limit=25, group_ids=None, status="all", summary_status="all", index_status="all"):
+        if status in ("summarized", "not-summarized"):
+            summary_status = status
+        elif status in ("ready-to-embed", "summarized-not-indexed"):
+            summary_status, index_status = "summarized", "not-indexed"
+        elif status in ("indexed", "not-indexed"):
+            index_status = status
         rows = await self.pool.fetch("""
             SELECT g.id,g.title,count(*) OVER()::int AS total FROM manga_groups g
             WHERE ($1='' OR g.title ILIKE '%'||$1||'%') AND ($2::text[] IS NULL OR g.id=ANY($2))
@@ -132,15 +138,18 @@ class SearchStore:
                       SELECT 1 FROM manga_summaries ms
                       WHERE ms.group_id=g.id AND NULLIF(ms.payload->>'summary', '') IS NOT NULL
                   ))
-                  OR ($5 = 'indexed' AND EXISTS (
+              )
+              AND (
+                  $7::text IS NULL OR $7 = 'all'
+                  OR ($7 = 'indexed' AND EXISTS (
                       SELECT 1 FROM search_sources s WHERE s.group_id=g.id AND s.profile=$6 AND s.modality='summary'
                   ))
-                  OR ($5 = 'not-indexed' AND NOT EXISTS (
+                  OR ($7 = 'not-indexed' AND NOT EXISTS (
                       SELECT 1 FROM search_sources s WHERE s.group_id=g.id AND s.profile=$6 AND s.modality='summary'
                   ))
               )
             ORDER BY lower(g.title),g.id LIMIT $3 OFFSET $4
-            """, search, group_ids, limit, offset, status, PROFILE)
+            """, search, group_ids, limit, offset, summary_status, PROFILE, index_status)
         result = []
         for row in rows:
             group_id = row["id"]

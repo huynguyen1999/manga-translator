@@ -1,11 +1,15 @@
 services:
-  qdrant:
-    image: qdrant/qdrant:v1.17.1
+  typesense:
+    image: typesense/typesense:27.1
     ports:
-      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:8108:8108"
+    environment:
+      - TYPESENSE_API_KEY=xyz
+      - TYPESENSE_DATA_DIR=/data
+      - TYPESENSE_ENABLE_CORS=true
     volumes:
-      - manga-search-vectors:/qdrant/storage
+      - manga-search-typesense:/data
     restart: unless-stopped
 
 volumes:
-  manga-search-vectors:
+  manga-search-typesense:

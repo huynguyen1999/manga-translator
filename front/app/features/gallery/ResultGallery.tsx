@@ -1288,8 +1288,16 @@ export const ResultGallery: React.FC<ResultGalleryProps> = ({
         editorProps={editingImage ? {
           image: editingImage,
           onClose: () => {
+            const closing = editingImage;
             setEditingImage(null);
-            onCloseOverlay?.();
+            if (closing) {
+              setSelectedImage(closing);
+              setIsModalOpen(true);
+              setZoomLevel(1);
+              if (onOpenPageView && closing.folder) {
+                onOpenPageView(closing.folder);
+              }
+            }
           },
           onSave: (updated) => applyGalleryEditorSave(updated, {
             editingImage,

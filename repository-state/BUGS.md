@@ -2,6 +2,13 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-09-29 — Saved translations suppressed by inferred bubble and panel bounds
+
+- Symptom: Regions `cc455706405342a0804b0984125af677` and `2947b6146bc74dca91c4e020fbb34839` have saved translations but render no translated pixels. Region `084fa60938bb4c58ab28ccb93ea2dde8` renders with a thin white contour.
+- Root cause: The first page has no saved bubble detections, so layout falls back to bright connected-component bubble inference; it assigns this region a sparse safe shape and classifies it as `BUBBLE`, then finds no font-policy-valid layout and suppresses it. On the second page, the free-text zone builder does not pass saved `panel_detections` into `infer_panel_constraints`, so CV frame-boundary inference mistakes the black caption-box edges for a panel envelope `[61, 661, 99, 1018]`; the 6px margin leaves only 26px of width, so free-text typography generates zero candidates. The third region is not suppressed: it freezes successfully at 27px and its saved layout records a 1px font outline, which appears white against the black caption background.
+- Fix: Run the existing contrast pass for bubble and free-text placements. For bubbles, accept a wider outline only when its rendered pixels stay inside the safe bubble mask. The saved-page preview now keeps this region rendered with a 3px outline.
+- Prevention: Keep contrast handling on both placement paths and validate any widened raster against its placement mask.
+
 ## 2026-09-29 — Macro container panels swallowing text blocks from nested or sub-panels
 
 - Symptom: When nested, inset, or compound panels were detected, text blocks inside smaller sub-panels were swallowed by larger enclosing container panels, corrupting reading order and panel grouping.

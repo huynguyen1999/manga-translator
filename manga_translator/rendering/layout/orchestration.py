@@ -122,6 +122,8 @@ def apply_shape_aware_bubble_layout(
         region for region in regions
         if getattr(region, "placement_mode", None) is PlacementMode.FREE_TEXT
     ]
+    obstacles = None
+    inpaint_mask = getattr(ctx, "inpaint_mask", None) if getattr(ctx, "inpaint_mask", None) is not None else (getattr(ctx, "text_mask", None) if getattr(ctx, "text_mask", None) is not None else (getattr(ctx, "mask_raw", None) if getattr(ctx, "mask_raw", None) is not None else getattr(ctx, "mask", None)))
     bubble_groups = _solver._shared_bubble_groups(bubble_regions)
     from .readable_text import readable_font_minimum
     minimum = readable_font_minimum(render_cfg, img.shape[:2])
@@ -203,13 +205,6 @@ def apply_shape_aware_bubble_layout(
         phase_start = _solver.perf_counter()
         bubble_halo = max(2, int(round(max((getattr(r, "source_font_size", 0) or getattr(r, "font_size", 0) or 12 for r in free_regions), default=12) * 0.20)))
         obstacles = _solver.build_page_obstacle_map(regions, img.shape[:2], bubble_halo=bubble_halo)
-        inpaint_mask = getattr(ctx, "inpaint_mask", None)
-        if inpaint_mask is None:
-            inpaint_mask = getattr(ctx, "text_mask", None)
-        if inpaint_mask is None:
-            inpaint_mask = getattr(ctx, "mask_raw", None)
-        if inpaint_mask is None:
-            inpaint_mask = getattr(ctx, "mask", None)
         free_zones = _solver.build_free_text_ownership_zones(
             free_regions, obstacles, inpaint_mask=inpaint_mask, image=img, other_regions=regions
         )
@@ -304,7 +299,6 @@ def apply_shape_aware_bubble_layout(
                     "panel_constraint": _solver._panel_constraint_diagnostics(getattr(region, "_panel_constraint", None)),
                 }
 
-        apply_free_text_contrast(ctx, free_regions, regions, obstacles, inpaint_mask)
         for region in free_regions:
             _solver.logger.info(
                 f"FREE_TEXT SOLVER RESULT id={getattr(region, 'region_id', id(region))} "
@@ -387,6 +381,9 @@ def apply_shape_aware_bubble_layout(
                 r.layout_bounds = getattr(prep, "layout_bounds", getattr(r, "layout_bounds", None))
         layout_timing["fallback_ms"] += (_solver.perf_counter() - phase_start) * 1000.0
 
+    if obstacles is None:
+        obstacles = _solver.build_page_obstacle_map(regions, img.shape[:2])
+    apply_free_text_contrast(ctx, regions, regions, obstacles, inpaint_mask)
     ctx._bubble_detection_done = True
     ctx._bubble_layout_ready = True
     _solver._record_content_trace(regions, "layout")

@@ -26,7 +26,9 @@ class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=5000)
     groupIds: list[str] | None = Field(default=None, max_length=1000)
     limit: int = Field(default=20, ge=1, le=50)
-    minScore: float | None = Field(default=None, ge=0.0, le=1.0)
+    typoTolerance: int = Field(default=2, ge=0, le=2)
+    alpha: float = Field(default=0.7, ge=0.0, le=1.0)
+    hybridRerank: bool = Field(default=True)
 
     @field_validator("query")
     @classmethod
@@ -54,7 +56,7 @@ async def call(operation):
         if type(error).__name__ == "UniqueViolationError":
             raise HTTPException(409, "An embedding job is already running") from error
         logger.exception("Search Lab request failed")
-        raise HTTPException(503, f"Search Lab is unavailable: {error}. Check Qdrant, model downloads, and database migration.") from error
+        raise HTTPException(503, f"Search Lab is unavailable: {error}. Check Typesense, model downloads, and database migration.") from error
 
 
 def search_router(get_service):
@@ -77,7 +79,6 @@ def search_router(get_service):
         async def stream():
             last_snapshot = None
             while True:
-                # ponytail: three-second status snapshots; use notifications if subscriber/query load grows.
                 snapshot = json.dumps(await call(instance.status()), sort_keys=True, separators=(",", ":"))
                 if snapshot != last_snapshot:
                     last_snapshot = snapshot
@@ -86,51 +87,40 @@ def search_router(get_service):
                     yield ": keep-alive\n\n"
                 await asyncio.sleep(3)
 
-        return StreamingResponse(
-            stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @router.get("/manga")
     async def manga(
         search: str = Query("", max_length=200),
-        status: Literal["all", "summarized", "not-summarized", "indexed", "not-indexed"] = Query("all"),
+        status: Literal["all", "summarized", "not-summarized", "indexed", "not-indexed", "ready-to-embed", "summarized-not-indexed"] = Query("all"),
+        summary_status: Literal["all", "summarized", "not-summarized"] = Query("all"),
+        index_status: Literal["all", "indexed", "not-indexed"] = Query("all"),
         summarized: bool | None = Query(None),
         offset: int = Query(0, ge=0),
-        limit: int = Query(25, ge=1, le=50),
+        limit: int = Query(25, ge=1, le=10000),
     ):
-        filter_status = status
-        if summarized is True:
-            filter_status = "summarized"
-        elif summarized is False:
-            filter_status = "not-summarized"
-        return await call(service().db.manga(search, offset, limit, status=filter_status))
+        filter_status = "summarized" if summarized is True else "not-summarized" if summarized is False else status
+        return await call(service().db.manga(search, offset, limit, status=filter_status, summary_status=summary_status, index_status=index_status))
 
     @router.post("/jobs", status_code=202)
-    async def embed(body: EmbedRequest):
-        return await call(service().submit(body.groupIds))
-
+    async def embed(body: EmbedRequest): return await call(service().submit(body.groupIds))
     @router.delete("/manga/{group_id}/index")
     async def remove_index(group_id: str): return {"groupId": group_id, **(await call(service().remove_group(group_id)))}
     @router.delete("/index")
     async def remove_all_index(): return await call(service().remove_group())
-
     @router.get("/jobs")
-    async def jobs():
-        return await call(service().db.jobs())
-
+    async def jobs(): return await call(service().db.jobs())
     @router.post("/jobs/{job_id}/cancel")
     async def cancel(job_id: str):
         await call(service().cancel(job_id))
         return {"status": "cancelling"}
-
     @router.post("/jobs/{job_id}/resume", status_code=202)
-    async def resume(job_id: str):
-        return await call(service().submit(resume_id=job_id))
-
+    async def resume(job_id: str): return await call(service().submit(resume_id=job_id))
     @router.post("/query")
     async def query(body: SearchRequest):
-        return await call(service().query(body.query, body.groupIds, body.limit, body.minScore))
+        return await call(service().query(
+            body.query, group_ids=body.groupIds, limit=body.limit,
+            typo_tolerance=body.typoTolerance, alpha=body.alpha, hybrid_rerank=body.hybridRerank,
+        ))
 
     return router

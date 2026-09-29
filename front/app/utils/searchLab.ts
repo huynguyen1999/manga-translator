@@ -1,33 +1,7 @@
 import { apiUrl } from './api';
 
-export type SearchStatusFilter = 'all' | 'indexed' | 'not-indexed' | 'summarized' | 'not-summarized';
-export interface SearchManga {
-  id: string; title: string; pageCount: number; summaryAvailable: boolean; summaryStale: boolean;
-  summaryIndexed: boolean; summaryOutdated: boolean; outdated: boolean; partial: boolean;
-  coverUrl?: string | null;
-}
-export interface SearchJob {
-  id: string; status: string; total: number; completed: number; unchanged: number;
-  skipped: number; failed: number; cancelRequested: boolean; error: string | null;
-  issues: { sourceKey: string; error: string; groupId: string; title: string; pageNumber: number | null }[];
-}
-export interface SearchStatus {
-  available: boolean; error: string | null; device: string; profile: string;
-  models: { summary: string; reranker: string }; jobs: SearchJob[];
-  metrics: { embeddingSeconds: number; embeddedItems: number };
-}
-export interface SearchInitialResult {
-  rank: number; groupId: string; title: string; summarySimilarity: number | null;
-  excerpt: string | null; readerUrl: string; coverage: SearchManga;
-}
-export interface SearchResult extends SearchInitialResult {
-  initialRank: number; rankDelta: number; rerankScore: number; rerankLogit: number;
-}
-export interface SearchResponse {
-  results: SearchResult[]; initialResults: SearchInitialResult[]; query: string; minScore: number | null;
-  elapsedMs: number; embeddingMs: number; rerankMs: number; partial: boolean; indexing: boolean;
-  profile: string; coverage: { manga: number; indexedSummaries: number };
-}
+export * from './searchLabTypes';
+import type { SearchJob } from './searchLabTypes';
 
 export const formatSimilarity = (score: number | null) => score === null ? 'Not indexed' : score.toFixed(4);
 export const formatRankDelta = (delta: number, initialRank: number) => delta > 0 ? `↑ +${delta} (from #${initialRank})` : delta < 0 ? `↓ ${delta} (from #${initialRank})` : `= #${initialRank}`;

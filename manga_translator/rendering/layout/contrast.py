@@ -24,7 +24,7 @@ def _low_contrast(image, footprint, cleanup, fg):
 
 
 def apply_free_text_contrast(ctx, free_regions, regions, obstacles, cleanup):
-    """Freeze the widest safe white outline after free-text placement."""
+    """Freeze the widest safe white outline after text placement."""
     from .. import fg_bg_compare
     from .free_text_search import _free_text_hard_valid
     from .render_output_validation import _region_render_boxes, _warped_alpha_crop
@@ -50,21 +50,26 @@ def apply_free_text_contrast(ctx, free_regions, regions, obstacles, cleanup):
         original_width = int(qa.get("layout_stroke_width", 0))
         widest = max(original_width + 1, 2, round(int(region.font_size) * 0.11))
         zone = getattr(region, "_free_text_zone", None)
-        if zone is None:
+        bubble = getattr(region, "_bubble_interior", None)
+        if bubble is None:
+            bubble = getattr(region, "_bubble_mask", None)
+        if zone is None and (bubble is None or np.asarray(bubble).shape[:2] != shape):
             continue
-        source = getattr(region, "_free_text_source_mask", None)
-        other_text = obstacles.text_mask.astype(bool).copy()
-        if source is not None and source.shape == shape:
-            other_text &= ~source.astype(bool)
-        for other in regions:
-            if other is region or getattr(other, "_render_suppressed", False):
-                continue
-            other_boxes, _ = _region_render_boxes(other, None, image.shape)
-            for box, points in other_boxes:
-                other_footprint, _ = _warped_alpha_crop(box, points, image.shape)
-                if other_footprint is not None:
-                    (x1, y1, x2, y2), mask = other_footprint
-                    other_text[y1:y2, x1:x2] |= mask
+        other_text = None
+        if zone is not None:
+            source = getattr(region, "_free_text_source_mask", None)
+            other_text = obstacles.text_mask.astype(bool).copy()
+            if source is not None and source.shape == shape:
+                other_text &= ~source.astype(bool)
+            for other in regions:
+                if other is region or getattr(other, "_render_suppressed", False):
+                    continue
+                other_boxes, _ = _region_render_boxes(other, None, image.shape)
+                for box, points in other_boxes:
+                    other_footprint, _ = _warped_alpha_crop(box, points, image.shape)
+                    if other_footprint is not None:
+                        (x1, y1, x2, y2), mask = other_footprint
+                        other_text[y1:y2, x1:x2] |= mask
 
         for width in range(widest, original_width, -1):
             region._solver_qa = {**qa, "layout_stroke_width": width}
@@ -78,8 +83,12 @@ def apply_free_text_contrast(ctx, free_regions, regions, obstacles, cleanup):
                     valid = False
                     break
                 crop, mask = footprint
-                if not _free_text_hard_valid(crop, mask, zone, obstacles, other_text):
-                    valid = False
+                if zone is not None:
+                    valid = _free_text_hard_valid(crop, mask, zone, obstacles, other_text)
+                else:
+                    x1, y1, x2, y2 = footprint[0]
+                    valid = not np.any(mask & (np.asarray(bubble)[y1:y2, x1:x2] == 0))
+                if not valid:
                     break
             if valid:
                 region._solver_qa["contrast_treatment"] = "white_margin"
