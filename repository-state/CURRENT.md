@@ -350,6 +350,7 @@ Manga Image Translator translates text in manga and other images through a pipel
 
 ## Common checks
 
+- Worktree server: run `./devscripts/run_worktree_server.sh` from any worktree to link the original checkout's ignored panel library and models directory, then launch the worktree code with the original checkout's venv on `127.0.0.1:5003`.
 - Python: `pytest`
 - Frontend: `cd front && npm test`
 - Frontend types: `cd front && npm run typecheck`

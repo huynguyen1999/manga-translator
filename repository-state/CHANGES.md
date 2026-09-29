@@ -1548,6 +1548,10 @@ Record new features and large changes here. Keep implementation detail in code, 
 
 - Batch item rows now expose the original upload alongside the translated image download.
 
+## 2026-09-29 — Add a worktree server launcher
+
+- Added `devscripts/run_worktree_server.sh` to link ignored panel/model assets from the original checkout and run the active worktree's server with the original venv. This makes new worktrees runnable without copying model files or recreating the Python environment.
+
 ## 2026-09-29 — Default fresh studio users to ALL CAPS lettering
 
 - New users now start with ALL CAPS lettering; previously remembered settings still override the default.
