@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Optional
@@ -54,11 +55,12 @@ def create_summary_read_router(
         return {
             "provider": "deepseek",
             "model": DEFAULT_SUMMARY_MODEL,
-            "models": ["deepseek-flash", "groq", "gemini"],
+            "models": ["deepseek-flash", "groq", "gemini", "tokenharbor"],
             "providers": {
                 "deepseek": ["deepseek-flash"],
                 "groq": [GROQ_MODEL],
                 "gemini": [GEMINI_MODEL],
+                "tokenharbor": [os.getenv("TOKEN_HARBOR_MODEL", "deepseek-v4.1-flash:free")],
             },
         }
 

@@ -2,6 +2,11 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-30 — Add Token Harbor to LLM model selectors
+
+- Reason: Token Harbor was available for translation but missing from the separate story-analysis and synopsis model choices.
+- Added Token Harbor to both selectors and enabled synopsis requests through the configured Token Harbor API key, base URL, and model.
+
 ## 2026-09-30 — Token Harbor free DeepSeek translation provider
 
 - Reason: Users need Token Harbor's free model routes without OpenRouter-specific request options, with MiMo as a fallback if default DeepSeek stalls.

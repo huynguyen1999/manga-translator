@@ -30,6 +30,7 @@ const SummaryJobRow: React.FC<{
   const [summaryModel, setSummaryModel] = useState(() => {
     const provider = job.provider?.toLowerCase();
     const model = job.model?.toLowerCase() || "";
+    if (provider === "tokenharbor") return "tokenharbor";
     if (provider === "gemini" || model.includes("gemini")) return "gemini";
     if (provider === "groq" || model.includes("groq")) return "groq";
     return "deepseek-flash";

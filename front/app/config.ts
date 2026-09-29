@@ -31,6 +31,7 @@ export const summaryModelOptions = [
   { value: "deepseek-flash", label: "DeepSeek Flash" },
   { value: "groq", label: "Groq" },
   { value: "gemini", label: "Google Gemini" },
+  { value: "tokenharbor", label: "Token Harbor (Free Models)" },
 ];
 
 export const storyAnalysisModelOptions = [
@@ -38,6 +39,7 @@ export const storyAnalysisModelOptions = [
   { value: "deepseek", label: "DeepSeek" }, { value: "gemini", label: "Google Gemini" },
   { value: "openai", label: "OpenAI GPT" }, { value: "claude", label: "Claude" },
   { value: "groq", label: "Groq" }, { value: "openrouter", label: "OpenRouter" },
+  { value: "tokenharbor", label: "Token Harbor" },
   { value: "sakura", label: "Sakura" }, { value: "custom_openai", label: "Custom OpenAI (Local/Ollama)" },
 ];
 

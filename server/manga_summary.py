@@ -575,7 +575,7 @@ def resolve_summary_model(model: str | None) -> tuple[str, str, str, str]:
     raw = (model or "").strip()
     provider, separator, requested_model = raw.partition(":")
     if not separator:
-        if raw.casefold() in {"deepseek", "groq", "gemini", "google", "google-gemini"}:
+        if raw.casefold() in {"deepseek", "groq", "gemini", "google", "google-gemini", "tokenharbor"}:
             requested_model = ""
         else:
             provider, requested_model = "deepseek", raw
@@ -598,6 +598,11 @@ def resolve_summary_model(model: str | None) -> tuple[str, str, str, str]:
             keys.GEMINI_MODEL,
             keys.GEMINI_API_KEY,
             "https://generativelanguage.googleapis.com/v1beta/openai/",
+        ),
+        "tokenharbor": (
+            os.getenv("TOKEN_HARBOR_MODEL", "deepseek-v4.1-flash:free"),
+            os.getenv("TOKEN_HARBOR_API_KEY", ""),
+            os.getenv("TOKEN_HARBOR_API_BASE", "https://tokenharbor.ai/v1"),
         ),
     }
     if provider not in defaults:
