@@ -44,7 +44,7 @@ export type TranslatorKey =
   | "gemini"
   | "openai"
   | "groq"
-  | "openrouter"
+  | "openrouter" | "tokenharbor"
   | "sugoi"
   | "custom_openai"
   | "sakura"
@@ -59,7 +59,7 @@ export const validTranslators: TranslatorKey[] = [
   "gemini",
   "openai",
   "groq",
-  "openrouter",
+  "openrouter", "tokenharbor",
   "sugoi",
   "custom_openai",
   "sakura",

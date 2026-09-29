@@ -285,7 +285,7 @@ class DeepseekTranslator(CommonGPTTranslator):
             self.logger.info(f'Used {self.token_count_last} tokens (Total: {self.token_count})')  
         return translations
 
-    async def _request_translation(self, to_lang: str, prompt: str) -> str:
+    async def _request_translation(self, to_lang: str, prompt: str, model: Optional[str] = None) -> str:
         system_message = self._CHAT_SYSTEM_TEMPLATE.format(to_lang=to_lang) 
         messages = [  
             {'role': 'system', 'content': system_message},  
@@ -298,7 +298,7 @@ class DeepseekTranslator(CommonGPTTranslator):
 
         is_json_mode = getattr(self, "_professional_json_mode", False)
         kwargs = {
-            'model': self.model,
+            'model': model or self.model,
             'messages': messages,
             
             # `max_tokens` only affects output token length. Set to max.

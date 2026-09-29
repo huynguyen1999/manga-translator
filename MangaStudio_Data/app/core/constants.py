@@ -43,7 +43,7 @@ TRANSLATOR_GROUPS = {
         "sugoi"
     ],
     "--- API-BASED (Requires Setup) ---": [
-        "deepseek", "gemini", "openai", "groq", "openrouter",
+        "deepseek", "gemini", "openai", "groq", "openrouter", "tokenharbor",
         "custom_openai", "sakura", "deepl", "youdao", "baidu", "caiyun"
     ],
     "--- OTHER ACTIONS ---": [
@@ -70,6 +70,7 @@ TRANSLATOR_CAPABILITIES = {
     "deepseek": {'__any__': '__all__'},
     "groq": {'__any__': '__all__'},
     "openrouter": {'__any__': '__all__'},
+    "tokenharbor": {'__any__': '__all__'},
     "youdao": {'__any__': '__all__'},
     "baidu": {'__any__': '__all__'},
     "caiyun": {'__any__': '__all__'},

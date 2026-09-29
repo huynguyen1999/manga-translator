@@ -2,6 +2,11 @@
 
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
 
+## 2026-09-30 — Token Harbor free DeepSeek translation provider
+
+- Reason: Users need Token Harbor's free model routes without OpenRouter-specific request options, with MiMo as a fallback if default DeepSeek stalls.
+- Added a Token Harbor translator defaulting to DeepSeek V4.1 Flash, falling back to MiMo V2.6 Flash after 60 seconds, with Qwen3.8 Flash available as an alternate model.
+
 ## 2026-09-30 — Unified multi-model text detection and fine-grained character stroke segmentation
  
 - Reason: Developers and researchers need a unified tool to benchmark and switch between different state-of-the-art text detection and segmentation models (`PP-OCRv6_manga v0.2`, core app `DBNet ResNet-34`, `Comic Text Detector / CTD`, and `ContemporaryCat / Manga-Text-Segmentation`) across pages and datasets with visual overlays, confidence badges, coarse text masks, and fine-grained character stroke/glyph masks (white ink characters on pure black background).

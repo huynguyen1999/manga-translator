@@ -210,7 +210,7 @@ class Translator(str, Enum):
     gemini = "gemini"
     chatgpt = "chatgpt"
     groq = "groq"
-    openrouter = "openrouter"
+    openrouter, tokenharbor = "openrouter", "tokenharbor"
     sugoi = "sugoi"
     custom_openai = "custom_openai"
     sakura = "sakura"

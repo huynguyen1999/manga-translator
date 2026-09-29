@@ -12,7 +12,7 @@ const DEFAULT_TRANSLATOR_MODELS: Record<string, string> = {
   gemini: "gemini-1.5-flash-002",
   openai: "gpt-5.4-mini",
   groq: "mixtral-8x7b-32768",
-  openrouter: "deepseek/deepseek-v4-flash-0731",
+  openrouter: "deepseek/deepseek-v4-flash-0731", tokenharbor: "deepseek-v4.1-flash:free",
   sugoi: "Sugoi V4.0",
   sakura: "Sakura",
   custom_openai: "Custom OpenAI",
@@ -27,7 +27,7 @@ const TRANSLATOR_ENGINES: Record<string, string> = {
   gemini: "Gemini",
   openai: "OpenAI",
   groq: "Groq",
-  openrouter: "OpenRouter",
+  openrouter: "OpenRouter", tokenharbor: "Token Harbor",
   sugoi: "Sugoi",
   sakura: "Sakura",
   custom_openai: "Custom OpenAI",
@@ -415,4 +415,3 @@ export const resolvePipelineStepSettings = (
     },
   };
 };
-

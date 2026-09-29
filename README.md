@@ -1155,6 +1155,7 @@ FIL: Filipino (Tagalog)
 | caiyun | ✔️ | | Requires `CAIYUN_TOKEN` |
 | openai | ✔️ | | Requires `OPENAI_API_KEY` |
 | deepseek | ✔️ | | Requires `DEEPSEEK_API_KEY` |
+| tokenharbor | ✔️ | | Token Harbor API (`TOKEN_HARBOR_API_KEY`), supports its free DeepSeek V4.1 Flash, MiMo V2.6 Flash, and Qwen3.8 Flash routes |
 | openrouter | ✔️ | | OpenRouter API (`OPENROUTER_API_KEY`), routes to cheapest provider |
 | groq | ✔️ | | Requires `GROQ_API_KEY` |
 | gemini | ✔️ | | Requires `GEMINI_API_KEY` |
@@ -1233,6 +1234,9 @@ This can achieve further optimization of the translation effect and make it poss
 | `DEEPSEEK_API_KEY`                     | DeepSeek API Key                                                                                         | `''`                               |                                                                                                           |
 | `DEEPSEEK_API_BASE`                    | DeepSeek API Base URL                                                                                   | `https://api.deepseek.com`         |                                                                                                           |
 | `DEEPSEEK_MODEL`                       | DeepSeek Model name                                                                                      | `deepseek-chat`                  | Options: `deepseek-chat` or `deepseek-reasoner`                                                           |
+| `TOKEN_HARBOR_API_KEY`                 | Token Harbor API Key                                                                                     | `''`                               | Get a key at https://tokenharbor.ai/dashboard/api-keys                                                    |
+| `TOKEN_HARBOR_API_BASE`                | Token Harbor API Base URL                                                                                | `https://tokenharbor.ai/v1`        |                                                                                                           |
+| `TOKEN_HARBOR_MODEL`                   | Token Harbor Model name                                                                                  | `deepseek-v4.1-flash:free`         | Falls back to `mimo-v2.6-flash:free` after 60 seconds; also accepts MiMo and Qwen free IDs                 |
 | `CUSTOM_OPENAI_API_KEY`                | Custom OpenAI API Key                                                    | `ollama`                         | Not needed for Ollama, but possibly required for other tools                                               |
 | `CUSTOM_OPENAI_API_BASE`               | Custom OpenAI API Base URL                                | `http://localhost:11434/v1`        | Use OLLAMA_HOST environment variable to change bind IP and port                                            |
 | `CUSTOM_OPENAI_MODEL`                  | Custom OpenAI compatible model name                                               | `''`                               | Example: `qwen2.5:7b`, ensure you pull and run it before usage                                             |
