@@ -15,6 +15,10 @@ ensure_link() {
   local target="$original_root/$2"
   local link_path="$worktree_root/$relative_path"
 
+  if [[ -e "$link_path" && "$link_path" -ef "$target" ]]; then
+    return
+  fi
+
   if [[ -L "$link_path" ]]; then
     [[ "$(readlink "$link_path")" == "$target" ]] || die "Unexpected symlink: $link_path"
     return

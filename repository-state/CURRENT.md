@@ -350,7 +350,7 @@ Manga Image Translator translates text in manga and other images through a pipel
 
 ## Common checks
 
-- Worktree dev server: run `./run_worktree_server.sh backend` or `./run_worktree_server.sh frontend` from any worktree. Backend mode links the original checkout's ignored panel library and models directory, then runs `server/main.py --workers 2` with the original venv on port `8000`; frontend mode links the original `front/node_modules`, runs on port `6868`, and proxies to backend port `8000`.
+- Dev server: run `./run_worktree_server.sh backend` or `./run_worktree_server.sh frontend` from the original checkout or any worktree. It links missing ignored assets/dependencies from the original checkout, accepts directories already present in the original checkout, and runs the selected code. Backend uses `server/main.py --workers 2` with the original venv on port `8000`; frontend uses the original `front/node_modules`, runs on port `6868`, and proxies to backend port `8000`.
 - Python: `pytest`
 - Frontend: `cd front && npm test`
 - Frontend types: `cd front && npm run typecheck`

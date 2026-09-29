@@ -1550,7 +1550,7 @@ Record new features and large changes here. Keep implementation detail in code, 
 
 ## 2026-09-29 — Add a worktree dev server launcher
 
-- Added the root-level `run_worktree_server.sh backend|frontend` to link ignored runtime assets or frontend dependencies from the original checkout and run the selected worktree code. Backend mode runs with two workers on port 8000; frontend mode runs on port 6868 and proxies API requests to port 8000.
+- Added the root-level `run_worktree_server.sh backend|frontend` to link ignored runtime assets or frontend dependencies from the original checkout and run the selected code. It also runs directly from the original checkout by accepting its existing asset directories. Backend mode uses two workers on port 8000; frontend mode runs on port 6868 and proxies API requests to port 8000.
 
 ## 2026-09-29 — Default fresh studio users to ALL CAPS lettering
 
