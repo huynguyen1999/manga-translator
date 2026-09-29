@@ -127,6 +127,27 @@ class _MockTranslator:
 
 
 class PipelineRerunTest(unittest.IsolatedAsyncioTestCase):
+    async def test_typesetting_restores_empty_bubble_detection_as_completed(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root) / "page-1"
+            folder.mkdir()
+            Image.new("RGB", (40, 40), "white").save(folder / "input.png")
+            (folder / "text_regions.json").write_text(json.dumps([{
+                "id": "free-text",
+                "lines": [[[5, 5], [12, 5], [12, 12], [5, 12]]],
+                "original_text": "source",
+                "translation": "translated",
+                "font_size": 12,
+            }]), encoding="utf-8")
+            (folder / "bubble_detections.json").write_text("[]", encoding="utf-8")
+
+            ctx, _ = await load_rerun_context(
+                folder, resolve_rerun_plan(PipelineRerunMode.TYPESETTING), self.config
+            )
+
+            self.assertEqual(ctx.bubble_detections, [])
+            self.assertTrue(ctx._bubble_detection_done)
+
     def test_atomic_copy_keeps_last_good_target_on_replace_failure(self):
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / "new.bin"

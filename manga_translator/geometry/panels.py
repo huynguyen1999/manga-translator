@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from manga_translator.rendering.layout.models import PanelConstraint
+from .panel_matching import match_panel_to_source
 
 
 @dataclass(frozen=True)
@@ -167,16 +168,14 @@ def infer_panel_constraints(
     if image is None or image.ndim < 2:
         return {}
     shape, res, remaining = image.shape[:2], {}, []
+    panels = list(panel_detections or [])
     for region in regions:
-        if panel_detections:
-            ys, xs = np.nonzero(_source_mask(region, shape))
-            if len(xs):
-                cx, cy = float(xs.mean()), float(ys.mean())
-                m = [p for p in panel_detections if getattr(p, "xyxy", None) and p.xyxy[0] <= cx <= p.xyxy[2] and p.xyxy[1] <= cy <= p.xyxy[3]]
-                if m:
-                    fs = max(1, int(getattr(region, "font_size", 12) or 12))
-                    res[id(region)] = PanelConstraint(f"ml:{getattr(m[0], 'order_index', 0)}", tuple(m[0].xyxy), confidence=float(getattr(m[0], "confidence", 0.9)), source="ml", margin=max(2, min(12, int(round(fs * 0.2)))))
-                    continue
+        if panels:
+            panel = match_panel_to_source(_source_mask(region, shape), panels)
+            if panel is not None:
+                fs = max(1, int(getattr(region, "font_size", 12) or 12))
+                res[id(region)] = PanelConstraint(f"ml:{getattr(panel, 'order_index', 0)}", tuple(panel.xyxy), confidence=float(getattr(panel, "confidence", 0.9)), source="ml", margin=max(2, min(12, int(round(fs * 0.2)))))
+                continue
         remaining.append(region)
     if remaining:
         excluded = list(other_regions or [])

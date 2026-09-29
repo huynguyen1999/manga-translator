@@ -77,10 +77,9 @@ def build_free_text_ownership_zones(
     inpaint_mask: np.ndarray | None = None,
     image: np.ndarray | None = None,
     other_regions: List[Any] | None = None,
+    panel_detections: Any = None,
 ) -> Dict[int, FreeTextZone]:
     """Create source-anchored free-text zones using the shared ownership solver."""
     from .ownership import build_free_text_ownership_zones as build_zones
 
-    return build_zones(
-        regions, obstacles, inpaint_mask=inpaint_mask, image=image, other_regions=other_regions
-    )
+    return build_zones(regions, obstacles, inpaint_mask=inpaint_mask, image=image, other_regions=other_regions, panel_detections=panel_detections)

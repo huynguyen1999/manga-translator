@@ -52,12 +52,13 @@ def layout_page(ctx: Any, config: Any, font_path: Optional[str] = None, options:
     option_debug = options.get("layout_debug", False) if isinstance(options, dict) else getattr(options, "layout_debug", False)
     layout_debug = bool(option_debug or getattr(ctx, "_layout_debug_enabled", False))
     timing: Dict[str, float] = {}
+    detection_done = bool(getattr(ctx, "_bubble_detection_done", False))
     try:
         apply_shape_aware_bubble_layout(
             ctx,
             config,
             font_path=active_font,
-            infer_bubbles=not getattr(ctx, "bubble_detections", None),
+            infer_bubbles=not detection_done and not getattr(ctx, "bubble_detections", None),
             timing=timing,
             layout_debug=layout_debug,
             page_geometry=getattr(ctx, "page_geometry", None),

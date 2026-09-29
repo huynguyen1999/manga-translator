@@ -205,9 +205,7 @@ def apply_shape_aware_bubble_layout(
         phase_start = _solver.perf_counter()
         bubble_halo = max(2, int(round(max((getattr(r, "source_font_size", 0) or getattr(r, "font_size", 0) or 12 for r in free_regions), default=12) * 0.20)))
         obstacles = _solver.build_page_obstacle_map(regions, img.shape[:2], bubble_halo=bubble_halo)
-        free_zones = _solver.build_free_text_ownership_zones(
-            free_regions, obstacles, inpaint_mask=inpaint_mask, image=img, other_regions=regions
-        )
+        free_zones = _solver.build_free_text_ownership_zones(free_regions, obstacles, inpaint_mask=inpaint_mask, image=img, other_regions=regions, panel_detections=getattr(ctx, "panel_detections", None))
         free_plans: Dict[int, List[LayoutCandidate]] = {}
         free_profiles: Dict[int, OriginalLayoutProfile] = {}
         for region in free_regions:

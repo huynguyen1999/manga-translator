@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 
 from manga_translator.config import Config
+from manga_translator.detection.panel import PanelDetection
 from manga_translator.geometry.panels import infer_panel_constraints
 from manga_translator.rendering.layout.models import (
     FreeTextZone,
@@ -11,6 +12,7 @@ from manga_translator.rendering.layout.models import (
     PlacementMode,
 )
 from manga_translator.rendering.layout.obstacles import build_page_obstacle_map
+from manga_translator.rendering.layout.obstacles import build_free_text_ownership_zones as build_zones_with_panels
 from manga_translator.rendering.layout.ownership import build_free_text_ownership_zones
 from manga_translator.rendering.layout.solver import (
     _clamp_free_text_translation,
@@ -83,6 +85,74 @@ def test_ownership_zone_receives_its_panel_constraint():
     assert constraint is region._panel_constraint
     assert constraint.bounds[0] > 150
     assert constraint.source == "cv"
+
+
+def test_saved_panel_association_prefers_smaller_enclosing_panel():
+    image = np.full((100, 100, 3), 255, dtype=np.uint8)
+    region = _region((45, 45, 55, 55))
+    panels = [
+        PanelDetection([0, 0, 100, 100], [], 0.99, order_index=1),
+        PanelDetection([40, 40, 60, 60], [], 0.50, order_index=2),
+    ]
+
+    constraint = infer_panel_constraints(image, [region], panel_detections=panels)[id(region)]
+
+    assert constraint.source == "ml"
+    assert constraint.bounds == (40, 40, 60, 60)
+
+
+def test_saved_panel_association_prefers_greater_source_coverage():
+    image = np.full((100, 100, 3), 255, dtype=np.uint8)
+    region = _region((40, 40, 60, 60))
+    panels = [
+        PanelDetection([39, 39, 56, 65], [], 0.99, order_index=1),
+        PanelDetection([43, 39, 61, 65], [], 0.10, order_index=2),
+    ]
+
+    constraint = infer_panel_constraints(image, [region], panel_detections=panels)[id(region)]
+
+    assert constraint.bounds == (43, 39, 61, 65)
+
+
+def test_centroid_fallback_accepts_rotated_source_when_most_pixels_fit():
+    image = np.full((100, 100, 3), 255, dtype=np.uint8)
+    region = TextBlock(
+        lines=[[[0, 50], [50, 0], [100, 50], [50, 100]]],
+        texts=["rotated"],
+        font_size=14,
+    )
+    panel = PanelDetection([0, 30, 100, 70], [], 0.9, order_index=1)
+
+    constraint = infer_panel_constraints(image, [region], panel_detections=[panel])[id(region)]
+
+    assert constraint.source == "ml"
+    assert constraint.bounds == (0, 30, 100, 70)
+
+
+def test_saved_panel_without_source_overlap_falls_back_to_cv():
+    image = _page_with_two_by_two_panels()
+    region = _region((215, 50, 235, 75))
+    panel = PanelDetection([0, 200, 100, 290], [], 0.99, order_index=1)
+
+    constraint = infer_panel_constraints(image, [region], panel_detections=[panel])[id(region)]
+
+    assert constraint.source == "cv"
+    assert constraint.bounds[0] > 150
+
+
+def test_ownership_zone_receives_saved_ml_panel_constraint():
+    image = np.full((100, 100, 3), 255, dtype=np.uint8)
+    region = _region((45, 45, 55, 55))
+    region.placement_mode = PlacementMode.FREE_TEXT
+    obstacles = build_page_obstacle_map([region], image.shape[:2])
+    panel = PanelDetection([30, 30, 70, 70], [], 0.9, order_index=3)
+
+    zones = build_zones_with_panels(
+        [region], obstacles, image=image, panel_detections=[panel]
+    )
+
+    assert zones[id(region)].panel_constraint.source == "ml"
+    assert zones[id(region)].panel_constraint.bounds == (30, 30, 70, 70)
 
 
 def test_too_small_source_footprint_does_not_force_unreadable_auto_font():

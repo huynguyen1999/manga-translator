@@ -101,7 +101,7 @@ async def load_rerun_context(
         elif mask_final_path.is_file():
             ctx.inpaint_mask = cv2.imread(str(mask_final_path), cv2.IMREAD_GRAYSCALE)
         ctx.mask = ctx.inpaint_mask
-    if (b_raw := _read_json("bubble_detections.json")):
+    if (b_raw := _read_json("bubble_detections.json")) is not None:
         try:
             from manga_translator.detection.bubble import deserialize_bubble_detections
             ctx.bubble_detections = deserialize_bubble_detections(b_raw, ctx.img_rgb.shape)

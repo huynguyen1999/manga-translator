@@ -35,6 +35,12 @@ Record new features and large changes here. Keep implementation detail in code, 
 - Updated `onClose` in `ResultGallery.tsx`'s editor properties to restore `selectedImage`, set `isModalOpen: true`, reset zoom level, and trigger `onOpenPageView(closing.folder)` to return directly to the image detailed view (`PageDetailModal` / `/gallery/pages/:folder`).
 - Added unit test in `front/app/components/ResultGallery.test.ts`.
 
+## 2026-09-29 — Preserve detector state and use saved panels in free-text layout
+
+- Reason: Empty bubble detection results were mistaken for missing results, and saved panel geometry was bypassed when building free-text ownership constraints.
+- Layout now suppresses legacy bubble inference after a completed empty detection, rerun hydration preserves empty bubble artifacts, and free-text layout receives saved panels with conservative source-coverage matching and CV fallback.
+- Added focused coverage for empty detection state, empty-artifact hydration, panel selection/fallback, and ownership-zone propagation.
+
 ## 2026-09-29 — Smallest enclosing panel spatial containment for text blocks
 
 - Reason: When nested or inset panels were detected, text block spatial assignment previously stopped on the first matching panel, causing larger macro container panels to swallow text blocks belonging to smaller sub-panels.

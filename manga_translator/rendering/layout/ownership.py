@@ -74,7 +74,7 @@ def build_free_text_ownership_zones(
     obstacles: PageObstacleMap,
     inpaint_mask: Optional[np.ndarray] = None,
     image: Optional[np.ndarray] = None,
-    other_regions: Optional[List[Any]] = None,
+    other_regions: Optional[List[Any]] = None, panel_detections: Any = None,
 ) -> Dict[int, FreeTextZone]:
     """Assign all free-text seeds simultaneously to disjoint FreeTextZones."""
     free_regions = [
@@ -87,7 +87,7 @@ def build_free_text_ownership_zones(
     shape = obstacles.panel_mask.shape[:2]
     h, w = shape
     panel_constraints = (
-        infer_panel_constraints(image, free_regions, other_regions=other_regions or regions)
+        infer_panel_constraints(image, free_regions, other_regions=other_regions or regions, panel_detections=panel_detections)
         if image is not None
         else {id(region): PanelConstraint("page", (0, 0, w, h)) for region in free_regions}
     )
