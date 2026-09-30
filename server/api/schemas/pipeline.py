@@ -1,5 +1,4 @@
 from typing import Any
-
 from pydantic import BaseModel, Field
 
 from manga_translator.config import MAX_MANGA_TITLE_LENGTH
@@ -18,6 +17,7 @@ class PipelineCaseRerunRequest(BaseModel):
     mode: str = Field(default="typesetting")
     settingsOverrides: dict[str, Any] = Field(default_factory=dict)
     artifacts: dict[str, Any] = Field(default_factory=dict)
+    includeLayoutProfile: bool = False
 
 
 class RerenderRequest(BaseModel):

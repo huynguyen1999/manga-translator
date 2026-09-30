@@ -10,8 +10,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from ...config import Config
-from ...utils import is_preserved_region
-from .. import _points_for_rect, fg_bg_compare, stroke
 from .free_text_search import (
     _clamp_free_text_translation,
     _free_text_footprint_qa,
@@ -21,11 +19,10 @@ from .free_text_search import (
     _free_text_search_result,
     _free_text_shift_candidate,
 )
-from .free_text_stages import _group_typography_stages, _search_first_viable_stage
-from .free_text_typography import _free_text_typography_candidates
+from .free_text_stages import _search_first_viable_stage
+from .free_text_context import FreeTextSolveContext, _source_height_candidates
 from .joint_layout import _candidate_bbox
 from .models import (
-    CandidateRaster,
     FreeTextDamageTarget,
     FreeTextZone,
     LayoutCandidate,
@@ -39,41 +36,10 @@ from .raster import (
     _candidate_raster_at_offset,
     rasterize_candidate,
 )
-from .source_profile import build_original_layout_profile
 from .candidate_footprint import (
     free_text_fast_gate as _free_text_fast_gate,
     log_free_text_shadow_comparison as _log_free_text_shadow_comparison,
 )
-
-def _source_height_candidates(candidates, profile, target, panel):
-    minimum = max(1, int(math.ceil(profile.block_height)))
-    maximum = max(minimum, max((max(line.y + line.height for line in candidate.lines) for candidate in candidates), default=0))
-    if panel is not None:
-        _, top, _, bottom = panel.bounds
-        margin = max(0, int(panel.margin))
-        maximum = min(maximum, bottom - top - margin * 2)
-        minimum = min(minimum, max(1, bottom - margin - max(top + margin, int(profile.bbox[1]))))
-    if maximum <= 0: return []
-    minimum = min(minimum, maximum)
-    fitted = []
-    for candidate in candidates:
-        top = min(line.y for line in candidate.lines)
-        bottom = max(line.y + line.height for line in candidate.lines)
-        content_height = bottom - top
-        if content_height > maximum:
-            continue
-        height = max(minimum, content_height)
-        offset = -top
-        for line in candidate.lines:
-            line.y += offset
-            line.slot.y_start += offset
-            line.slot.y_end += offset
-        candidate.layout_bounds = (
-            min(line.x for line in candidate.lines), 0,
-            max(line.x + line.width for line in candidate.lines), height,
-        )
-        fitted.append(candidate)
-    return fitted
 
 def _materialize_free_text_search_result(
     result: SearchResult,
@@ -148,11 +114,26 @@ def _validate_fast_result(
         zone.rejections = rejections
     return accepted[0] if accepted else None
 
+
+def _free_text_candidate_alternative(candidate: LayoutCandidate) -> Dict[str, Any]:
+    return {
+        "font_size": candidate.font_size, "lines": len(candidate.lines),
+        "text": [line.text for line in candidate.lines],
+        "damage_coverage": candidate.qa.get("damage_coverage", 0.0),
+        "core_coverage": candidate.qa.get("core_damage_coverage", 0.0),
+        "expansion_ratio": candidate.qa.get("expansion_ratio", 1.0),
+        "center_error_px": candidate.qa.get("center_error_px", 0.0),
+        "center_drift": candidate.qa.get("center_error_px", 0.0),
+        "penalty": candidate.penalty,
+    }
+
+
 def _layout_env_enabled(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 def _layout_env_disabled(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"0", "false", "no", "off"}
+
 
 def _solve_free_text_region_once(
     region: Any,
@@ -165,6 +146,7 @@ def _solve_free_text_region_once(
     allow_early_accept: bool = False,
     shadow_compare: bool = False,
     force_exhaustive: bool = False,
+    preparation: Optional[FreeTextSolveContext] = None,
 ) -> Optional[Tuple[LayoutCandidate, OriginalLayoutProfile, Dict[str, Any]]]:
     """Solve FREE_TEXT as frozen typography followed by rigid placement.
 
@@ -179,49 +161,35 @@ def _solve_free_text_region_once(
         region._free_text_attempt_qa = {"failure_stage": "empty_ownership", "reason": "source_overlaps_other_regions"}
         return None
 
-    profile = build_original_layout_profile(region, zone.ownership_mask)
+    preparation = preparation if preparation is not None else FreeTextSolveContext()
+    profile = preparation.prepare(
+        region, zone, obstacles, config, image_shape, text, source_mask,
+        full_font_search=force_exhaustive,
+    )
     if profile is None:
         return None
-    if config.render.font_size is not None:
-        region.calibrated_font_size = int(config.render.font_size)
-        region._font_policy_diagnostics = {"explicit_font_size": True}
-
-    target = zone.damage_target
     prof = get_solver_profile()
-    prof.free_text_regions += 1
-    t_topo0 = perf_counter()
-    typography = _source_height_candidates(
-        _free_text_typography_candidates(
-            text, profile, config, image_shape, target=target,
-            panel_constraint=zone.panel_constraint,
-            language=getattr(region, "target_lang", "en_US"), preserve=is_preserved_region(region),
-        ),
-        profile, target, zone.panel_constraint,
-    )
-    prof.ft_typography_ms += (perf_counter() - t_topo0) * 1000.0
-    region._free_text_attempt_qa = {"typography_candidates": len(typography),
-        "attempted_font_sizes": sorted({c.font_size for c in typography}, reverse=True)}
+    target = preparation.target
+    typography = preparation.typography
+    region._free_text_attempt_qa = {
+        "typography_candidates": len(typography),
+        "attempted_font_sizes": sorted({c.font_size for c in typography}, reverse=True),
+    }
     if not typography:
         region._free_text_attempt_qa["failure_stage"] = "typography"
         return None
-    prof.free_text_typography_candidates += len(typography)
-
-    if target is None or target.area == 0:
-        damage_centroid = profile.centroid
-    else:
-        damage_centroid = (target.centroid_x, target.centroid_y)
-    target_width = target.width if target is not None else profile.block_width
-    target_height = target.height if target is not None else profile.block_height
-
-    stroke_width = stroke.get_text_stroke_width(max(c.font_size for c in typography), fg_bg_compare(*region.get_font_colors())[1], region.bg_colors)
-    source = source_mask.astype(bool)
-    other_text = obstacles.text_mask.astype(bool) & ~source
-    candidate_rasters: Dict[int, CandidateRaster] = {}
-    prepared_candidates: Dict[int, Tuple[Any, ...]] = {}
+    damage_centroid = preparation.damage_centroid
+    target_width = preparation.target_width
+    target_height = preparation.target_height
+    stroke_width = preparation.stroke_width
+    source = preparation.source
+    other_text = preparation.other_text
+    stage_groups = preparation.stage_groups
+    candidate_rasters = preparation.candidate_rasters
+    prepared_candidates = preparation.prepared_candidates
     search_results: List[SearchResult] = []
     evaluated: List[LayoutCandidate] = []
     eval_candidates = typography
-    stage_groups = _group_typography_stages(eval_candidates)
     first_stage_candidates = stage_groups[0]
     domain_for_overflow = None if getattr(zone, "domain_center_only", False) else zone.placement_domain_mask
     fast_results_by_offset: Dict[Tuple[int, int, int], SearchResult] = {}
@@ -231,7 +199,7 @@ def _solve_free_text_region_once(
         prepared = prepared_candidates.get(cid)
         if prepared is not None:
             prof.candidate_raster_cache_hits += 1
-            return prepared
+            return (*prepared, int(getattr(region, "_free_text_domain_qa", {}).get("geodesic_limit_px", 64)))
         t_crop0 = perf_counter()
         raster = candidate_rasters.get(cid)
         if raster is None:
@@ -258,30 +226,32 @@ def _solve_free_text_region_once(
         if clamped is None:
             return None
         ideal_dx, ideal_dy = clamped
-        max_radius = int(getattr(region, "_free_text_domain_qa", {}).get("geodesic_limit_px", 64))
         prepared = (
             raster, base_box, ink_crop, visual_crop, block_crop, base_centroid,
-            base_ink_bbox, ideal_dx, ideal_dy, max_radius,
+            base_ink_bbox, ideal_dx, ideal_dy,
         )
         prepared_candidates[cid] = prepared
-        return prepared
+        return (*prepared, int(getattr(region, "_free_text_domain_qa", {}).get("geodesic_limit_px", 64)))
 
-    fast_requested = shadow_compare or (
-        allow_early_accept and not force_exhaustive and not _layout_env_disabled("LAYOUT_FAST_FREE_TEXT")
-    )
-    try_local_stage = not shadow_compare and not force_exhaustive and _layout_env_enabled("LAYOUT_LAZY_CANDIDATES")
+    budget = preparation.search_budget
+    budget_initial = budget is not None and budget.initial
+    previous_candidates = list(getattr(region, "_free_text_candidate_pool", [])) if budget is not None and not budget_initial else []
+    fast_requested = not budget_initial and (shadow_compare or (allow_early_accept and not force_exhaustive and not _layout_env_disabled("LAYOUT_FAST_FREE_TEXT")))
+    try_local_stage = not budget_initial and allow_early_accept and not shadow_compare and not force_exhaustive and not _layout_env_disabled("LAYOUT_LAZY_CANDIDATES")
     fast_result: Optional[SearchResult] = None
     fast_overflow: Optional[float] = None
     fast_status = "free_text_ideal"
+    local_results: List[Tuple[SearchResult, float]] = []
+    fast_path_attempted = fast_requested or try_local_stage
     shadow_candidate = None
     shadow_profile = SolverProfileStats() if shadow_compare else None
     shadow_started = perf_counter() if shadow_compare else 0.0
     shadow_rejections = dict(getattr(zone, "rejections", {})) if shadow_compare else None
+    shadow_caches = [cache.copy() for cache in (candidate_rasters, prepared_candidates)] if shadow_compare else None
     shadow_token = _SOLVER_PROFILE.set(shadow_profile) if shadow_compare else None
     if shadow_compare:
         prof = shadow_profile
     try:
-        ideal_fast_gate_accepted = False
         if (fast_requested or try_local_stage) and eval_candidates:
             first = first_stage_candidates[0]
             prepared = prepare_candidate(first) if fast_requested else None
@@ -301,10 +271,19 @@ def _solve_free_text_region_once(
                     )
                     if accepted:
                         fast_result = result
-                        ideal_fast_gate_accepted = True
 
-            if fast_requested and not ideal_fast_gate_accepted:
-                prof.free_text_full_search_fallbacks += 1
+            if fast_result is not None and allow_early_accept and not shadow_compare:
+                fast_candidate = _validate_fast_result(
+                    fast_result, region, profile, target, damage_centroid, obstacles, other_text,
+                    fast_status, fast_overflow, domain_for_overflow, config, image_shape, zone,
+                )
+                if fast_candidate is not None:
+                    prof.free_text_ideal_successes += 1
+                    fast_candidate.qa["candidate_alternatives"] = [_free_text_candidate_alternative(fast_candidate)]
+                    region._free_text_candidate_pool = [fast_candidate]
+                    return fast_candidate, profile, fast_candidate.qa
+                fast_result = None
+                fast_results_by_offset.clear()
 
             if fast_result is None and try_local_stage:
                 prof.free_text_local_search_runs += 1
@@ -336,11 +315,36 @@ def _solve_free_text_region_once(
                         )
                         if not accepted:
                             continue
-                        fast_result, fast_overflow, fast_status = result, overflow, "free_text_local"
-                        prof.free_text_local_search_successes += 1
+                        local_results.append((result, overflow))
+
+                validated_local = []
+                seen_local = set()
+                seen_local_positions = set()
+                for result, overflow in sorted(local_results, key=lambda item: item[0].score):
+                    position = (id(result.typography_candidate), result.dx, result.dy)
+                    if position in seen_local_positions:
+                        continue
+                    seen_local_positions.add(position)
+                    candidate = _validate_fast_result(
+                        result, region, profile, target, damage_centroid, obstacles, other_text,
+                        "free_text_local", overflow, domain_for_overflow, config, image_shape, zone,
+                    )
+                    if candidate is None:
+                        continue
+                    prof.free_text_local_search_successes += 1
+                    layout = (candidate.font_size, tuple((line.text, line.x, line.y) for line in candidate.lines))
+                    if layout in seen_local:
+                        continue
+                    seen_local.add(layout)
+                    validated_local.append(candidate)
+                    if len(validated_local) == 8:
                         break
-                    if fast_result is not None:
-                        break
+                if validated_local:
+                    alternatives = [_free_text_candidate_alternative(candidate) for candidate in validated_local]
+                    for candidate in validated_local:
+                        candidate.qa["candidate_alternatives"] = alternatives
+                    region._free_text_candidate_pool = validated_local
+                    return validated_local[0], profile, validated_local[0].qa
 
         if shadow_compare and fast_result is not None:
             shadow_candidate = _validate_fast_result(
@@ -350,15 +354,16 @@ def _solve_free_text_region_once(
             )
             if shadow_candidate is not None:
                 prof.free_text_ideal_successes += fast_status == "free_text_ideal"
-            elif fast_status == "free_text_ideal":
-                prof.free_text_full_search_fallbacks += 1
+        if shadow_compare and fast_path_attempted and shadow_candidate is None:
+            prof.free_text_full_search_fallbacks += 1
     finally:
         if shadow_compare:
             zone.rejections = shadow_rejections
             _SOLVER_PROFILE.reset(shadow_token)
             prof = get_solver_profile()
-            candidate_rasters.clear()
-            prepared_candidates.clear()
+            for cache, saved in zip((candidate_rasters, prepared_candidates), shadow_caches):
+                cache.clear()
+                cache.update(saved)
             fast_results_by_offset.clear()
             metrics = shadow_profile.to_dict()
             region._free_text_shadow_metrics = {
@@ -366,42 +371,29 @@ def _solve_free_text_region_once(
                 "workload": metrics["workload"], "timings_ms": metrics["timings_ms"],
             }
 
-    if fast_result is not None and fast_status == "free_text_ideal" and allow_early_accept and not force_exhaustive and not shadow_compare:
-        fast_candidate = _validate_fast_result(
-            fast_result, region, profile, target, damage_centroid, obstacles, other_text,
-            fast_status, fast_overflow, domain_for_overflow, config, image_shape, zone,
-        )
-        if fast_candidate is not None:
-            prof.free_text_ideal_successes += 1
-            fast_candidate.qa["candidate_alternatives"] = [{
-                "font_size": fast_candidate.font_size,
-                "lines": len(fast_candidate.lines),
-                "text": [line.text for line in fast_candidate.lines],
-                "damage_coverage": fast_candidate.qa.get("damage_coverage", 0.0),
-                "core_coverage": fast_candidate.qa.get("core_damage_coverage", 0.0),
-                "expansion_ratio": fast_candidate.qa.get("expansion_ratio", 1.0),
-                "center_error_px": fast_candidate.qa.get("center_error_px", 0.0),
-                "center_drift": fast_candidate.qa.get("center_error_px", 0.0),
-                "penalty": fast_candidate.penalty,
-            }]
-            region._free_text_candidate_pool = [fast_candidate]
-            return fast_candidate, profile, fast_candidate.qa
+    if fast_path_attempted and not shadow_compare:
         prof.free_text_full_search_fallbacks += 1
-        fast_results_by_offset.clear()
 
-    prof.free_text_full_search_runs += 1
+    if not budget_initial: prof.free_text_full_search_runs += 1
     from .candidate_footprint import stage_render_validator
-    search_results = _search_first_viable_stage(
-        stage_groups, prepare_candidate, fast_results_by_offset, profile, damage_centroid,
-        target_width, target_height, zone, obstacles, other_text,
-        _free_text_offset_search, _free_text_offset_refine, _free_text_search_result,
-        stage_render_validator(region, config, image_shape, zone, obstacles, other_text), force_exhaustive,
-    )
+    render_validator = stage_render_validator(region, config, image_shape, zone, obstacles, other_text)
+
+    def search_stages(stages, collect_stages=False, offset_search=None, offset_refine=None):
+        domain = getattr(region, "_free_text_domain_qa", {}).get("bbox")
+        domain_bbox = tuple(domain) if isinstance(domain, (list, tuple)) and len(domain) == 4 else None
+        return _search_first_viable_stage(
+            stages, prepare_candidate, fast_results_by_offset, profile, damage_centroid,
+            target_width, target_height, zone, obstacles, other_text,
+            offset_search or _free_text_offset_search,
+            offset_refine or _free_text_offset_refine, _free_text_search_result,
+            render_validator, collect_stages, domain_bbox, budget,
+        )
+
+    search_results = preparation.search_with_fallback(region, zone, config, image_shape, profile, search_stages, force_exhaustive)
 
     search_results.sort(key=lambda result: result.score)
     selected_results = []
-    seen_layouts = set()
-    seen_fonts = set()
+    candidate_limit, seen_layouts, seen_fonts = (2 if budget_initial else 8), set(), set()
     for result in search_results:
         font_size = result.typography_candidate.font_size
         if font_size in seen_fonts:
@@ -412,9 +404,9 @@ def _solve_free_text_region_once(
         seen_fonts.add(font_size)
         seen_layouts.add(layout)
         selected_results.append(result)
-        if len(selected_results) == 8:
+        if len(selected_results) == candidate_limit:
             break
-    if len(selected_results) < 8:
+    if len(selected_results) < candidate_limit:
         seen_positions = {(id(item.typography_candidate), item.dx, item.dy) for item in selected_results}
         for result in search_results:
             key = (id(result.typography_candidate), result.dx, result.dy)
@@ -422,11 +414,12 @@ def _solve_free_text_region_once(
                 continue
             seen_positions.add(key)
             selected_results.append(result)
-            if len(selected_results) == 8:
+            if len(selected_results) == candidate_limit:
                 break
     evaluated.extend(
         _materialize_free_text_search_result(
             result, profile, target, damage_centroid, obstacles, other_text,
+            status="free_text_local" if budget_initial and getattr(result.typography_candidate, "_local_search", False) else "free_text",
             placement_domain_mask=domain_for_overflow,
         )
         for result in selected_results
@@ -438,13 +431,15 @@ def _solve_free_text_region_once(
 
     from .candidate_footprint import filter_renderable_candidates
     evaluated = filter_renderable_candidates(region, evaluated, config, image_shape, zone, obstacles, other_text)
-    if not evaluated:
+    if previous_candidates: previous_candidates = filter_renderable_candidates(region, previous_candidates, config, image_shape, zone, obstacles, other_text)
+    if not evaluated and not previous_candidates:
         if shadow_compare:
             region._free_text_shadow_metrics["comparison"] = _log_free_text_shadow_comparison(
                 shadow_candidate, None, image_shape,
             )
         return None
 
+    evaluated.extend(previous_candidates)
     evaluated.sort(key=lambda candidate: candidate.penalty)
     if shadow_compare:
         region._free_text_shadow_metrics["comparison"] = _log_free_text_shadow_comparison(
@@ -458,34 +453,34 @@ def _solve_free_text_region_once(
             continue
         seen.add(key)
         unique.append(candidate)
-        if len(unique) >= 8:
+        if len(unique) >= candidate_limit:
             break
 
-    alternatives = [
-        {
-            "font_size": candidate.font_size,
-            "lines": len(candidate.lines),
-            "text": [line.text for line in candidate.lines],
-            "damage_coverage": candidate.qa.get("damage_coverage", 0.0),
-            "core_coverage": candidate.qa.get("core_damage_coverage", 0.0),
-            "expansion_ratio": candidate.qa.get("expansion_ratio", 1.0),
-            "center_error_px": candidate.qa.get("center_error_px", 0.0),
-            "center_drift": candidate.qa.get("center_error_px", 0.0),
-            "penalty": candidate.penalty,
-        }
-        for candidate in unique
-    ]
+    alternatives = [_free_text_candidate_alternative(candidate) for candidate in unique]
     for candidate in unique:
         candidate.qa["candidate_alternatives"] = alternatives
-    region._free_text_candidate_pool = unique[:16]
+    region._free_text_candidate_pool = unique[:candidate_limit]
     best = unique[0]
     return best, profile, best.qa
 
 def _solve_free_text_region(region, zone, obstacles, config, image_shape, solver_margin,
                             solver_max_y_trials, **options):
     from .free_text_constraints import _build_free_text_placement_domain
+    from .search_budget import get_search_budget
     attempts = []
+    budget = get_search_budget()
+    preparation = getattr(region, "_free_text_solve_context", None)
+    reused_preparation = (
+        budget is not None and isinstance(preparation, FreeTextSolveContext)
+        and preparation.search_budget is budget and preparation._zone is zone
+    )
+    if not reused_preparation:
+        preparation = FreeTextSolveContext()
+        region._free_text_candidate_pool = []
+    region._free_text_solve_context = preparation
     for distance, center_only in ((64, False), (128, False), (128, True)):
+        if budget is not None and budget.expired():
+            break
         if center_only and not any(attempt["rejections"].get("local_domain") for attempt in attempts):
             break
         zone.domain_center_only = center_only
@@ -496,7 +491,8 @@ def _solve_free_text_region(region, zone, obstacles, config, image_shape, solver
         zone.rejections = {}
         region._free_text_attempt_qa = {}
         result = _solve_free_text_region_once(region, zone, obstacles, config, image_shape,
-                                             solver_margin, solver_max_y_trials, **options)
+                                             solver_margin, solver_max_y_trials,
+                                             preparation=preparation, **options)
         attempts.append({**region._free_text_domain_qa, **region._free_text_attempt_qa,
                          "rejections": dict(zone.rejections), "overlapping_source_ids": getattr(region, "_free_text_source_conflicts", [])})
         region._free_text_attempt_qa = {"placement_attempts": attempts}
@@ -504,4 +500,8 @@ def _solve_free_text_region(region, zone, obstacles, config, image_shape, solver
             for candidate in region._free_text_candidate_pool:
                 candidate.qa.update(region._free_text_attempt_qa)
             return result
+    if reused_preparation and budget is not None and region._free_text_candidate_pool:
+        candidate = region._free_text_candidate_pool[0]
+        candidate.qa.update(region._free_text_attempt_qa)
+        return candidate, preparation.profile, candidate.qa
     return None

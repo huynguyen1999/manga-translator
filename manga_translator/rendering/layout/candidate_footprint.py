@@ -9,33 +9,31 @@ import numpy as np
 from .joint_layout import _candidate_bbox
 from .models import LayoutCandidate, PageObstacleMap, SearchResult
 from .raster import _candidate_global_glyph_mask
+from .compositor_cache import get_candidate_render_box, footprint_cache_key
 
 logger = logging.getLogger("layout.solver")
 
 
 def filter_renderable_candidates(region, candidates, config, image_shape, zone, obstacles, other_text):
-    from .. import fg_bg_compare
-    from ..line_breaking import render_positioned_lines
     from ..placement_geometry import _points_for_rect
-    from ..stroke import get_text_stroke_width
     from .render_output_validation import _warped_alpha_crop
     from .free_text_search import _free_text_hard_valid
+    from .profiling import get_solver_profile
 
-    fg, bg = fg_bg_compare(*region.get_font_colors())
-    accepted = []
+    profile, accepted = get_solver_profile(), []
     for candidate in candidates:
-        bounds = _candidate_bbox(candidate)
-        stroke = get_text_stroke_width(candidate.font_size, bg, getattr(region, "bg_colors", None))
-        lines = [{"text": line.text, "x": line.x, "y": line.y,
-                  "width": line.width, "height": line.height} for line in candidate.lines]
-        box = render_positioned_lines(lines, list(bounds), candidate.font_size, fg, bg,
-            config.render.line_spacing or 0.0, getattr(region, "target_lang", "ENG"),
-            getattr(region, "direction", "hr") == "hr", stroke_width=stroke)
+        bounds = tuple(map(int, _candidate_bbox(candidate)))
+        box = get_candidate_render_box(region, candidate, config)
         if box is None:
             zone.rejections["rasterization"] = zone.rejections.get("rasterization", 0) + 1
             continue
         points = _points_for_rect(region, bounds, image_shape[1], image_shape[0])
-        footprint, outside = _warped_alpha_crop(box, points, image_shape)
+        footprint_key = footprint_cache_key(candidate._render_box_key, bounds, points, image_shape)
+        footprint, outside = profile.compositor_crops.get(footprint_key), False
+        if footprint is None:
+            footprint, outside = _warped_alpha_crop(box, points, image_shape)
+            if footprint is not None and not outside:
+                profile.compositor_crops[footprint_key] = footprint
         if outside or footprint is None:
             zone.rejections["page_bounds"] = zone.rejections.get("page_bounds", 0) + 1
             continue
@@ -43,22 +41,24 @@ def filter_renderable_candidates(region, candidates, config, image_shape, zone, 
         if not _free_text_hard_valid(crop, visual, zone, obstacles, other_text, bounds):
             continue
         candidate._render_footprint = footprint
-        candidate.qa["layout_stroke_width"] = stroke
-        candidate.qa["render_footprint_validated"] = True
+        candidate.qa.update(layout_stroke_width=candidate._render_stroke_width, render_footprint_validated=True)
         accepted.append(candidate)
     return accepted
 
 
 def stage_render_validator(region, config, image_shape, zone, obstacles, other_text):
     from .free_text_search import _free_text_shift_candidate
+    from .search_budget import get_search_budget
+
     def validate(results):
         accepted = []
-        # ponytail: inspect 64 ranked placements per tier; extend if a real page exhausts this pool.
-        for result in sorted(results, key=lambda item: item.score)[:64]:
+        budget = get_search_budget()
+        max_validated = 2 if budget is not None and budget.initial else 8
+        for result in sorted(results, key=lambda item: item.score):
             candidate = _free_text_shift_candidate(result.typography_candidate, result.dx, result.dy)
             if filter_renderable_candidates(region, [candidate], config, image_shape, zone, obstacles, other_text):
                 accepted.append(result)
-            if len(accepted) >= 8:
+            if len(accepted) >= max_validated:
                 break
         return accepted
     return validate

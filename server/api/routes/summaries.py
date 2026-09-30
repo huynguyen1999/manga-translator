@@ -50,18 +50,13 @@ def create_summary_read_router(
     @router.get("/results/group/summary/config", tags=["api"])
     @router.get("/api/results/group/summary/config", tags=["api"])
     async def get_manga_summary_config():
-        from manga_translator.translators.keys import GEMINI_MODEL, GROQ_MODEL
+        from manga_translator.translators.keys import GEMINI_MODEL, GROQ_MODEL, DASH_MODEL, OPENROUTER_MODEL
 
         return {
             "provider": "deepseek",
             "model": DEFAULT_SUMMARY_MODEL,
-            "models": ["deepseek-flash", "groq", "gemini", "tokenharbor"],
-            "providers": {
-                "deepseek": ["deepseek-flash"],
-                "groq": [GROQ_MODEL],
-                "gemini": [GEMINI_MODEL],
-                "tokenharbor": [os.getenv("TOKEN_HARBOR_MODEL", "deepseek-v4.1-flash:free")],
-            },
+            "models": ["deepseek-flash", "dash", "groq", "gemini", "openrouter", "tokenharbor"],
+            "providers": {"deepseek": ["deepseek-flash"], "dash": [DASH_MODEL], "groq": [GROQ_MODEL], "gemini": [GEMINI_MODEL], "openrouter": [OPENROUTER_MODEL], "tokenharbor": [os.getenv("TOKEN_HARBOR_MODEL", "deepseek-v4.1-flash:free")]},
         }
 
     @router.get("/results/group/summary/jobs", tags=["api"])
@@ -262,12 +257,10 @@ def create_summary_control_router(
             )
             get_scheduler().wake()
         else:
+            resume_model = f"{status.get('provider')}:{status.get('model')}" if status.get("provider") and status.get("model") else (status.get("model") or status.get("provider"))
             req_data = MangaSummaryRequest(
-                groupId=group_value if store is not None else None,
-                mangaTitle=clean_title,
-                summaryModel=status.get("model"),
-                regenerate=True,
-                refreshText=False,
+                groupId=group_value if store is not None else None, mangaTitle=clean_title,
+                summaryModel=resume_model, regenerate=True, refreshText=False,
             )
             pause_event = get_controller().get_pause_event(group_value)
             pause_event.set()

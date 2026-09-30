@@ -26,43 +26,22 @@ interface GalleryFilterControlsProps {
 }
 
 export function GalleryFilterControls({
-  statusFilter,
-  minPages,
-  maxPages,
-  handleSourceChange,
-  toggleStatusFlag,
-  handlePageRangeChange,
-  handleClearFilters,
-  mangaSearchInput,
-  setMangaSearchInput,
-  handleSearchSubmit,
-  sortBy,
-  setSortBy,
-  setGalleryPage,
-  onGallerySortChange,
+  statusFilter, minPages, maxPages, handleSourceChange, toggleStatusFlag,
+  handlePageRangeChange, handleClearFilters, mangaSearchInput, setMangaSearchInput,
+  handleSearchSubmit, sortBy, setSortBy, setGalleryPage, onGallerySortChange,
 }: GalleryFilterControlsProps) {
   const mangaSearchRef = useRef<HTMLInputElement>(null);
-  const tokens = (statusFilter && statusFilter !== 'all')
-    ? statusFilter.split(',').map((s) => s.trim()).filter(Boolean)
-    : [];
-  const currentSource: 'all' | 'translated' | 'original' = tokens.includes('translated')
-    ? 'translated'
-    : tokens.includes('original')
-      ? 'original'
-      : 'all';
+  const tokens = (statusFilter && statusFilter !== 'all') ? statusFilter.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  const currentSource: 'all' | 'translated' | 'original' = tokens.includes('translated') ? 'translated' : tokens.includes('original') ? 'original' : 'all';
   const isSummarizedActive = tokens.includes('summarized');
   const isReviewActive = tokens.includes('review');
 
   const [minInput, setMinInput] = useState(minPages != null ? String(minPages) : '');
   const [maxInput, setMaxInput] = useState(maxPages != null ? String(maxPages) : '');
+  const [isPageRangeFocused, setIsPageRangeFocused] = useState(false);
 
-  useEffect(() => {
-    setMinInput(minPages != null ? String(minPages) : '');
-  }, [minPages]);
-
-  useEffect(() => {
-    setMaxInput(maxPages != null ? String(maxPages) : '');
-  }, [maxPages]);
+  useEffect(() => { setMinInput(minPages != null ? String(minPages) : ''); }, [minPages]);
+  useEffect(() => { setMaxInput(maxPages != null ? String(maxPages) : ''); }, [maxPages]);
 
   const commitPageRange = (newMinStr: string, newMaxStr: string) => {
     const minVal = parseInt(newMinStr, 10);
@@ -72,14 +51,16 @@ export function GalleryFilterControls({
     handlePageRangeChange(parsedMin, parsedMax);
   };
 
+  const handlePageRangeSubmit = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    commitPageRange(minInput, maxInput);
+  };
+
   const hasActiveFilters = currentSource !== 'all' || isSummarizedActive || isReviewActive || minPages != null || maxPages != null || Boolean(mangaSearchInput.trim());
 
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
-      if (
-        !shouldFocusMangaSearch(event) ||
-        document.querySelector('[role="dialog"][aria-modal="true"], dialog[open]')
-      ) return;
+      if (!shouldFocusMangaSearch(event) || document.querySelector('[role="dialog"][aria-modal="true"], dialog[open]')) return;
       event.preventDefault();
       mangaSearchRef.current?.focus();
     };
@@ -97,29 +78,19 @@ export function GalleryFilterControls({
           type="text"
           value={mangaSearchInput}
           onChange={(e) => setMangaSearchInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              handleSearchSubmit(mangaSearchInput);
-            }
-          }}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSearchSubmit(mangaSearchInput); } }}
           placeholder="Search manga..."
           aria-label="Search manga"
           aria-keyshortcuts="/"
           className="h-11 w-full rounded-lg border border-zinc-200 bg-zinc-50 pl-10 pr-12 text-sm text-zinc-800 placeholder-zinc-400 transition-colors focus-visible:border-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 sm:h-10"
         />
         {!mangaSearchInput && (
-          <kbd className="pointer-events-none absolute right-3 hidden rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-[11px] font-medium text-zinc-500 shadow-xs dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-400 sm:inline-flex">
-            /
-          </kbd>
+          <kbd className="pointer-events-none absolute right-3 hidden rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-[11px] font-medium text-zinc-500 shadow-xs dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-400 sm:inline-flex">/</kbd>
         )}
         {mangaSearchInput && (
           <button
             type="button"
-            onClick={() => {
-              setMangaSearchInput('');
-              handleSearchSubmit('');
-            }}
+            onClick={() => { setMangaSearchInput(''); handleSearchSubmit(''); }}
             className="absolute right-0 top-0 flex h-11 w-11 items-center justify-center rounded-r-lg text-zinc-400 hover:text-zinc-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500 dark:hover:text-zinc-200 sm:h-10 sm:w-10"
             title="Clear search"
             aria-label="Clear search"
@@ -177,13 +148,20 @@ export function GalleryFilterControls({
       </button>
 
       {/* Page Range Filter */}
-      <div
+      <form
+        onSubmit={handlePageRangeSubmit}
+        onFocus={() => setIsPageRangeFocused(true)}
+        onBlur={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget)) {
+            setIsPageRangeFocused(false);
+          }
+        }}
         className={`col-span-2 flex h-11 min-w-0 items-center justify-between gap-2 rounded-lg border px-3 text-sm transition-colors sm:h-10 sm:w-auto sm:flex-none ${
           minPages != null || maxPages != null
             ? 'border-indigo-400 bg-indigo-50/50 dark:border-indigo-700 dark:bg-indigo-950/40 text-zinc-800 dark:text-zinc-200'
             : 'border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
         }`}
-        title="Filter by page count range"
+        title="Filter by page count range (Press Enter to apply)"
       >
         <Icon icon="carbon:document-multiple-01" className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
         <span className="text-xs text-zinc-500 dark:text-zinc-400">Pages</span>
@@ -192,10 +170,8 @@ export function GalleryFilterControls({
           min={1}
           placeholder="Min"
           value={minInput}
-          onChange={(e) => {
-            setMinInput(e.target.value);
-            commitPageRange(e.target.value, maxInput);
-          }}
+          onChange={(e) => setMinInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handlePageRangeSubmit(); } }}
           aria-label="Minimum page count"
           className="w-12 rounded bg-transparent text-center text-xs text-zinc-800 outline-none placeholder-zinc-400 focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-200 sm:w-10 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
         />
@@ -205,21 +181,25 @@ export function GalleryFilterControls({
           min={1}
           placeholder="Max"
           value={maxInput}
-          onChange={(e) => {
-            setMaxInput(e.target.value);
-            commitPageRange(minInput, e.target.value);
-          }}
+          onChange={(e) => setMaxInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handlePageRangeSubmit(); } }}
           aria-label="Maximum page count"
           className="w-12 rounded bg-transparent text-center text-xs text-zinc-800 outline-none placeholder-zinc-400 focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-200 sm:w-10 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
         />
+        {isPageRangeFocused && (
+          <button
+            type="submit"
+            className="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded text-indigo-600 hover:text-indigo-700 hover:bg-indigo-100/60 dark:text-indigo-400 dark:hover:text-indigo-300 dark:hover:bg-indigo-950/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 sm:h-7 sm:w-7 transition-colors"
+            title="Apply page range (Enter)"
+            aria-label="Apply page range"
+          >
+            <Icon icon="carbon:checkmark" className="h-3.5 w-3.5" />
+          </button>
+        )}
         {(minPages != null || maxPages != null || minInput || maxInput) && (
           <button
             type="button"
-            onClick={() => {
-              setMinInput('');
-              setMaxInput('');
-              handlePageRangeChange(undefined, undefined);
-            }}
+            onClick={() => { setMinInput(''); setMaxInput(''); handlePageRangeChange(undefined, undefined); }}
             className="ml-0.5 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center text-zinc-400 hover:text-zinc-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:hover:text-zinc-200 sm:h-7 sm:w-7"
             title="Clear page range"
             aria-label="Clear page range"
@@ -227,7 +207,7 @@ export function GalleryFilterControls({
             <Icon icon="carbon:close" className="h-3 w-3" />
           </button>
         )}
-      </div>
+      </form>
 
       {/* Sort Selector */}
       <div className="col-span-2 flex h-11 min-w-0 items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 text-sm text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 sm:h-10 sm:w-auto sm:flex-none">

@@ -5,15 +5,12 @@ from contextvars import ContextVar
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from manga_translator.key_pool import KeyInfo, KeyModelPool, ModelInfo, mask_key, parse_pool_values
+from manga_translator.gemini_response import GeminiBlockedResponse
 
 logger = logging.getLogger("gemini_keys")
 
 class GeminiRetryExhausted(RuntimeError):
     """A Gemini page reached a terminal retry-policy failure."""
-
-
-class GeminiBlockedResponse(RuntimeError):
-    """Gemini returned a prompt or candidate policy block; do not retry it."""
 
 
 class GeminiRequestBudget:

@@ -115,7 +115,7 @@ export const BatchCard: React.FC<{
       hasTextRegions: item.status === "finished" && Boolean(item.folder),
       folder: item.folder,
       mangaTitle: item.mangaTitle || batch.mangaTitle,
-      finishedAt: item.addedAt,
+      finishedAt: item.status === "finished" ? (item.finishedAt || item.stepStartedAt || undefined) : undefined,
       settings: {
         ...batch.settings,
         offlineModel: item.offlineModel || batch.settings.offlineModel,

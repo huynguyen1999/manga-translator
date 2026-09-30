@@ -5,8 +5,7 @@ from .models import LayoutCandidate, PlacedLine
 
 def explicit_break_candidate(
     words, font_size, max_width, max_height, line_height, space_width,
-    line_spacing, preferred_width, target_height, target_ar, profile, target,
-    panel_meta,
+    line_spacing, preferred_width, target_height, target_ar, profile, target, panel_meta, allow_oversized_single_word=False,
 ):
     from .free_text_typography import _free_text_typography_score, _free_text_wrap_candidate
     from .line_breaking import HARD_LINE_BREAK, _precompute_widths
@@ -23,7 +22,7 @@ def explicit_break_candidate(
             row += 1
             continue
         widths, _ = _precompute_widths(paragraph, font_size)
-        if max(widths, default=0) > max_width:
+        if max(widths, default=0) > max_width and not allow_oversized_single_word:
             return None
         count, used_width = 1, 0
         for width in widths:
@@ -35,6 +34,7 @@ def explicit_break_candidate(
         wrapped = _free_text_wrap_candidate(
             paragraph, widths, space_width, font_size, line_spacing, count,
             preferred_width, max_line_width=max_width,
+            allow_oversized_single_word=allow_oversized_single_word,
         )
         if wrapped is None:
             return None

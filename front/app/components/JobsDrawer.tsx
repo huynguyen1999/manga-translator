@@ -128,7 +128,7 @@ interface JobsDrawerProps {
   onLoadBatchDetails: (id: string) => Promise<void>;
   onPause: (id: string) => void | Promise<void>;
   onResume: (id: string) => void | Promise<void>;
-  onDismissBatch: (id: string) => void;
+  onDismissBatch: (id: string) => void | Promise<unknown>;
   onRemoveBatch: (id: string) => void | Promise<void>;
   onRetryItem: (batchId: string, itemId: string, keepFailedPagesForEditing?: boolean) => void | Promise<void>;
   onRemoveItem: (batchId: string, itemId: string) => void | Promise<void>;
@@ -275,7 +275,6 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
     for (const section of Object.keys(result) as JobSection[]) {
       result[section] = sortJobEntries(result[section], section);
     }
-    result.completed = result.completed.slice(0, 20);
     return result;
   }, [batches, summaryJobs]);
 
@@ -307,8 +306,8 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
           <details className="group relative shrink-0">
             <summary className="flex size-9 cursor-pointer list-none items-center justify-center rounded-lg text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800 [&::-webkit-details-marker]:hidden" aria-label="More job actions" title="More job actions"><Icon icon="carbon:overflow-menu-horizontal" className="size-4" /></summary>
             <div className="absolute right-0 top-10 z-30 w-48 rounded-xl border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800" onClick={(event) => { if ((event.target as HTMLElement).closest("button")) event.currentTarget.parentElement?.removeAttribute("open"); }}>
-              <button type="button" onClick={() => runAction("clear-completed", "Clearing…", async () => { completedBatches.forEach((batch) => onDismissBatch(batch.id)); await Promise.all(completedSummaries.map((job) => onDismissSummary(job))); })} disabled={!completedBatches.length && !completedSummaries.length || isActionPending("clear-completed")} className="w-full rounded-lg px-3 py-2 text-left text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:text-zinc-200 dark:hover:bg-zinc-700">Clear completed</button>
-              <button type="button" onClick={() => runAction("clear-attention", "Clearing…", async () => { attentionBatches.forEach((batch) => onDismissBatch(batch.id)); await Promise.all(attentionSummaries.map((job) => onDismissSummary(job))); })} disabled={!attentionBatches.length && !attentionSummaries.length || isActionPending("clear-attention")} className="w-full rounded-lg px-3 py-2 text-left text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:text-zinc-200 dark:hover:bg-zinc-700">Clear needs-attention</button>
+              <button type="button" onClick={() => runAction("clear-completed", "Clearing…", async () => { await Promise.all([...completedBatches.map((batch) => onDismissBatch(batch.id)), ...completedSummaries.map((job) => onDismissSummary(job))]); })} disabled={!completedBatches.length && !completedSummaries.length || isActionPending("clear-completed")} className="w-full rounded-lg px-3 py-2 text-left text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:text-zinc-200 dark:hover:bg-zinc-700">Clear completed</button>
+              <button type="button" onClick={() => runAction("clear-attention", "Clearing…", async () => { await Promise.all([...attentionBatches.map((batch) => onDismissBatch(batch.id)), ...attentionSummaries.map((job) => onDismissSummary(job))]); })} disabled={!attentionBatches.length && !attentionSummaries.length || isActionPending("clear-attention")} className="w-full rounded-lg px-3 py-2 text-left text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:text-zinc-200 dark:hover:bg-zinc-700">Clear needs-attention</button>
               <button type="button" onClick={() => runAction("remove-queued", "Removing…", async () => { await Promise.all(queuedBatches.map((batch) => onRemoveBatch(batch.id))); await Promise.all(queuedSummaries.map((job) => onDismissSummary(job))); })} disabled={!queuedBatches.length && !queuedSummaries.length || isActionPending("remove-queued")} className="w-full rounded-lg px-3 py-2 text-left text-xs text-rose-600 hover:bg-rose-50 disabled:opacity-40 dark:text-rose-400 dark:hover:bg-rose-950/40">Remove queued</button>
             </div>
           </details>

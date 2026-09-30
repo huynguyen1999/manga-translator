@@ -27,7 +27,6 @@ _WEIGHT_TRANS_OVERLAP = 12.0    # penalty for poor horizontal slot overlap
 _WEIGHT_TRANS_BRANCH = 25.0     # penalty for zero overlap / branch jump
 _WEIGHT_VERTICAL_GAP = 24.0           # nonlinear paragraph spring penalty
 
-
 def _y_origin_sequence(y1: int, y2: int, font_size: int, step: int) -> List[int]:
     """Sample plausible starting top-Y coordinates across the safe vertical range."""
     step = max(1, step)
@@ -51,18 +50,14 @@ def _y_origin_sequence(y1: int, y2: int, font_size: int, step: int) -> List[int]
             result.append(p)
     return result
 
-
 @dataclass
 class RowGeometry:
-    """One textual line-height row: a Y position plus the disjoint safe
-    intervals available at that height (multi-lobe bubbles have several)."""
+    """One Y position and its disjoint safe line-height intervals."""
     y: int
     height: int
     intervals: List[BandSlot]
 
-
 _LineBackpointer = Tuple[str, int, int, int, int, BandSlot, Any]
-
 
 def _build_row_slot_table(
     geom: BubbleGeometry,
@@ -72,37 +67,34 @@ def _build_row_slot_table(
     min_width: int = 8,
 ) -> Dict[int, List[BandSlot]]:
     """Precompute valid BandSlot horizontal intervals for every vertical y coordinate."""
-    _, y1, _, y2 = geom.safe_bounding_box(font_size, stroke_width, margin)
+    x1, y1, x2, y2 = geom.safe_bounding_box(font_size, stroke_width, margin)
     if y2 <= y1:
         return {}
     safe = geom.safe_pixels(font_size, stroke_width, margin)
     h_mask, w_mask = safe.shape
-    table: Dict[int, List[BandSlot]] = {}
     first_y = max(0, y1)
     stop_y = min(h_mask - font_size + 1, y2 - font_size + 1)
     if stop_y <= first_y:
-        return table
+        return {}
 
-    # A row is safe only when its font-height window contains no unsafe pixels.
-    # Prefix counts preserve the original np.all rule while avoiding a full
-    # font-height scan for every possible y coordinate.
-    unsafe = ~safe[first_y : stop_y + font_size]
-    unsafe_prefix = np.empty((unsafe.shape[0] + 1, w_mask), dtype=np.uint32)
+    # Safe bounds contain every valid interval, so horizontal work can be cropped.
+    x_start, x_stop = (x1, x2) if font_size > 0 else (0, w_mask)
+    unsafe = ~safe[first_y : stop_y + font_size, x_start:x_stop]
+    unsafe_prefix = np.empty((unsafe.shape[0] + 1, x_stop - x_start), dtype=np.uint32)
     unsafe_prefix[0] = 0
     np.cumsum(unsafe, axis=0, dtype=np.uint32, out=unsafe_prefix[1:])
     row_count = stop_y - first_y
     valid_rows = unsafe_prefix[font_size : font_size + row_count] == unsafe_prefix[:row_count]
-    for y, band_row in enumerate(valid_rows, start=first_y):
-        intervals = _runs_from_row(band_row)
-        slots = [
-            BandSlot(left=iv.left, right=iv.right, y_start=y, y_end=y + font_size)
-            for iv in intervals
-            if iv.right - iv.left >= min_width
-        ]
-        slots.sort(key=lambda s: s.left)
-        table[y] = slots
+    padded_rows = np.pad(valid_rows.astype(np.int8), ((0, 0), (1, 1)))
+    transitions = np.diff(padded_rows, axis=1)
+    start_rows, starts = np.nonzero(transitions == 1)
+    _, ends = np.nonzero(transitions == -1)
+    table = {y: [] for y in range(first_y, first_y + len(valid_rows))}
+    for row, left, right in zip(start_rows, starts, ends):
+        if right - left >= min_width:
+            y = int(row) + first_y
+            table[y].append(BandSlot(int(left) + x_start, int(right) + x_start, y, y + font_size))
     return table
-
 
 def _cached_row_slot_table(
     geom: BubbleGeometry,
@@ -121,7 +113,6 @@ def _cached_row_slot_table(
     table = _build_row_slot_table(geom, font_size, stroke_width, margin, min_width)
     profile.row_slot_tables[key] = table
     return table
-
 
 def _max_usable_row_width(
     geom: BubbleGeometry,
@@ -149,7 +140,6 @@ def _max_usable_row_width(
             )
     profile.row_slot_max_widths[key] = result
     return result
-
 
 def _cached_placement_target(
     geom: BubbleGeometry,
@@ -367,12 +357,7 @@ def _dp_word_break_rows(
     normal_gap: int = 0,
     forced_break_after: Optional[int] = None,
 ) -> List[List[PlacedLine]]:
-    """Break words into a continuous paragraph stack across the safe rows.
-
-    Usable rows are not optional once text has started. Empty or too-narrow
-    rows are traversed as geometry-forced gaps, while actual line spacing is
-    charged as a spring-like deformation from the normal line step.
-    """
+    """Place a continuous paragraph, charging geometry-forced gaps as springs."""
     nw = len(words)
     nr = len(rows)
     if nw == 0 or nr == 0:
@@ -385,8 +370,7 @@ def _dp_word_break_rows(
     memo: Dict[Tuple[Any, ...], Dict[int, List[Tuple[float, Optional[_LineBackpointer]]]]] = {}
     prof = get_solver_profile()
 
-    # These bounds are necessary conditions, so they only reject states that
-    # cannot place every remaining word in any remaining row.
+    # Necessary bounds reject only impossible word/row suffixes.
     remaining_word_max = [0] * (nw + 1)
     next_break_indices = [nw] * nw
     next_break = nw
@@ -398,17 +382,18 @@ def _dp_word_break_rows(
 
     row_max_widths = [max((slot.width for slot in row.intervals), default=0) for row in rows]
     remaining_row_max = [0] * (nr + 1)
+    remaining_row_capacity = [0] * (nr + 1)
     for ri in range(nr - 1, -1, -1):
         remaining_row_max[ri] = max(remaining_row_max[ri + 1], row_max_widths[ri])
+        remaining_row_capacity[ri] = remaining_row_capacity[ri + 1] + row_max_widths[ri]
 
-    # Options depend on row geometry and the next word, but not on the
-    # previous placement in the DP state. Reuse their exact original order.
+    # Row/word options are independent of the preceding placement.
     placement_options: Dict[Tuple[int, int], List[Tuple[int, int, BandSlot, int, int, float, float, str]]] = {}
-
+    transition_costs = {}
     BEFORE_TEXT, IN_TEXT = 0, 1
 
     def same_path_identity(first: Optional[_LineBackpointer], second: Optional[_LineBackpointer], count: int) -> bool:
-        while count and first is not None and second is not None and (first[0], first[1]) == (second[0], second[1]):
+        while count and first is not None and second is not None and first[0] == second[0] and first[1] == second[1]:
             first, second, count = first[6], second[6], count - 1
         return count == 0 and first is None and second is None
 
@@ -422,11 +407,17 @@ def _dp_word_break_rows(
             dest[cand_lines_cnt] = [(cand_cost, cand_path)]
         else:
             bucket = dest[cand_lines_cnt]
-            if any(same_path_identity(path, cand_path, cand_lines_cnt) for _, path in bucket):
+            if len(bucket) >= max_per_bucket and cand_cost >= bucket[-1][0]:
                 return
-            bucket.append((cand_cost, cand_path))
-            bucket.sort(key=lambda item: item[0])
+            for _, path in bucket:
+                if same_path_identity(path, cand_path, cand_lines_cnt): return
+            index = len(bucket)
+            while index and cand_cost < bucket[index - 1][0]:
+                index -= 1
+            bucket.insert(index, (cand_cost, cand_path))
             del bucket[max_per_bucket:]
+    from .search_budget import get_search_budget
+    budget = get_search_budget()
 
     def dp(
         wi: int,
@@ -438,6 +429,8 @@ def _dp_word_break_rows(
         text_state: int,
     ) -> Dict[int, List[Tuple[float, Optional[_LineBackpointer]]]]:
         prof.dp_invocations += 1
+        if budget is not None:
+            budget.check_dp()
         if wi == nw:
             return {0: [(0.0, None)]}
         if ri == nr:
@@ -450,14 +443,15 @@ def _dp_word_break_rows(
         if key in memo:
             prof.dp_states_deduplicated += 1
             return memo[key]
-
         if skip_forced_break(
             words, wi, dp, memo, key,
             (ri, prev_slot_left, prev_slot_right, prev_center_x, prev_line_y, text_state),
         ):
             return memo[key]
 
-        if remaining_word_max[wi] > remaining_row_max[ri]:
+        # Necessary capacity bound ignores spaces and uses each row's widest slot.
+        if (remaining_word_max[wi] > remaining_row_max[ri]
+                or word_width_prefix[nw] - word_width_prefix[wi] > remaining_row_capacity[ri]):
             prof.dp_states_pruned += 1
             memo[key] = {}
             return memo[key]
@@ -483,7 +477,6 @@ def _dp_word_break_rows(
             if prev_slot_left is not None and prev_slot_right is not None
             else None
         )
-
         option_key = (ri, wi)
         options = placement_options.get(option_key)
         if options is None:
@@ -509,17 +502,21 @@ def _dp_word_break_rows(
                     options.append((end, next_wi, slot, x, run_w, curr_center_x, line_cost, " ".join(words[wi:end])))
             placement_options[option_key] = options
 
+        spacing_cost = 0.0
+        if text_state == IN_TEXT and prev_line_y is not None:
+            ideal_step = font_size + normal_gap
+            excess_step = max(0, row.y - prev_line_y - ideal_step)
+            deformation = excess_step / max(1.0, float(font_size))
+            spacing_cost = _WEIGHT_VERTICAL_GAP * deformation ** 2
         for end, next_wi, slot, x, run_w, curr_center_x, line_cost, line_text in options:
-            trans_cost = (
-                _transition_cost(prev_slot, prev_center_x, slot, curr_center_x, font_size)
-                if text_state == IN_TEXT else 0.0
-            )
-            spacing_cost = 0.0
-            if text_state == IN_TEXT and prev_line_y is not None:
-                ideal_step = font_size + normal_gap
-                excess_step = max(0, row.y - prev_line_y - ideal_step)
-                deformation = excess_step / max(1.0, float(font_size))
-                spacing_cost = _WEIGHT_VERTICAL_GAP * deformation ** 2
+            trans_cost = 0.0
+            if text_state == IN_TEXT:
+                transition_key = (prev_slot_left, prev_slot_right, prev_center_x,
+                                  slot.left, slot.right, curr_center_x)
+                trans_cost = transition_costs.get(transition_key)
+                if trans_cost is None:
+                    trans_cost = _transition_cost(prev_slot, prev_center_x, slot, curr_center_x, font_size)
+                    transition_costs[transition_key] = trans_cost
             step_cost = line_cost + trans_cost + spacing_cost
 
             rem_dict = dp(
@@ -533,11 +530,15 @@ def _dp_word_break_rows(
             )
             for rem_cnt, cand_list in rem_dict.items():
                 for rem_cost, rem_path in cand_list:
+                    cost = step_cost + rem_cost
+                    bucket = results_by_lines.get(rem_cnt + 1)
+                    if bucket is not None and len(bucket) >= max_per_bucket and cost >= bucket[-1][0]:
+                        continue
                     path = (line_text, row.y, x, run_w, font_size, slot, rem_path)
                     _add_candidates(
                         results_by_lines,
                         rem_cnt + 1,
-                        step_cost + rem_cost,
+                        cost,
                         path,
                     )
 
@@ -565,7 +566,6 @@ def _dp_word_break_rows(
 
         memo[key] = results_by_lines
         return results_by_lines
-
     root_dict = dp(0, 0, None, None, None, None, BEFORE_TEXT)
     if not root_dict:
         return []

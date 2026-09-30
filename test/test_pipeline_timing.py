@@ -8,7 +8,9 @@ import unittest
 from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from PIL import Image
+import numpy as np
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
@@ -317,6 +319,31 @@ class TestPipelineTiming(unittest.TestCase):
 
         res_ctx = asyncio.run(translator._revert_upscale(config, ctx))
         self.assertIsNotNone(res_ctx)
+
+    def test_batched_gpu_stage_preserves_started_at_and_batch_duration(self):
+        img = Image.new("RGB", (50, 50))
+        config = Config(original_name="test_page.png")
+        run = PipelineRun(self.results_dir, "run_batch_timing", img, config)
+        ctx = run._ensure_context()
+        ctx.upscaled = img
+        ctx.img_rgb = np.zeros((50, 50, 3), dtype=np.uint8)
+        asyncio.run(run.begin_stage("detection", config))
+        detection_stage = run._stage("detection")
+        self.assertEqual(detection_stage["status"], "running")
+        started_at = detection_stage.get("startedAt")
+        self.assertIsNotNone(started_at)
+        
+        # When retrying with stage_already_running=True (e.g. after batched GPU inference)
+        fake_output = ([], None, None)
+        translator = SimpleNamespace(device="cpu", font_path=None)
+        asyncio.run(run.retry_stage(
+            "detection", config, translator,
+            precomputed_detection=fake_output,
+            stage_already_running=True,
+        ))
+        self.assertEqual(detection_stage["status"], "completed")
+        self.assertEqual(detection_stage["startedAt"], started_at)
+        self.assertIsInstance(detection_stage.get("durationMs"), int)
 
 
 if __name__ == "__main__":

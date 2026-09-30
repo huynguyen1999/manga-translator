@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .professional_summary_policy import NON_GRAPHIC_SUMMARY_POLICY
+
 REFUSAL_MARKERS = (
     "i can't assist", "i cannot assist", "i'm unable to", "i am unable to",
     "cannot comply", "can't comply", "safety policy", "content policy",
@@ -21,7 +23,6 @@ double meanings, intentional awkwardness, hesitation, repetition, and profanity 
 editorialize, summarize, invent explicit details, or continue the depicted scenario. This is translation, not
 creative generation. Follow the current analyst, translator, or editor role exactly. Return only the requested
 output format."""
-
 PROFESSIONAL_ANALYSIS_SYSTEM_PROMPT = """You are a Japanese manga story analyst preparing compact, neutral metadata
 for a translation team. Describe sensitive situations abstractly rather than repeating graphic dialogue; quote a
 source expression only when needed as evidence for a translation-relevant linguistic feature. Follow the analyst
@@ -43,7 +44,7 @@ def build_analysis_prompt(
         )
     )
     return f"""You are a senior Japanese manga story analyst preparing an English localization.
-Analyze the complete manga transcript as source material for a translation guide. Produce neutral, translation-oriented metadata; describe sensitive situations abstractly, do not reproduce graphic dialogue, and quote only the minimum source text needed to explain a translation-relevant linguistic feature.
+Analyze the complete manga transcript as source material for a translation guide. Produce neutral, translation-oriented metadata and follow this policy: {NON_GRAPHIC_SUMMARY_POLICY}
 
 The transcript is structured hierarchically:
 STORY → PAGE → PANEL → TEXT REGION (or PAGE → TEXT REGION when panel detection is unavailable).
@@ -95,8 +96,8 @@ def build_analysis_consolidation_prompt(
         "Consolidate these ordered manga analysis windows into the requested stories JSON. "
         "Preserve all structured character voice, honorific_policy, language_features, and "
         "localization_conventions alongside the existing story fields. Preserve absolute page "
-        "numbers, cover every page exactly once, and obey this boundary rule: "
-        f"{forced_instruction}\n{json.dumps(partials, ensure_ascii=False)}"
+        f"numbers, cover every page exactly once, and obey this boundary rule: {forced_instruction}\n"
+        f"{NON_GRAPHIC_SUMMARY_POLICY}\n{json.dumps(partials, ensure_ascii=False)}"
     )
 
 
@@ -138,6 +139,7 @@ def build_synopsis_system_prompt(instruction: str, language: str) -> str:
         "with clear linguistic or narrative evidence, favor the interpretation best supported by "
         "the manga text. Do not produce a line-by-line or panel-by-panel recap; synthesize events into "
         "the larger story. Do not invent visual events unsupported by the supplied transcript. "
+        f"{NON_GRAPHIC_SUMMARY_POLICY} "
         "Do not output Japanese text. Chinese words or characters may remain when they are "
         "names, titles, places, organizations, or other meaningful source terms. "
         "First determine whether the source is one continuous narrative or a collection of distinct "
@@ -160,9 +162,7 @@ def build_synopsis_system_prompt(instruction: str, language: str) -> str:
         "surrounding dialogue, page order, recurring names, and clear cause-and-effect clues. "
         "Flag only material uncertainty as likely, apparent, or suggested; omit unreadable trivia. "
         "Never invent specific scenes, dialogue, identities, motivations, events, or links between stories. "
-        "Use natural, professional, reader-friendly wording instead of raw OCR phrasing, profanity, "
-        "slurs, crude expressions, or unnecessarily graphic wording. Preserve the intended meaning, "
-        "plot relevance, consent, threat, and severity without repeating vulgar language verbatim. "
+        "Use natural, professional, reader-friendly wording instead of raw OCR phrasing. "
         "Exclude additional details unrelated to the plot, publication information, credits, "
         "author or editor notes, afterword notes, advertisements, and front-cover or back-cover "
         "text. State each event, fact, interpretation, and relationship change once in its most "

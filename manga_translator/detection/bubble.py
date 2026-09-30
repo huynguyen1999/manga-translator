@@ -11,7 +11,6 @@ from .panel import (
     PanelDetection,
     deserialize_bubble_detections as _deserialize_bubbles,
     deserialize_panel_detections,
-    normalize_class_name,
     resolve_model_checkpoint,
     serialize_bubble_detections as _serialize_bubbles,
     serialize_panel_detections,
@@ -20,6 +19,8 @@ from .panel import (
 from ..utils.model_cache import (
     clear_model_cache, get_cached_model, model_operation, unload_cached_model,
 )
+from .bubble_state import BubbleDetectionState, get_bubble_detection_state, model_class_map, set_bubble_detection_state
+from .bubble_state import detection_class_name
 
 logger = logging.getLogger(__name__)
 _bubble_cache: dict[tuple[str, str, float, float, int], "BubbleDetector"] = {}
@@ -65,8 +66,7 @@ class BubbleDetector:
         self.mask_threshold = mask_threshold
         self.image_size = image_size
         self.model = YOLO(str(_resolve_checkpoint(model)))
-        raw_names = getattr(self.model, "names", {})
-        self.class_map = {int(k): normalize_class_name(v) for k, v in raw_names.items()} if isinstance(raw_names, dict) else {}
+        self.class_map, self.single_class_bubble_model = model_class_map(getattr(self.model, "names", {}))
         self.last_panel_detections: list[PanelDetection] = []
 
     def __call__(self, image: np.ndarray, confidence: float | None = None, mask_threshold: float | None = None, image_size: int | None = None) -> list[BubbleDetection]:
@@ -156,7 +156,7 @@ class BubbleDetector:
                 continue
             box = boxes_iter[idx]
             cls_id = int(box.cls[0].item()) if (box is not None and hasattr(box, "cls") and len(box.cls) > 0) else 0
-            norm_class = class_map.get(cls_id, "balloon")
+            norm_class = detection_class_name(class_map, cls_id, getattr(self, "single_class_bubble_model", False))
 
             values = mask.detach().float().cpu().numpy() if hasattr(mask, "detach") else np.asarray(mask, dtype=np.float32)
             if values.shape != image_shape:

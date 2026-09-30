@@ -12,13 +12,8 @@ from pathlib import Path
 from server.image_variants import final_file
 from typing import Any, Iterable
 
-from manga_translator.professional_panels import (
-    format_synopsis_transcript,
-    group_transcript_panel_texts,
-    read_page_panels,
-    read_page_regions,
-)
-from server.summary_completion import _summary_completion, summary_error_details
+from manga_translator.professional_panels import format_synopsis_transcript, group_transcript_panel_texts, read_page_panels, read_page_regions
+from server.summary_completion import MAX_SYNOPSIS_LLM_CONCURRENCY, _summary_completion, get_synopsis_llm_semaphore, summary_error_details
 
 try:
     import openai
@@ -30,9 +25,8 @@ SUMMARY_DIR = ".summaries"
 DEFAULT_SUMMARY_MODEL = "deepseek-flash"
 
 DEFAULT_SUMMARY_CHUNK_LIMITS: dict[str, int] = {
-    "deepseek": 64_000,
-    "gemini": 120_000,
-    "groq": 3_500,
+    "deepseek": 64_000, "gemini": 120_000, "groq": 3_500, "tokenharbor": 64_000,
+    "openrouter": 64_000, "dash": 64_000, "dashscope": 64_000,
 }
 DEFAULT_SUMMARY_CHUNK_LIMIT = 3_500
 
@@ -524,29 +518,23 @@ async def generate_synopsis(
         from google import genai
         from google.genai import types
 
-        client = genai.Client(
-            api_key=api_key or "unused",
-            http_options=types.HttpOptions(timeout=90_000),
-        )
+        client = genai.Client(api_key=api_key or "unused", http_options=types.HttpOptions(timeout=90_000))
     else:
         if openai is None:
             raise RuntimeError("The OpenAI client is not installed")
-        client = openai.AsyncOpenAI(
-            api_key=api_key or "unused",
-            base_url=base_url,
-            max_retries=0,
-        )
+        client_kwargs: dict[str, Any] = {"api_key": api_key or "unused", "base_url": base_url, "max_retries": 0}
+        if provider == "openrouter":
+            client_kwargs["default_headers"] = {"HTTP-Referer": "https://github.com/zyddnys/manga-image-translator", "X-Title": "Manga Image Translator"}
+        client = openai.AsyncOpenAI(**client_kwargs)
     try:
-        concurrency = asyncio.Semaphore(4)
+        concurrency = get_synopsis_llm_semaphore()
 
         async def complete_chunks(chunk_list, merge):
             async def complete(chunk):
                 async with concurrency:
                     return await _summary_completion(client, language, chunk, merge, resolved_model, provider)
 
-            results = await asyncio.gather(
-                *(complete(chunk) for chunk in chunk_list), return_exceptions=True
-            )
+            results = await asyncio.gather(*(complete(chunk) for chunk in chunk_list), return_exceptions=True)
             for result in results:
                 if isinstance(result, BaseException):
                     raise result
@@ -558,10 +546,7 @@ async def generate_synopsis(
             partials = await complete_chunks(merged_chunks, merge=True)
         return partials[0].strip()
     finally:
-        for close in (
-            getattr(getattr(client, "aio", None), "aclose", None),
-            getattr(client, "close", None),
-        ):
+        for close in (getattr(getattr(client, "aio", None), "aclose", None), getattr(client, "close", None)):
             if close:
                 result = close()
                 if hasattr(result, "__await__"):
@@ -573,40 +558,44 @@ def resolve_summary_model(model: str | None) -> tuple[str, str, str, str]:
     from manga_translator.translators import keys
 
     raw = (model or "").strip()
-    provider, separator, requested_model = raw.partition(":")
-    if not separator:
-        if raw.casefold() in {"deepseek", "groq", "gemini", "google", "google-gemini", "tokenharbor"}:
-            requested_model = ""
+    prefixes = {"openrouter:": "openrouter", "tokenharbor:": "tokenharbor", "deepseek:": "deepseek", "dash:": "dash", "dashscope:": "dash", "groq:": "groq", "gemini:": "gemini", "google:": "gemini", "google-gemini:": "gemini"}
+    provider, requested_model = next(((p, raw[len(k):].strip()) for k, p in prefixes.items() if raw.lower().startswith(k)), (None, ""))
+    if provider is None:
+        casefolded = raw.casefold()
+        if casefolded in {"openrouter", "openrouter-free"} or casefolded.startswith(("openrouter", "qwen/", "thinking-machines/", "nvidia/")):
+            provider, requested_model = "openrouter", ("" if casefolded in {"openrouter", "openrouter-free"} else raw)
+        elif casefolded == "tokenharbor" or casefolded.endswith(":free") or casefolded.startswith(("mimo-", "deepseek-v4", "qwen3")):
+            provider, requested_model = "tokenharbor", ("" if casefolded == "tokenharbor" else raw)
+        elif casefolded in {"dash", "dashscope", "dash-llm", "dash_llm"} or casefolded.startswith(("deepseek-v3", "qwen-")):
+            provider, requested_model = "dash", ("" if casefolded in {"dash", "dashscope", "dash-llm", "dash_llm"} else raw)
+        elif casefolded in {"deepseek", "groq", "gemini", "google", "google-gemini"}:
+            provider, requested_model = ("gemini" if "g" in casefolded and "groq" not in casefolded else casefolded), ""
         else:
             provider, requested_model = "deepseek", raw
-    provider = {
-        "google": "gemini",
-        "google-gemini": "gemini",
-    }.get(provider.casefold(), provider.casefold())
 
-    if provider == "deepseek" and requested_model.casefold() in {"deepseek-chat", "deepseek-reasoner"}:
-        requested_model = DEFAULT_SUMMARY_MODEL
+    dash_default = getattr(keys, "DASH_MODEL", getattr(keys, "DASHSCOPE_MODEL", "deepseek-v3"))
+    openrouter_default = getattr(keys, "OPENROUTER_MODEL", "qwen/qwen3.8-27b:free")
+    if provider == "deepseek":
+        if requested_model.casefold() in {"dash", "dashscope", "dash-llm", "dash_llm"} or requested_model.casefold().startswith(("deepseek-v3", "qwen-")):
+            provider, requested_model = "dash", (dash_default if requested_model.casefold() in {"dash", "dashscope", "dash-llm", "dash_llm"} else requested_model)
+        elif requested_model.casefold() in {"", "deepseek", "deepseek-chat", "deepseek-reasoner"}:
+            requested_model = DEFAULT_SUMMARY_MODEL
+    elif provider == "dash" and requested_model.casefold() in {"", "dash", "dashscope", "dash-llm", "dash_llm", "deepseek", "deepseek-chat", "deepseek-v3"}:
+        requested_model = dash_default
+    elif provider == "tokenharbor" and requested_model.casefold() in {"", "tokenharbor"}:
+        requested_model = getattr(keys, "TOKEN_HARBOR_MODEL", os.getenv("TOKEN_HARBOR_MODEL", "deepseek-v4.1-flash:free"))
+    elif provider == "openrouter" and requested_model.casefold() in {"", "openrouter", "openrouter-free"}:
+        requested_model = openrouter_default
 
     defaults = {
         "deepseek": (DEFAULT_SUMMARY_MODEL, keys.DEEPSEEK_API_KEY, keys.DEEPSEEK_API_BASE),
-        "groq": (
-            keys.GROQ_MODEL,
-            getattr(keys, "GROQ_API_KEY", ""),
-            "https://api.groq.com/openai/v1",
-        ),
-        "gemini": (
-            keys.GEMINI_MODEL,
-            keys.GEMINI_API_KEY,
-            "https://generativelanguage.googleapis.com/v1beta/openai/",
-        ),
-        "tokenharbor": (
-            os.getenv("TOKEN_HARBOR_MODEL", "deepseek-v4.1-flash:free"),
-            os.getenv("TOKEN_HARBOR_API_KEY", ""),
-            os.getenv("TOKEN_HARBOR_API_BASE", "https://tokenharbor.ai/v1"),
-        ),
+        "groq": (keys.GROQ_MODEL, getattr(keys, "GROQ_API_KEY", ""), "https://api.groq.com/openai/v1"),
+        "gemini": (keys.GEMINI_MODEL, keys.GEMINI_API_KEY, "https://generativelanguage.googleapis.com/v1beta/openai/"),
+        "tokenharbor": (getattr(keys, "TOKEN_HARBOR_MODEL", os.getenv("TOKEN_HARBOR_MODEL", "deepseek-v4.1-flash:free")), getattr(keys, "TOKEN_HARBOR_API_KEY", os.getenv("TOKEN_HARBOR_API_KEY", "")), getattr(keys, "TOKEN_HARBOR_API_BASE", os.getenv("TOKEN_HARBOR_API_BASE", "https://tokenharbor.ai/v1"))),
+        "openrouter": (openrouter_default, getattr(keys, "OPENROUTER_API_KEY", os.getenv("OPENROUTER_API_KEY", "")), getattr(keys, "OPENROUTER_API_BASE", os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1"))),
+        "dash": (dash_default, getattr(keys, "DASH_API_KEY", getattr(keys, "DASHSCOPE_API_KEY", "")), getattr(keys, "DASH_API_BASE", getattr(keys, "DASHSCOPE_API_BASE", "https://dashscope.aliyuncs.com/compatible-mode/v1"))),
     }
     if provider not in defaults:
         raise ValueError(f"Unsupported synopsis provider: {provider}")
-
     default_model, api_key, base_url = defaults[provider]
     return provider, requested_model or default_model, api_key, base_url

@@ -35,7 +35,7 @@ async def run_temporary_pipeline_case(
     mode: str,
     settings: Dict[str, Any],
     page: Dict[str, Any],
-    instance: Any,
+    instance: Any, include_layout_profile: bool = False,
 ) -> Dict[str, Any]:
     """Run a review-only rerun from temporary files without saving page or batch state."""
     if not hasattr(instance, "_run_translation") or not hasattr(instance, "translator"):
@@ -78,7 +78,6 @@ async def run_temporary_pipeline_case(
         )
         if not valid:
             raise RuntimeError(reason or "Temporary case is not eligible for rerun")
-
         from server.batch_config import config_for
 
         title = page.get("mangaTitle") or "Ungrouped"
@@ -98,11 +97,11 @@ async def run_temporary_pipeline_case(
             config.translator.translation_quality = "fast"
             config.upscale.upscale_ratio = None
             config.upscale.revert_upscaling = False
-
         ctx, state = await load_rerun_context(case_dir, plan, config)
+        if include_layout_profile:
+            ctx._collect_layout_profile = True
         staging_dir = temp_root / "output"
         staging_dir.mkdir()
-
         async def execute():
             return await execute_rerun_plan(
                 translator=instance.translator,
@@ -113,7 +112,7 @@ async def run_temporary_pipeline_case(
                 staging_dir=staging_dir,
             )
 
-        await instance._run_translation(execute)
+        ctx = (await instance._run_translation(execute) or (ctx,))[0]
         image_path = staging_dir / "final.jpg"
         if not image_path.is_file():
             raise RuntimeError("Temporary pipeline case produced no final image")
@@ -128,4 +127,5 @@ async def run_temporary_pipeline_case(
             "sourcePageId": page.get("id"),
             "image": image_path.read_bytes(),
             "artifacts": output_artifacts,
+            **({"layoutProfile": ctx._solver_profile} if include_layout_profile and getattr(ctx, "_solver_profile", None) is not None else {}),
         }

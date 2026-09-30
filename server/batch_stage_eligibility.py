@@ -1,9 +1,7 @@
 """Resource-aware eligibility for checkpointed page stages."""
-
 from manga_translator.pipeline.stages import ResourceClass
 from server.batch_resource_policy import _resource_family, _stage_resource
 from server.batch_group_selection import _BATCH_STAGE_ORDER
-
 
 def stage_resource_for(scheduler, batch, item, stage_id: str, instance=None) -> ResourceClass:
     config = scheduler._config_for(batch, item)
@@ -83,6 +81,8 @@ def can_schedule_stage(scheduler, batch_id, batch, items, stage_id, resource, in
         active_stage != stage_id and _resource_family(active_resource) == family
         for active_stage, active_resource in active_stages
     ):
+        return False
+    if stage_id == "layout" and any(stage == "layout" for stage, _ in active_stages):
         return False
     return scheduler._resource_manager.has_capacity(resource)
 

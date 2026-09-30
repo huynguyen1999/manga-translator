@@ -1,5 +1,6 @@
 import os
 import re
+import ctypes
 import cv2
 import numpy as np
 import freetype
@@ -208,7 +209,6 @@ FALLBACK_FONTS = [
 # FreeType faces mutate their size and glyph slot, so a face cannot be shared by CPU workers.
 _FONT_STATE = local()
 
-
 def _font_state():
     if not hasattr(_FONT_STATE, "font_cache"):
         _FONT_STATE.font_cache = {}
@@ -216,7 +216,6 @@ def _font_state():
         _FONT_STATE.selection_key = ()
         _FONT_STATE.current_font_path = ""
     return _FONT_STATE
-
 
 def __getattr__(name):
     if name in {
@@ -233,10 +232,6 @@ def __getattr__(name):
         from . import text_render_vertical
 
         return getattr(text_render_vertical, name)
-    if name in {"calc_vertical", "put_char_vertical", "put_text_vertical"}:
-        from . import text_render_vertical
-
-        return getattr(text_render_vertical, name)
     state = _font_state()
     if name == "FONT_SELECTION":
         return state.selection
@@ -248,10 +243,8 @@ def __getattr__(name):
         return state.font_cache
     raise AttributeError(name)
 
-
 def _normalize_font_path(path: str) -> str:
     return os.path.abspath(path.replace('\\', '/'))
-
 
 def get_cached_font(path: str) -> freetype.Face:
     path = _normalize_font_path(path)
@@ -279,9 +272,19 @@ class namespace:
 class Glyph:
     def __init__(self, glyph):
         self.bitmap = namespace()
-        self.bitmap.buffer = glyph.bitmap.buffer
-        self.bitmap.rows = glyph.bitmap.rows
-        self.bitmap.width = glyph.bitmap.width
+        self.bitmap.rows, self.bitmap.width = glyph.bitmap.rows, glyph.bitmap.width
+        size = self.bitmap.rows * self.bitmap.width
+        native_buffer = getattr(getattr(glyph.bitmap, "_FT_Bitmap", None), "buffer", None)
+        can_copy = (
+            self.bitmap.rows > 0 and self.bitmap.width > 0
+            and getattr(glyph.bitmap, "pitch", None) == self.bitmap.width
+            and getattr(glyph.bitmap, "pixel_mode", None) == freetype.FT_PIXEL_MODE_GRAY
+            and isinstance(native_buffer, ctypes.POINTER(ctypes.c_ubyte)) and bool(native_buffer)
+        )
+        self.bitmap.buffer = ctypes.string_at(native_buffer, size) if can_copy else bytes(glyph.bitmap.buffer)
+        self.bitmap.array = np.frombuffer(self.bitmap.buffer, dtype=np.uint8).reshape(
+            (self.bitmap.rows, self.bitmap.width)
+        ) if size > 0 and len(self.bitmap.buffer) == size else None
         self.advance = namespace()
         self.advance.x = glyph.advance.x
         self.advance.y = glyph.advance.y
@@ -313,14 +316,12 @@ def get_char_glyph(cdpt: str, font_size: int, direction: int) -> Glyph:
     """Return a glyph keyed by the active font selection as well as size/direction."""
     return _get_char_glyph_cached(cdpt, font_size, direction, _font_state().selection_key)
 
-
 # Preserve the small cache API used by callers and diagnostics.
 get_char_glyph.cache_clear = _get_char_glyph_cached.cache_clear
 get_char_glyph.cache_info = _get_char_glyph_cached.cache_info
 get_char_glyph.cache_parameters = _get_char_glyph_cached.cache_parameters
 get_char_glyph.__wrapped__ = _get_char_glyph_cached.__wrapped__
 
-#@functools.lru_cache(maxsize = 1024, typed = True)
 def get_char_border(cdpt: str, font_size: int, direction: int):
     font_selection = [get_cached_font(FALLBACK_FONTS[0]), *_font_state().selection] if cdpt == '♥' else _font_state().selection
     for i, face in enumerate(font_selection):
@@ -347,7 +348,6 @@ def get_char_border(cdpt: str, font_size: int, direction: int):
 #         #print("VV", prev, cdpt, face.get_char_index(prev), face.get_char_index(cdpt))
 #         print("VR", face.has_kerning)
 #         return face.get_kerning(face.get_char_index(prev), face.get_char_index(cdpt))
-
 
 # def put_text(img: np.ndarray, text: str, line_count: int, x: int, y: int, w: int, h: int, fg: Tuple[int, int, int], bg: Optional[Tuple[int, int, int]]):
 #     pass

@@ -85,7 +85,7 @@ assert.equal(resolveTranslatorModel(
   null,
   { translator: { model: "detail-model" } },
 ), "detail-model");
-assert.equal(resolveTranslatorModel("openrouter", { translator: "openrouter" }, null, null), "deepseek/deepseek-v4-flash-0731");
+assert.equal(resolveTranslatorModel("openrouter", { translator: "openrouter" }, null, null), "qwen/qwen3.8-27b:free");
 
 // 5. Timestamp and total duration resolution
 const manifest: PipelineRunManifest = {
@@ -171,6 +171,20 @@ assert.deepEqual(resolveTranslationTiming(stageOnlyManifest), {
   endAt: null,
   durationMs: 2000,
 });
+
+// 5d. Inverted or stale image finishedAt falls back to manifest updatedAt or last stage completion
+assert.deepEqual(
+  resolveTranslationTiming(
+    manifest,
+    "2026-09-16T01:02:00.000Z", // Stale image finishedAt (earlier than createdAt 01:02:03)
+    null,
+  ),
+  {
+    startAt: manifest.createdAt,
+    endAt: manifest.updatedAt,
+    durationMs: 5500,
+  },
+);
 
 // 6. Original pages omit pipeline artifacts and sidebar data
 assert.equal(shouldLoadTranslationArtifacts("original"), false);
@@ -473,6 +487,15 @@ const errorRetryMarkup = renderToStaticMarkup(
   ),
 );
 assert.match(errorRetryMarkup, />Retry failed<\/span>/);
+
+// PP-OCRv6 Small Manga label resolution in pipeline step settings
+const ppocrv6StepSettings = resolvePipelineStepSettings(
+  { ocr: "ppocrv6" },
+  null,
+  null,
+);
+assert.equal(ppocrv6StepSettings.ocr.model, "ppocrv6");
+assert.equal(ppocrv6StepSettings.ocr.modelLabel, "PP-OCRv6 Small Manga");
 
 console.log("PageDetailModal unit tests passed successfully!");
 

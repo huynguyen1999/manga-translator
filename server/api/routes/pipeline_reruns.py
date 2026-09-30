@@ -9,7 +9,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from server.image_variants import final_file
 from server.api.routes.pipeline_case_data import PIPELINE_CASE_DOCUMENTS, register_pipeline_case_data_routes
-
 from server.api.schemas.pipeline import PipelineCaseRerunRequest, PipelineRerunRequest, RerenderRequest
 
 
@@ -240,17 +239,18 @@ def create_pipeline_rerun_router(
                 settings=settings,
                 page=source,
                 instance=instance,
+                include_layout_profile=data.includeLayoutProfile,
             )
         except Exception as error:
             raise batch_http_error(error) from error
         finally:
             await scheduler.executors.free_executor(instance)
-
         return {
             "mode": result["mode"],
             "sourcePageId": result["sourcePageId"],
             "artifacts": result["artifacts"],
             "imageBase64": base64.b64encode(result["image"]).decode("ascii"),
+            **({"layoutProfile": result["layoutProfile"]} if data.includeLayoutProfile and "layoutProfile" in result else {}),
         }
 
     @router.get("/pipeline-cases/{case_id}", tags=["api", "pipeline"])

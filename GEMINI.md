@@ -3,6 +3,8 @@
 ## Repository memory
 
 - Read `repository-state/README.md` and `repository-state/CURRENT.md` before making substantial changes.
+- Treat `CURRENT.md` as the overview; open `CURRENT_DETAILS.md` only when the task needs subsystem detail.
+- Scope history reads to relevant entries: use `rg` on `BUGS.md` or `CHANGES.md`, then read matching entries. Read a full log only for a complete history audit.
 - Whenever a bug is found, record the symptom, root cause, fix, and prevention lesson in `repository-state/BUGS.md` so it is not repeated.
 - Whenever a feature is added or a large change is made, update `repository-state/CURRENT.md` and add a concise entry to `repository-state/CHANGES.md` in the same change, including the reason/rationale for why the change was made alongside what was changed.
 - Keep these notes factual and brief. Update existing entries instead of duplicating them.

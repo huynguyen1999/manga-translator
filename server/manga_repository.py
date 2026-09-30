@@ -66,7 +66,7 @@ class MangaRepository:
             "finishedAt": self._iso(row["finished_at"]),
         }
         review_status = metadata.get("reviewStatus")
-        has_review_flags = any(
+        has_review_flags = bool(row["has_review_flags"]) if hasattr(row, "get") and "has_review_flags" in row else any(
             isinstance(region, dict) and region.get("review_required")
             for region in _json_load(row.get("text_regions"), [])
         )
@@ -98,16 +98,9 @@ class MangaRepository:
             )
         return item
     async def list_groups(
-        self,
-        limit: int = 12,
-        offset: int = 0,
-        manga_id: str | None = None,
-        search: str | None = None,
-        sort: str = "alpha-asc",
-        review: str | None = None,
-        status: str | None = None,
-        min_pages: int | None = None,
-        max_pages: int | None = None,
+        self, limit: int = 12, offset: int = 0, manga_id: str | None = None,
+        search: str | None = None, sort: str = "alpha-asc", review: str | None = None,
+        status: str | None = None, min_pages: int | None = None, max_pages: int | None = None,
     ) -> dict[str, Any]:
         if self.pool is None:
             raise RuntimeError("PostgreSQL store is not started")
@@ -129,99 +122,96 @@ class MangaRepository:
         min_p = int(min_pages) if min_pages is not None and int(min_pages) > 0 else None
         max_p = int(max_pages) if max_pages is not None and int(max_pages) > 0 else None
         order_by = {
-            "alpha-asc": "lower(g.title), g.title",
-            "alpha-desc": "lower(g.title) DESC, g.title DESC",
-            "date-asc": "grouped.latest_finished_at, lower(g.title), g.title",
-            "date-desc": "grouped.latest_finished_at DESC, lower(g.title), g.title",
-        }.get(sort, "lower(g.title), g.title")
+            "alpha-asc": "lower(grouped.manga_title), grouped.manga_title",
+            "alpha-desc": "lower(grouped.manga_title) DESC, grouped.manga_title DESC",
+            "date-asc": "grouped.latest_finished_at, lower(grouped.manga_title), grouped.manga_title",
+            "date-desc": "grouped.latest_finished_at DESC, lower(grouped.manga_title), grouped.manga_title",
+        }.get(sort, "lower(grouped.manga_title), grouped.manga_title")
         rows = await self.pool.fetch(
             f"""
-            WITH matched_groups AS (
-                SELECT id, title
-                FROM manga_groups
-                WHERE ($3::text IS NULL OR id=$3 OR title=$3)
+            WITH review_groups AS (
+                SELECT p.manga_group_id AS group_id, count(*) AS review_count, max(p.finished_at) AS latest_finished_at
+                FROM pages p
+                WHERE p.active
+                  AND (p.metadata->>'reviewStatus'='pending' OR p.text_regions @> '[{{"review_required": true}}]'::jsonb)
+                GROUP BY p.manga_group_id
+            ), matched_groups AS (
+                SELECT g.id, g.title, g.series_id
+                FROM manga_groups g
+                WHERE ($3::text IS NULL OR g.id=$3 OR g.title=$3)
                   AND ($4::text IS NULL OR NOT EXISTS (
                       SELECT 1 FROM unnest(regexp_split_to_array(lower(trim($4)), '\\s+')) AS words(token)
-                      WHERE token <> '' AND position(token in lower(title)) = 0
+                      WHERE token <> '' AND position(token in lower(g.title)) = 0
                   ))
                   AND (
                       $5::text[] IS NULL
                       OR (
-                          ('review' != ALL($5::text[]) OR EXISTS (
-                              SELECT 1 FROM pages rp
-                              WHERE rp.active AND rp.manga_group_id = manga_groups.id
-                                AND (rp.metadata->>'reviewStatus'='pending'
-                                     OR rp.text_regions @> '[{{"review_required": true}}]'::jsonb)
-                          ))
+                          ('review' != ALL($5::text[]) OR EXISTS (SELECT 1 FROM review_groups rg WHERE rg.group_id = g.id))
                           AND ('translated' != ALL($5::text[]) OR EXISTS (
-                              SELECT 1 FROM pages tp
-                              WHERE tp.active AND tp.manga_group_id = manga_groups.id
-                                AND tp.source_type = 'translated'
+                              SELECT 1 FROM pages tp WHERE tp.active AND tp.manga_group_id = g.id AND tp.source_type = 'translated'
                           ))
                           AND ('original' != ALL($5::text[]) OR NOT EXISTS (
-                              SELECT 1 FROM pages tp
-                              WHERE tp.active AND tp.manga_group_id = manga_groups.id
-                                AND tp.source_type = 'translated'
+                              SELECT 1 FROM pages tp WHERE tp.active AND tp.manga_group_id = g.id AND tp.source_type = 'translated'
                           ))
                           AND ('summarized' != ALL($5::text[]) OR EXISTS (
-                              SELECT 1 FROM manga_summaries ms
-                              WHERE ms.group_id = manga_groups.id
-                                AND NULLIF(ms.payload->>'summary', '') IS NOT NULL
+                              SELECT 1 FROM manga_summaries ms WHERE ms.group_id = g.id AND NULLIF(ms.payload->>'summary', '') IS NOT NULL
                           ))
                       )
                   )
+            ), page_counts AS (
+                SELECT p.manga_group_id AS group_id, count(*) AS page_count, max(p.finished_at) AS latest_finished_at
+                FROM pages p
+                WHERE p.active AND ($3::text IS NULL OR p.manga_group_id = $3)
+                  AND ($5::text[] IS NULL OR 'review' != ALL($5::text[]))
+                GROUP BY p.manga_group_id
             ), grouped AS (
-                SELECT mg.id AS group_id, mg.title AS manga_title,
-                       count(*) AS page_count,
-                       count(*) FILTER (WHERE ($5::text[] IS NOT NULL AND 'review' = ANY($5::text[]))
-                         OR p.metadata->>'reviewStatus'='pending'
-                         OR p.text_regions @> '[{{"review_required": true}}]'::jsonb) AS review_count,
-                       max(p.finished_at) AS latest_finished_at
+                SELECT mg.id AS group_id, mg.title AS manga_title, mg.series_id,
+                       CASE WHEN $5::text[] IS NOT NULL AND 'review' = ANY($5::text[]) THEN rg.review_count ELSE pc.page_count END AS page_count,
+                       COALESCE(rg.review_count, 0) AS review_count,
+                       CASE WHEN $5::text[] IS NOT NULL AND 'review' = ANY($5::text[]) THEN rg.latest_finished_at ELSE pc.latest_finished_at END AS latest_finished_at
                 FROM matched_groups mg
-                JOIN pages p ON p.active AND p.manga_group_id = mg.id
-                    AND ($5::text[] IS NULL OR 'review' != ALL($5::text[]) OR p.metadata->>'reviewStatus'='pending'
-                         OR p.text_regions @> '[{{"review_required": true}}]'::jsonb)
-                GROUP BY mg.id, mg.title
-                HAVING ($6::int IS NULL OR count(*) >= $6)
-                   AND ($7::int IS NULL OR count(*) <= $7)
-            ), page_rows AS (
-                SELECT cover.*, grouped.page_count, grouped.review_count, grouped.latest_finished_at,
-                       g.id AS group_id, g.title AS manga_title, g.series_id, s.title AS series_title,
-                       EXISTS (
-                           SELECT 1 FROM manga_summaries ms
-                           WHERE ms.group_id=g.id AND NULLIF(ms.payload->>'summary', '') IS NOT NULL
-                       ) AS has_summary,
-                       row_number() OVER (
-                           ORDER BY CASE WHEN g.title='Ungrouped' THEN 1 ELSE 0 END, {order_by}
-                       ) AS row_position
+                LEFT JOIN page_counts pc ON pc.group_id = mg.id
+                LEFT JOIN review_groups rg ON rg.group_id = mg.id
+                WHERE (CASE WHEN $5::text[] IS NOT NULL AND 'review' = ANY($5::text[]) THEN rg.review_count ELSE pc.page_count END) IS NOT NULL
+                  AND ($6::int IS NULL OR (CASE WHEN $5::text[] IS NOT NULL AND 'review' = ANY($5::text[]) THEN rg.review_count ELSE pc.page_count END) >= $6)
+                  AND ($7::int IS NULL OR (CASE WHEN $5::text[] IS NOT NULL AND 'review' = ANY($5::text[]) THEN rg.review_count ELSE pc.page_count END) <= $7)
+            ), limited_groups AS (
+                SELECT grouped.*,
+                       row_number() OVER (ORDER BY CASE WHEN grouped.manga_title='Ungrouped' THEN 1 ELSE 0 END, {order_by}) AS row_position
                 FROM grouped
-                JOIN manga_groups g ON g.id = grouped.group_id
-                LEFT JOIN manga_series s ON s.id = g.series_id
+                ORDER BY CASE WHEN grouped.manga_title='Ungrouped' THEN 1 ELSE 0 END, {order_by}
+                LIMIT $1 OFFSET $2
+            ), page_rows AS (
+                SELECT cover.*, lg.page_count, lg.review_count, lg.latest_finished_at,
+                       lg.group_id, lg.manga_title, lg.series_id, s.title AS series_title,
+                       COALESCE(summary_check.has_summary, FALSE) AS has_summary, lg.row_position
+                FROM limited_groups lg
+                LEFT JOIN manga_series s ON s.id = lg.series_id
+                LEFT JOIN LATERAL (
+                    SELECT TRUE AS has_summary FROM manga_summaries ms
+                    WHERE ms.group_id = lg.group_id AND NULLIF(ms.payload->>'summary', '') IS NOT NULL LIMIT 1
+                ) summary_check ON TRUE
                 JOIN LATERAL (
-                    SELECT p.*
+                    SELECT p.id, p.folder, p.original_name, p.page_order, p.source_type, p.finished_at,
+                           p.input_name, p.final_name, p.has_inpainted, p.has_regions, p.asset_version, p.metadata,
+                           EXISTS (
+                               SELECT 1 FROM pages rp
+                               WHERE rp.active AND rp.manga_group_id = lg.group_id AND rp.id = p.id
+                                 AND rp.text_regions @> '[{{"review_required": true}}]'::jsonb
+                           ) AS has_review_flags
                     FROM pages p
-                    WHERE p.active AND p.manga_group_id = grouped.group_id
+                    WHERE p.active AND p.manga_group_id = lg.group_id
                     ORDER BY p.page_order, p.folder
                     LIMIT 1
                 ) cover ON TRUE
-                ORDER BY CASE WHEN g.title='Ungrouped' THEN 1 ELSE 0 END,
-                         {order_by}
-                LIMIT $1 OFFSET $2
             ), stats AS (
-                SELECT count(*) AS total_groups, COALESCE(sum(page_count), 0) AS total_images
-                FROM grouped
+                SELECT count(*) AS total_groups, COALESCE(sum(page_count), 0) AS total_images FROM grouped
             )
             SELECT page_rows.*, stats.total_groups, stats.total_images
             FROM stats LEFT JOIN page_rows ON TRUE
             ORDER BY page_rows.row_position
             """,
-            page_size,
-            offset,
-            filter_manga,
-            clean_search,
-            status_list,
-            min_p,
-            max_p,
+            page_size, offset, filter_manga, clean_search, status_list, min_p, max_p,
         )
         total_groups = int(rows[0]["total_groups"])
         total_images = int(rows[0]["total_images"])

@@ -44,7 +44,7 @@ export type TranslatorKey =
   | "gemini"
   | "openai"
   | "groq"
-  | "openrouter" | "tokenharbor"
+  | "openrouter" | "tokenharbor" | "dash"
   | "sugoi"
   | "custom_openai"
   | "sakura"
@@ -59,7 +59,7 @@ export const validTranslators: TranslatorKey[] = [
   "gemini",
   "openai",
   "groq",
-  "openrouter", "tokenharbor",
+  "openrouter", "tokenharbor", "dash",
   "sugoi",
   "custom_openai",
   "sakura",
@@ -135,8 +135,8 @@ export interface QueuedImage {
   mangaTitle?: string;
   step?: string;
   stepStartedAt?: Date;
-  offlineModel?: string;
-  geminiModel?: string;
+  finishedAt?: Date | string | null;
+  offlineModel?: string; geminiModel?: string;
   result?: Blob | string;
   inputUrl?: string | null;
   resultUrl?: string | null;
@@ -305,7 +305,7 @@ export interface FinishedImage {
   mangaTitle?: string;
   seriesId?: string | null;
   seriesTitle?: string | null;
-  finishedAt: Date | string;
+  finishedAt?: Date | string | null;
   startedAt?: Date | string | null;
   durationMs?: number | null;
   settings: Partial<TranslationSettings>;

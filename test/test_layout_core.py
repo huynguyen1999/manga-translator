@@ -1,3 +1,5 @@
+import json
+
 import cv2
 import numpy as np
 from types import SimpleNamespace
@@ -39,6 +41,7 @@ from manga_translator.rendering.layout.solver import (
 )
 import manga_translator.rendering.layout.solver as layout_solver
 import manga_translator.rendering.layout.engine as layout_engine
+import manga_translator.rendering.layout.free_text_context as free_text_context
 import manga_translator.rendering.layout.free_text_solver as free_text_solver
 import manga_translator.rendering.layout.ownership as layout_ownership
 from manga_translator.rendering.bubble_layout import group_regions_by_bubbles
@@ -177,7 +180,7 @@ def test_empty_free_text_ownership_skips_candidate_search(monkeypatch):
     def unexpected_search(*_args, **_kwargs):
         raise AssertionError("empty ownership must short-circuit before typography search")
 
-    monkeypatch.setattr(free_text_solver, "_free_text_typography_candidates", unexpected_search)
+    monkeypatch.setattr(free_text_context, "_free_text_typography_candidates", unexpected_search)
 
     assert _solve_free_text_region(
         region, zone, obstacles, Config(), shape, solver_margin=2.0, solver_max_y_trials=8,
@@ -196,13 +199,13 @@ def test_free_text_damage_scope_uses_geometry_calibrated_font_size(monkeypatch):
     }]
     region.placement_mode = PlacementMode.FREE_TEXT
     shapes = []
-    original_dilate = cv2.dilate
+    original_dilate = layout_ownership._dilate_binary_source
 
     def capture_dilate(source, kernel, *args, **kwargs):
         shapes.append(kernel.shape)
         return original_dilate(source, kernel, *args, **kwargs)
 
-    monkeypatch.setattr(layout_ownership.cv2, "dilate", capture_dilate)
+    monkeypatch.setattr(layout_ownership, "_dilate_binary_source", capture_dilate)
     layout_ownership._extract_region_damage_masks(
         [region], (300, 300), inpaint_mask=np.ones((300, 300), dtype=np.uint8),
     )
@@ -377,6 +380,23 @@ def test_dp_prunes_when_a_remaining_word_fits_no_remaining_row():
     assert candidates == []
     assert profile.dp_states_pruned == 1
     assert profile.dp_states_created == 0
+
+
+def test_dp_capacity_bound_and_forced_multislot_hard_break_order():
+    from manga_translator.rendering.layout.profiling import reset_solver_profile
+    rows = [RowGeometry(y, 10, [BandSlot(0, 25, y, y + 10), BandSlot(40, 85, y, y + 10)])
+            for y in (10, 22, 34, 46)]
+    candidates = _dp_word_break_rows(
+        ["ONE", "TWO", HARD_LINE_BREAK, "THREE", "X"], [10, 10, 0, 30, 8], 2,
+        rows, 10, forced_break_after=0)
+    assert [[(line.text, line.x, line.y) for line in lines] for lines in candidates] == [
+        [("ONE", 8, 10), ("TWO", 8, 22), ("THREE X", 42, 34)],
+        [("ONE", 8, 22), ("TWO", 8, 34), ("THREE X", 42, 46)],
+        [("ONE", 8, 10), ("TWO", 8, 22), ("THREE", 48, 34), ("X", 8, 46)],
+    ]
+    profile = reset_solver_profile()
+    assert _dp_word_break_rows(["WORD"] * 7, [30] * 7, 2, rows, 10) == []
+    assert profile.dp_states_pruned == 1 and profile.dp_states_created == 0
 
 
 def test_hyphenation_variant_uses_dictionary_breaks_and_preserves_source_compounds(monkeypatch):
@@ -842,3 +862,75 @@ def test_safe_mask_containment_after_rescue():
         candidate.lines, BubbleGeometry(mask), candidate.font_size, 0, 2.0
     )
     assert valid is True
+
+
+def test_opt_in_layout_profile_reports_region_work_without_changing_layout():
+    image = np.full((100, 160, 3), 80, np.uint8)
+    config = SimpleNamespace(render=SimpleNamespace(
+        font_size_minimum=8, font_size=12, font_size_offset=0,
+        line_spacing=0, no_hyphenation=False,
+    ))
+    plain = _region(10, 30, "PROFILE TEXT", "profile-region")
+    profiled = _region(10, 30, "PROFILE TEXT", "profile-region")
+    plain.fg_color = profiled.fg_color = (0, 0, 0)
+    plain.bg_color = profiled.bg_color = (255, 255, 255)
+    plain_ctx = Context(img_rgb=image.copy(), text_regions=[plain], mask=np.zeros(image.shape[:2], np.uint8))
+    profiled_ctx = Context(img_rgb=image.copy(), text_regions=[profiled], mask=np.zeros(image.shape[:2], np.uint8))
+    profiled_ctx._collect_layout_profile = True
+
+    layout_page(plain_ctx, config, "fonts/anime_ace.ttf")
+    layout_page(profiled_ctx, config, "fonts/anime_ace.ttf")
+
+    assert "_solver_profile" not in plain_ctx
+    assert plain.font_size == profiled.font_size
+    assert plain.layout_segments == profiled.layout_segments
+    assert plain._solver_qa == profiled._solver_qa
+    assert plain._solver_qa["contrast_treatment"] == "white_margin"
+    report = profiled_ctx._solver_profile
+    json.dumps(report)
+    assert report["workload"]["free_text_typography_candidates"] > 0
+    assert report["contrast_ms"] >= 0
+    assert report["regions"][0]["region_id"] == "profile-region"
+    assert report["regions"][0]["typography_candidates"] > 0
+    assert "chosen_font_size" in report["regions"][0]
+    assert "lines" in report["regions"][0]
+
+
+def test_opt_in_layout_profile_attributes_bubble_plan_to_region():
+    from pathlib import Path
+    from manga_translator.rendering.bubble_layout import prepare_bubbles
+
+    image = cv2.imread(str(Path(__file__).parent / "fixtures" / "bubbles" / "two_columns.png"))
+    region = TextBlock(
+        [[[137, 61], [185, 61], [185, 344], [137, 344]]],
+        texts=["source"], translation="A saved dialogue sample.", font_size=20,
+        target_lang="ENG", fg_color=(0, 0, 0), bg_color=(255, 255, 255),
+    )
+    render = RenderConfig(font_size=20, font_size_minimum=12, no_hyphenation=False, line_spacing=0)
+    prepared = prepare_bubbles(image, [region], "fonts/comic shanns 2.ttf", render)
+    ctx = Context(
+        img_rgb=image, text_regions=prepared,
+        mask=np.zeros(image.shape[:2], np.uint8),
+    )
+    ctx._bubble_detection_done = True
+    ctx._collect_layout_profile = True
+
+    layout_page(ctx, SimpleNamespace(render=render), "fonts/comic shanns 2.ttf")
+
+    bubble_report = ctx._solver_profile["regions"][0]
+    json.dumps(ctx._solver_profile)
+    assert bubble_report["placement_mode"] == "BUBBLE"
+    assert bubble_report["path"] == "bubble_shape_aware"
+    bubble_calls = [call for call in bubble_report["calls"] if call["phase"] == "bubble_solver"]
+    assert len(bubble_calls) == 1
+    call = bubble_calls[0]
+    assert call["elapsed_ms"] > 0
+    assert call["workload"]["fonts_tested"] > 0
+    assert call["workload"]["y_origins_tested"] > 0
+    assert call["workload"]["dp_invocations"] > 0
+    assert call["workload"]["dp_states_created"] > 0
+    assert call["workload"]["bubble_row_slot_table_builds"] > 0
+    assert {
+        "row_slot_table", "dp_search", "compaction", "centering",
+        "x_optimization", "composite_penalty", "glyph_validation",
+    } <= call["timings_ms"].keys()

@@ -1,6 +1,6 @@
 # Layout and text-merge behavior contract
 
-Last verified: 2026-09-28
+Last verified: 2026-09-30
 
 This document records current observable behavior across OCR grouping, speech bubble fitting, free-text layout, font policies, and final raster composition. Treat the thresholds, ordering, ownership, and failure rules below as compatibility constraints. Intentional changes must update this document and its characterization tests in the same change.
 
@@ -94,6 +94,19 @@ Speech bubble fitting computes optimal text flow within arbitrary balloon geomet
   - Mixed rendered-clearance conflicts rerun only fast candidates, while exhaustive conflicts retain full search.
   - Shadow comparisons (`log_free_text_shadow_comparison`) record centroid delta, damage coverage delta, core coverage delta, footprint area delta, overflow delta, and mask IoU.
 
+## Page-local progressive search and raster reuse
+
+- Production `layout_page` (including batch and typesetting reruns) owns a 30-second monotonic search deadline. Direct solver callers retain their original breadth and no implicit deadline. A diagnostic `options={"progressive_search": False}` disables only the page search policy.
+- Initial bubble search preserves coarse font order, tests at most two Y origins per font (within the agreed maximum of three), retains one DP path per line-count bucket, refines up to four promising wrappings per font, and retains two glyph-validated alternatives per region. Expanded/direct search retains two DP paths per bucket and the existing Y breadth. Font queues preserve the first occurrence of each size. Necessary suffix-capacity bounds, stable bucket insertion, and exact transition-cost reuse reduce redundant DP work; scoring equations, linguistic costs, and word-splitting rules remain unchanged.
+- Free text probes the existing small local neighborhood at each coarse typography stage. If that probe fails, it widens offsets at the same stage before reducing font size; accepting tiny local lettering while a larger nearby placement is feasible is prohibited. Necessary page/domain bounds reject offsets before costly footprint checks. Initial acceptance retains two compositor-validated alternatives.
+- Only unresolved regions and conflicting candidate groups receive expanded search. Prepared typography, raster crops, and accepted candidates remain page-local; reused candidates are checked against the current placement domain and obstacles. Five seconds is the target: completed validated initial work is retained rather than broadened after it. The continuation gate stops resolved non-conflicting search after ten seconds; orchestration limits expansion to unresolved placements and conflicts even before that threshold.
+- Search loops check the deadline in DP, font, offset, and rescue work. Expiry retains compatible validated candidates and suppresses unresolved translations for source restoration/review. Final containment, panel, collision, ownership, contrast, and source-restoration validation always finishes afterward; it is not interrupted by the search deadline.
+- Final small-text rescue can use `max(1, configured_minimum, ceil(8 * longest_edge / 2048))`. Positive explicit font sizes and preserved numeric sizing cannot use this rescue. A configured automatic minimum (`-1`) keeps its existing calculation. `small_text_rescue` and `rescue_minimum` travel in frozen QA; eligible rescued lettering is reviewed instead of suppressed by the ordinary 12px/2048 floor. Smaller lettering still fails validation.
+- Glyph bitmap arrays are immutable and live in the existing font-aware glyph cache. A page-local compositor key includes font selection, typography, spacing, language/direction, outline, colors, and relative geometry. Crop reuse never skips transformed footprint checks; geometry/contrast changes invalidate footprint reuse.
+- Large binary source-scope dilation uses native double-precision correlation and the same elliptical kernel, with a fallback for ambiguous numeric counts. Mask pixels remain identical to dilation; the optimization changes no ownership or containment rule.
+- Batch layout acquires a dedicated admission permit before CPU work; at most one background layout runs per process. Interactive work and other CPU/resource capacities remain available. Queue waiting and layout execution are reported separately.
+- Algorithm revision is 6. Existing saved image artifacts remain intact; reruns regenerate stale layouts. Opt-in profiles record font trials, compositor hits/misses, visited phases, exhaustion, and rescue usage.
+
 ## Region font policy and readability constraints
 
 `build_region_font_policy` computes target font sizes, compression floors, and consistency baselines:
@@ -104,7 +117,7 @@ Speech bubble fitting computes optimal text flow within arbitrary balloon geomet
 - `absolute_minimum`: Configured `font_size_minimum` (default 8–12 px).
 - `page_font_baseline`: Page-wide median font baseline. Deviations incur quadratic penalties (`_WEIGHT_PAGE_FONT_OVER = 15.0`, `_WEIGHT_PAGE_FONT_UNDER = 60.0`).
 - **Readability floor & review flagging**:
-  - Non-preserved translated text below the absolute readability floor is suppressed.
+  - Non-preserved translated text below the absolute readability floor is suppressed, except approved small-text rescue at its recorded configured/scaled minimum; rescue remains review-required.
   - Output below 85% of calibrated target is marked for review (`review_required=True`) unless the font size was explicitly configured.
 
 ## Page selection and final validation
@@ -138,3 +151,5 @@ The behavior described above is guarded by the following test suites:
 - `test/test_bubble_validation.py`: Bubble glyph validation and top-k candidate pruning.
 - `test/test_render_correctness_contract.py`: Disjoint ownership, panel assignment, suppression, readability, source restoration, and final raster collisions.
 - `test/test_render_mitigations.py` & `test/test_render_clearance.py`: Horizontal/vertical alignments, font scaling mitigations, and clearance bounds.
+
+Focused progressive-search coverage: `test_layout_search_budget.py`, `test_free_text_search_budget.py`, `test_layout_raster_reuse.py`, `test_layout_admission.py`, and the saved `491582cc` collision fixture in `test_layout_saved_collision.py`.

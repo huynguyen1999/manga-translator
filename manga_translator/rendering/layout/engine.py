@@ -1,12 +1,12 @@
 """Production page-layout entry point."""
-
 from __future__ import annotations
-
 from typing import Any, Dict, Optional
 from .models import PageLayoutResult, PlacedLine, RegionLayout
 from .obstacles import classify_placement_modes
 from .regions import prepare_regions
 from .validation import validate_layout
+from .region_profiling import finalize_layout_timings
+from .page_search import _run_search
 
 
 def _region_layout(region: Any, font_path: Optional[str]) -> RegionLayout:
@@ -38,8 +38,10 @@ def layout_page(ctx: Any, config: Any, font_path: Optional[str] = None, options:
     """Run the production shape-aware solver and freeze its result for rendering."""
     from time import perf_counter
     from .. import get_default_eng_font
-    from .solver import apply_shape_aware_bubble_layout, reset_solver_profile
-
+    from .solver import reset_solver_profile
+    ctx._layout_render_config = config.render
+    queue_wait_ms = getattr(ctx, "_layout_queue_wait_ms", 0.0)
+    ctx._layout_queue_wait_ms = 0.0
     profile = reset_solver_profile()
     started = perf_counter()
     regions = prepare_regions(getattr(ctx, "text_regions", []) or [])
@@ -47,38 +49,30 @@ def layout_page(ctx: Any, config: Any, font_path: Optional[str] = None, options:
     if getattr(ctx, "img_rgb", None) is None:
         result.diagnostics.errors.append("layout requires ctx.img_rgb")
         return result
-
     active_font = font_path or getattr(getattr(config, "render", None), "font_path", None) or get_default_eng_font()
     option_debug = options.get("layout_debug", False) if isinstance(options, dict) else getattr(options, "layout_debug", False)
     layout_debug = bool(option_debug or getattr(ctx, "_layout_debug_enabled", False))
     timing: Dict[str, float] = {}
-    detection_done = bool(getattr(ctx, "_bubble_detection_done", False))
-    try:
-        apply_shape_aware_bubble_layout(
-            ctx,
-            config,
-            font_path=active_font,
-            infer_bubbles=not detection_done and not getattr(ctx, "bubble_detections", None),
-            timing=timing,
-            layout_debug=layout_debug,
-            page_geometry=getattr(ctx, "page_geometry", None),
-        )
-    finally:
-        profile.clear_ephemeral_caches()
-
+    from .search_budget import page_search_budget
+    from contextlib import nullcontext
+    progressive = options.get("progressive_search", True) if isinstance(options, dict) else True
+    with page_search_budget() if progressive else nullcontext(None) as budget:
+        _run_search(ctx, config, active_font, timing, layout_debug, profile)
+        result.diagnostics.metrics["search"] = budget.to_dict() if budget else {}
     regions = ctx.text_regions
     prepare_regions(regions)
     classify_placement_modes(regions)
-
     for region in regions:
         region_layout = _region_layout(region, active_font)
         region._layout_frozen = bool(region_layout.lines)
         result.regions[str(region.region_id)] = region_layout
-    result.timings.update(timing)
-    result.timings["total_ms"] = (perf_counter() - started) * 1000.0
     validate_layout(ctx, result)
+    result.timings.update(finalize_layout_timings(timing, ctx, started, queue_wait_ms))
     ctx.layout = result
     ctx._bubble_layout_ready = True
+    for region in regions:
+        if hasattr(region, "_free_text_solve_context"):
+            del region._free_text_solve_context
     if hasattr(ctx, "cleanup_layout_workspace"):
         ctx.cleanup_layout_workspace()
     return result

@@ -1,16 +1,54 @@
 ---
 name: manga-pipeline-case
-description: Inspect a saved Manga Image Translator page and reproduce a reported detection, OCR, speech-bubble, translation, layout, or rendering defect in an isolated copy.
+description: Run, inspect, and compare Manga Image Translator pipeline cases from local images/folders or saved studio page URLs, automatically running the full pipeline into ./devscripts/data on first run and reusing saved JSON data for separate-directory stage reruns on subsequent runs.
 ---
 
 # Manga pipeline case
 
-Use this skill when the user supplies a saved studio page or result URL and reports a bad region, bubble, detection, translation, or rendered result. Ask for the visible region ID only if the reported area cannot otherwise be identified.
+Use this skill when the user specifies local image(s)/folder(s) and a target stage to focus on (for example, `layout` on `~/Downloads/slow`), or when the user supplies a saved studio page/result URL to reproduce a detection, OCR, speech-bubble, translation, mask, layout, inpainting, or rendering issue.
 
-1. Get the saved page details with `python devscripts/pipeline_case.py get '<page-url>' --output /tmp/pipeline-case.json`. This calls the read-only `GET /api/pipeline-cases/{page-ref}/data` endpoint, which returns page metadata, settings, pipeline manifest, and all available stage artifacts in one JSON response without running layout or rendering. Use that JSON to identify the failed stage and find the reported ID. Detection, OCR, speech-bubble, and text-region artifacts include stable prompt IDs. Use this command for structured page data; leave studio interaction to the human visual review.
-2. Choose the earliest stage that must be rerun: `input` reruns the full pipeline, `detection` reruns detection/OCR and downstream work while reusing saved bubble data, `bubble_detection` reruns the full pipeline, `translation` reruns translation and typesetting, and `layout` reruns typesetting/rendering.
-3. Apply a proposed correction to a JSON patch file when needed. It may contain `settingsOverrides` and replacement JSON documents under `artifacts` (for example, `text_regions.json` or `bubble_detections.json`). Then run `python devscripts/pipeline_case.py rerun '<page-url>' --from <stage> --patch /tmp/pipeline-patch.json --output /tmp/pipeline-rerun.json --render-output /tmp/pipeline-preview.jpg`. The command runs the selected stages synchronously in a temporary directory, reads saved database documents, and writes only the requested review image and JSON output. Temporary source files and patched artifacts are deleted automatically. Inspect the returned stage artifacts and render image, then report what changed and any remaining issue.
+## Workflow A: Local images or folders + target stage (`./devscripts/data`)
 
-Reruns use `/api/pipeline-cases/preview`, which runs against a temporary file copy and returns stage artifacts plus the rendered image to the command. It does not create a page, case folder, or batch record in the database. If preview fails, use the read-only JSON endpoint above to inspect the saved inputs and stage artifacts; do not rerun in place. Never use `/api/results/rerun` for debugging: that endpoint operates on the saved page. Do not edit the original page or its database documents. A rerun applies to the page; region IDs identify the problem but do not scope execution to one region. The review image is the only retained render output; choose a temporary path and delete it after human review when it is no longer needed.
+1. **Check whether the images have been run before** in `./devscripts/data`:
+   ```bash
+   python devscripts/pipeline_case.py check <image-or-folder> --stage <stage>
+   ```
+   Supported stages: `input` (`full`), `detection`, `ocr`, `bubble_detection`, `textline_merge`, `translation`, `mask_generation`, `layout` (`typesetting`), `inpainting`, `rendering`.
+   The JSON output reports `allRunBefore`, `recommendedAction` (`run_full_pipeline` or `rerun_stage`), `baselineDir`, and `lastRunJson` for each image.
 
-If a temporary preview fails, use `get` to capture the saved page data for diagnosis, then report the failure and relevant artifact state. If the needed artifact is missing or the requested stage cannot be resumed, report that clearly and stop. Never fall back to an in-place rerun.
+2. **First run (when images have NOT been run before)**:
+   Run `pipeline_case.py run` to execute the full pipeline from scratch and save the baseline JSON (`case.json`, `detection.json`, `ocr.json`, `bubble_detections.json`, `panel_detections.json`, `text_regions_merged.json`, `translations.json`, `layout.json`, `text_regions.json`, `regions.json`, `profiling.json`, `config.json`, `meta.json`) and related stage images (`input.png`, `img_rgb.png`, `mask_raw.png`, `mask_final.png`, `inpaint_mask.png`, `bubble_mask.png`, `protected_bubble_edge.png`, `inpainted.png`, `rendered.png`, `final.jpg`) in `./devscripts/data/<case>`:
+   ```bash
+   python devscripts/pipeline_case.py run <image-or-folder> --stage <stage> --output /tmp/pipeline-baseline.json
+   ```
+
+3. **Subsequent runs (when images HAVE been run before, or after implementing a code change)**:
+   Re-check the saved state with `check`, then run only from the target stage onward. This reuses the last run's saved JSON data (plus baseline images/masks from `./devscripts/data/<case>`) and writes the new state (`case.json`, updated stage `.json` files, `rendered.png`, `final.jpg`, and `comparison.json`) into a **separate directory** so the original baseline data in `./devscripts/data/<case>` is never overwritten:
+   ```bash
+   python devscripts/pipeline_case.py run <image-or-folder> --stage <stage> --output-dir ./devscripts/data/runs/<run-name> --output /tmp/pipeline-rerun.json
+   ```
+   - If `--output-dir` is omitted, `pipeline_case.py` automatically creates a separate timestamped directory under `./devscripts/data/runs/<timestamp>_<stage>/<case>`.
+   - To reuse the original baseline JSON instead of the most recent stage rerun JSON, pass `--from-baseline` (or `--from-run <dir>` to reuse a specific run).
+   - To test setting or artifact overrides without modifying saved files, pass `--patch /tmp/pipeline-patch.json`.
+
+4. **Compare old and new states**:
+   Inspect the generated `comparison.json` inside the rerun directory, or compare any two saved runs directly:
+   ```bash
+   python devscripts/pipeline_case.py compare ./devscripts/data/<case> ./devscripts/data/runs/<run-name>/<case>
+   ```
+   Report region-level changes (font size, line wrapping, bounds, review flags, rendered image hash, and solver workload metrics). Keep the original `./devscripts/data/<case>` baseline untouched for future comparisons.
+
+## Workflow B: Saved studio page or result URL
+
+1. **Get saved page details**:
+   ```bash
+   python devscripts/pipeline_case.py get '<page-url>' --output /tmp/pipeline-case.json
+   ```
+   This calls the read-only `GET /api/pipeline-cases/{page-ref}/data` endpoint and returns page metadata, settings, pipeline manifest, and stage artifacts with stable prompt IDs (`detection_1`, `ocr_region_1`, `speech_bubble_1`, `text_region_1`).
+
+2. **Preview a stage rerun in temporary files**:
+   Choose the earliest stage that must be rerun (`input`, `detection`, `bubble_detection`, `translation`, or `layout`). Prepare an optional `--patch /tmp/pipeline-patch.json` containing `settingsOverrides` and/or replacement `artifacts`, then run:
+   ```bash
+   python devscripts/pipeline_case.py rerun '<page-url>' --from <stage> --patch /tmp/pipeline-patch.json --output /tmp/pipeline-rerun.json --render-output /tmp/pipeline-preview.jpg
+   ```
+   URL reruns use `/api/pipeline-cases/preview`, which executes in a temporary copy without modifying the saved page or database records. Never call `/api/results/rerun` for debugging.

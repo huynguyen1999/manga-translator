@@ -635,28 +635,21 @@ class MangaTranslatorLocal(MangaTranslator):
             logger.info(f'Memory status after cleanup: {memory_percent:.1f}%, available: {available_mb}MB')
 
         batch_config = copy.deepcopy(config) if memory_optimization_enabled else config
-        images = []
-        try:
-            for _, file_path, _ in batch:
-                with Image.open(file_path) as opened:
-                    images.append(opened.copy())
-        except Exception as e:
-            for img in images:
-                img.close()
-            logger.warning(f'Failed to open batch image: {e}')
-            if not self.ignore_errors:
-                raise
-            return 0
-
-        images_with_configs = [(img, batch_config) for img in images]
-
+        images_with_configs = [(file_path, page_config) for page_config, file_path, _ in batch]
         translated_count = 0
         try:
             logger.debug(f'Starting batch translation for {len(batch)} images...')
             batch_results = await self.translate_batch(images_with_configs, len(batch))
 
-            for ctx, (img, (_, file_path, output_dest)) in zip(batch_results, zip(images, batch)):
-                if self._save_batch_item(ctx, img, file_path, output_dest, batch_config, params):
+            for ctx, (page_config, file_path, output_dest) in zip(batch_results, batch):
+                img = getattr(ctx, 'input', None)
+                if img is None:
+                    try:
+                        with Image.open(file_path) as opened:
+                            img = opened.convert('RGB')
+                    except Exception:
+                        img = None
+                if self._save_batch_item(ctx, img, file_path, output_dest, page_config, params):
                     translated_count += 1
                 if hasattr(ctx, 'cleanup_all_images'):
                     ctx.cleanup_all_images()
@@ -672,12 +665,6 @@ class MangaTranslatorLocal(MangaTranslator):
             if not self.ignore_errors:
                 raise
         finally:
-            for img in images:
-                try:
-                    img.close()
-                except Exception:
-                    pass
-            images.clear()
             force_cleanup()
 
         return translated_count

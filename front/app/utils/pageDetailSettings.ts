@@ -12,7 +12,7 @@ const DEFAULT_TRANSLATOR_MODELS: Record<string, string> = {
   gemini: "gemini-1.5-flash-002",
   openai: "gpt-5.4-mini",
   groq: "mixtral-8x7b-32768",
-  openrouter: "deepseek/deepseek-v4-flash-0731", tokenharbor: "deepseek-v4.1-flash:free",
+  openrouter: "qwen/qwen3.8-27b:free", tokenharbor: "deepseek-v4.1-flash:free", dash: "deepseek-v3",
   sugoi: "Sugoi V4.0",
   sakura: "Sakura",
   custom_openai: "Custom OpenAI",
@@ -27,7 +27,7 @@ const TRANSLATOR_ENGINES: Record<string, string> = {
   gemini: "Gemini",
   openai: "OpenAI",
   groq: "Groq",
-  openrouter: "OpenRouter", tokenharbor: "Token Harbor",
+  openrouter: "OpenRouter", tokenharbor: "Token Harbor", dash: "Dash LLM",
   sugoi: "Sugoi",
   sakura: "Sakura",
   custom_openai: "Custom OpenAI",
@@ -51,7 +51,7 @@ export const OCR_LABELS: Record<string, string> = {
   "48px": "48px (Recommended)",
   "32px": "32px",
   "48px_ctc": "48px CTC",
-  mocr: "Manga OCR",
+  mocr: "Manga OCR", ppocrv6: "PP-OCRv6 Small Manga",
 };
 
 export const INPAINTER_LABELS: Record<string, string> = {

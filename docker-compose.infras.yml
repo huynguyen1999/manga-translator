@@ -1,0 +1,31 @@
+services:
+  typesense:
+    image: typesense/typesense:27.1
+    container_name: manga_translator_typesense
+    ports:
+      - "127.0.0.1:8108:8108"
+    environment:
+      - TYPESENSE_API_KEY=xyz
+      - TYPESENSE_DATA_DIR=/data
+      - TYPESENSE_ENABLE_CORS=true
+    volumes:
+      - manga-search-typesense:/data
+    restart: unless-stopped
+  
+  postgres:
+    image: postgres:15.3
+    container_name: manga_translator_postgres_db
+    restart: unless-stopped
+    shm_size: 1g
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: manga_translator
+    volumes:
+      - manga-translator-pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+
+volumes:
+  manga-search-typesense:
+  manga-translator-pgdata:

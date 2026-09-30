@@ -43,8 +43,8 @@ export function sortMangaPagesForOrder(images: FinishedImage[], sortMode: PageSo
       const difference = naturalCompare(a.originalName, b.originalName);
       if (difference !== 0) return sortMode === 'name-asc' ? difference : -difference;
     } else {
-      const aTime = a.finishedAt instanceof Date ? a.finishedAt.getTime() : Date.parse(a.finishedAt);
-      const bTime = b.finishedAt instanceof Date ? b.finishedAt.getTime() : Date.parse(b.finishedAt);
+      const aTime = a.finishedAt instanceof Date ? a.finishedAt.getTime() : a.finishedAt ? Date.parse(a.finishedAt) : 0;
+      const bTime = b.finishedAt instanceof Date ? b.finishedAt.getTime() : b.finishedAt ? Date.parse(b.finishedAt) : 0;
       if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime) {
         const difference = aTime - bTime;
         return sortMode === 'created-asc' ? difference : -difference;
@@ -336,7 +336,7 @@ export function buildGalleryMangaGroups({
     const summaryTimestamp = summary?.latestFinishedAt ? new Date(summary.latestFinishedAt).getTime() : 0;
     const latestFinishedAt = images.reduce(
       (latest, image) => {
-        const timestamp = new Date(image.finishedAt).getTime();
+        const timestamp = image.finishedAt instanceof Date ? image.finishedAt.getTime() : image.finishedAt ? new Date(image.finishedAt).getTime() : NaN;
         return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest;
       },
       Number.isFinite(summaryTimestamp) ? summaryTimestamp : 0,

@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
+from manga_translator.gemini_response import GeminiBlockedResponse, inspect_gemini_response
 from manga_translator.professional_prompts import build_synopsis_system_prompt
+
+MAX_SYNOPSIS_LLM_CONCURRENCY = 10
+_synopsis_llm_semaphore: asyncio.Semaphore | None = None
+
+
+def get_synopsis_llm_semaphore() -> asyncio.Semaphore:
+    global _synopsis_llm_semaphore
+    if _synopsis_llm_semaphore is None:
+        _synopsis_llm_semaphore = asyncio.Semaphore(MAX_SYNOPSIS_LLM_CONCURRENCY)
+    return _synopsis_llm_semaphore
 
 
 def _short_diagnostic(value: Any) -> str:
@@ -14,46 +26,28 @@ def _short_diagnostic(value: Any) -> str:
 
 def summary_error_details(exc: BaseException) -> str:
     detail = str(exc).strip() or type(exc).__name__
-    status_code = getattr(exc, "status_code", None)
-    if not isinstance(status_code, int):
-        status_code = getattr(exc, "code", None)
+    status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     if isinstance(status_code, int) and f"status_code={status_code}" not in detail:
         detail += f" status_code={status_code}"
-    api_message = getattr(exc, "message", None)
-    body = getattr(exc, "body", None)
+    api_message, body = getattr(exc, "message", None), getattr(exc, "body", None)
     if not api_message and body is not None:
         error_body = body.get("error", body) if isinstance(body, dict) else body
         api_message = error_body.get("message") if isinstance(error_body, dict) else None
         if not api_message and error_body:
-            api_message = (
-                json.dumps(error_body, ensure_ascii=False, default=str)
-                if isinstance(error_body, dict)
-                else str(error_body)
-            )
-    if api_message:
-        api_message = str(api_message).replace("\n", " ")[:1000]
-        if api_message not in detail:
-            detail += f" api_error={api_message}"
-    api_status = getattr(exc, "status", None)
-    if api_status:
-        detail += f" api_status={api_status}"
+            api_message = json.dumps(error_body, ensure_ascii=False, default=str) if isinstance(error_body, dict) else str(error_body)
+    if api_message and f"api_error={api_message}" not in detail:
+        detail += f" api_error={str(api_message).replace(chr(10), ' ')[:1000]}"
+    if getattr(exc, "status", None):
+        detail += f" api_status={exc.status}"
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None) or {}
-    request_id = (
-        getattr(exc, "request_id", None)
-        or headers.get("x-goog-request-id")
-        or headers.get("x-request-id")
-    )
+    request_id = getattr(exc, "request_id", None) or headers.get("x-goog-request-id") or headers.get("x-request-id")
     if request_id:
         detail += f" request_id={request_id}"
     request = getattr(exc, "request", None)
-    method = getattr(request, "method", None)
-    url = getattr(request, "url", None)
-    if method and url:
-        detail += f" request={method} {str(url).split('?', 1)[0]}"
-
-    causes = []
-    cause = exc.__cause__ or exc.__context__
+    if request and getattr(request, "method", None) and getattr(request, "url", None):
+        detail += f" request={request.method} {str(request.url).split('?', 1)[0]}"
+    causes, cause = [], exc.__cause__ or exc.__context__
     while cause is not None:
         cause_detail = type(cause).__name__
         if str(cause).strip():
@@ -65,7 +59,7 @@ def summary_error_details(exc: BaseException) -> str:
     return detail
 
 
-async def _summary_completion(
+async def _single_summary_completion(
     client,
     language: str,
     text: str,
@@ -108,51 +102,20 @@ async def _summary_completion(
             content = None
         response_id = getattr(response, "response_id", None)
         response_model = getattr(response, "model_version", None)
-        prompt_feedback = getattr(response, "prompt_feedback", None)
-        prompt_block_reason = getattr(prompt_feedback, "block_reason", None)
-        prompt_ratings = getattr(prompt_feedback, "safety_ratings", None) or []
-        finish_reason = getattr(choice, "finish_reason", None)
-        finish_reason_name = str(finish_reason).rsplit(".", 1)[-1] if finish_reason is not None else None
-        candidate_ratings = getattr(choice, "safety_ratings", None) or []
-        blocked_finish_reasons = {
-            "SAFETY", "PROHIBITED_CONTENT", "RECITATION", "LANGUAGE",
-            "BLOCKLIST", "SPII", "IMAGE_SAFETY", "CONTENT_BLOCKED",
-        }
-        prompt_blocked = (
-            prompt_block_reason is not None
-            and str(prompt_block_reason).rsplit(".", 1)[-1]
-            not in {"BLOCK_REASON_UNSPECIFIED", "UNSPECIFIED", "NONE"}
-        ) or any(getattr(rating, "blocked", False) for rating in prompt_ratings)
-        candidate_blocked = (
-            finish_reason_name in blocked_finish_reasons
-            or any(getattr(rating, "blocked", False) for rating in candidate_ratings)
-        )
-        if prompt_blocked or candidate_blocked:
+        blocked, gemini_diagnostics = inspect_gemini_response(response)
+        if blocked:
             diagnostics = ["status_code=200"]
             diagnostics.extend(
                 f"{name}={value}"
-                for name, value in (
-                    ("response_id", response_id),
-                    ("response_model", response_model),
-                    ("prompt_block_reason", prompt_block_reason),
-                    ("finish_reason", finish_reason),
-                    ("finish_message", getattr(choice, "finish_message", None)),
-                    ("prompt_safety_ratings", prompt_ratings or None),
-                    ("candidate_safety_ratings", candidate_ratings or None),
-                )
+                for name, value in (("response_id", response_id), ("response_model", response_model))
                 if value is not None
             )
-            prefix = "Gemini returned no text" if not isinstance(content, str) or not content.strip() else "Gemini returned blocked content"
-            raise RuntimeError(f"{prefix} ({', '.join(diagnostics)})")
+            diagnostics.extend(gemini_diagnostics)
+            raise GeminiBlockedResponse(f"Gemini safety refusal ({', '.join(diagnostics)})")
     else:
-        completion = client.with_options(timeout=90.0).chat.completions
-        request_options.update({
-            "model": model,
-            "messages": [
-                {"role": "system", "content": build_synopsis_system_prompt(instruction, language)},
-                {"role": "user", "content": text},
-            ],
-        })
+        req_timeout = 300.0 if provider in {"tokenharbor", "openrouter"} or ":free" in str(model) else 90.0
+        completion = client.with_options(timeout=req_timeout).chat.completions
+        request_options.update({"model": model, "messages": [{"role": "system", "content": build_synopsis_system_prompt(instruction, language)}, {"role": "user", "content": text}]})
         raw_completion = getattr(completion, "with_raw_response", None)
         if raw_completion is not None:
             raw_response = await raw_completion.create(**request_options)
@@ -200,3 +163,32 @@ async def _summary_completion(
             detail += f" ({', '.join(diagnostics)})"
         raise RuntimeError(detail)
     return content.strip()
+
+
+async def _summary_completion(
+    client,
+    language: str,
+    text: str,
+    merge: bool,
+    model: str,
+    provider: str,
+) -> str:
+    if provider == "openrouter":
+        from manga_translator.translators.keys import OPENROUTER_MODELS
+
+        candidates = [model]
+        for candidate in OPENROUTER_MODELS.values():
+            if candidate not in candidates:
+                candidates.append(candidate)
+        last_exc: Exception | None = None
+        for candidate_model in candidates:
+            try:
+                return await _single_summary_completion(
+                    client, language, text, merge, candidate_model, provider
+                )
+            except Exception as exc:
+                last_exc = exc
+                continue
+        if last_exc is not None:
+            raise last_exc
+    return await _single_summary_completion(client, language, text, merge, model, provider)

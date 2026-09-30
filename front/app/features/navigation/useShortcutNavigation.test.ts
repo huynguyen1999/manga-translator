@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { getShortcutNavIndex, NAV_SHORTCUT_TARGETS } from "./useShortcutNavigation";
+import {
+  getShortcutNavIndex,
+  getShortcutNavigationDirection,
+  NAV_SHORTCUT_TARGETS,
+} from "./useShortcutNavigation";
 import { parseAppPath } from "@/utils/routeState";
 
 console.log("Running useShortcutNavigation unit tests...");
@@ -54,5 +58,49 @@ assert.equal((0 - 1 + total) % total, 3); // Studio -> Search Lab
 assert.equal((1 - 1 + total) % total, 0); // Gallery -> Studio
 assert.equal((2 - 1 + total) % total, 1); // Series -> Gallery
 assert.equal((3 - 1 + total) % total, 2); // Search Lab -> Series
+
+// 8. Test shortcut navigation direction keys
+assert.equal(
+  getShortcutNavigationDirection({ key: "ArrowRight", metaKey: true, ctrlKey: false }),
+  "next"
+);
+assert.equal(
+  getShortcutNavigationDirection({ key: "ArrowRight", metaKey: false, ctrlKey: true }),
+  "next"
+);
+assert.equal(
+  getShortcutNavigationDirection({ key: "ArrowLeft", metaKey: true, ctrlKey: false }),
+  "prev"
+);
+assert.equal(
+  getShortcutNavigationDirection({ key: "ArrowLeft", metaKey: false, ctrlKey: true }),
+  "prev"
+);
+// ArrowUp and ArrowDown must NOT trigger shortcut navigation (so Cmd+ArrowUp/Down can scroll to top/bottom)
+assert.equal(
+  getShortcutNavigationDirection({ key: "ArrowUp", metaKey: true, ctrlKey: false }),
+  null
+);
+assert.equal(
+  getShortcutNavigationDirection({ key: "ArrowDown", metaKey: true, ctrlKey: false }),
+  null
+);
+assert.equal(
+  getShortcutNavigationDirection({ key: "ArrowUp", metaKey: false, ctrlKey: true }),
+  null
+);
+assert.equal(
+  getShortcutNavigationDirection({ key: "ArrowDown", metaKey: false, ctrlKey: true }),
+  null
+);
+// Without modifier keys
+assert.equal(
+  getShortcutNavigationDirection({ key: "ArrowRight", metaKey: false, ctrlKey: false }),
+  null
+);
+assert.equal(
+  getShortcutNavigationDirection({ key: "ArrowLeft", metaKey: false, ctrlKey: false }),
+  null
+);
 
 console.log("All useShortcutNavigation tests passed successfully!");

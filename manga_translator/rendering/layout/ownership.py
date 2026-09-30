@@ -12,18 +12,23 @@ from .obstacles import _region_source_mask
 from .source_profile import _effective_source_font_size
 
 
+def _dilate_binary_source(source, kernel):
+    """Use native DFT correlation for large binary kernels, with integer safety."""
+    if kernel.shape[0] < 65:
+        return cv2.dilate(source, kernel)
+    counts = cv2.filter2D(source, cv2.CV_64F, kernel.astype(np.float64), borderType=cv2.BORDER_CONSTANT)
+    if np.any(np.abs(counts - np.rint(counts)) > 0.25):
+        return cv2.dilate(source, kernel)
+    return (counts > 0.5).astype(np.uint8)
+
+
 def _extract_region_damage_masks(
-    regions: List[Any],
-    shape: Tuple[int, int],
-    inpaint_mask: Optional[np.ndarray] = None,
+    regions: List[Any], shape: Tuple[int, int], inpaint_mask: Optional[np.ndarray] = None,
     source_masks: Optional[List[np.ndarray]] = None, owner: Optional[np.ndarray] = None,
 ) -> Dict[int, np.ndarray]:
     """Assign captured inpaint/text-removal mask pixels to individual text regions."""
     h, w = shape[:2]
-    free_regions = [
-        r for r in regions or []
-        if getattr(r, "placement_mode", None) is PlacementMode.FREE_TEXT
-    ]
+    free_regions = [r for r in regions or [] if getattr(r, "placement_mode", None) is PlacementMode.FREE_TEXT]
     if not free_regions:
         return {}
 
@@ -40,7 +45,6 @@ def _extract_region_damage_masks(
     else:
         raw_mask = np.zeros((h, w), dtype=np.uint8)
 
-    # Restrict shared inpaint pixels to each source's local scope.
     scopes = []
     for region, source in zip(free_regions, source_masks):
         profile = getattr(region, "_source_profile", None)
@@ -53,7 +57,7 @@ def _extract_region_damage_masks(
             x1, x2 = max(0, int(xs.min()) - radius), min(w, int(xs.max()) + radius + 1)
             y1, y2 = max(0, int(ys.min()) - radius), min(h, int(ys.max()) + radius + 1)
             scope = np.zeros((h, w), dtype=bool)
-            scope[y1:y2, x1:x2] = cv2.dilate(source[y1:y2, x1:x2].astype(np.uint8), kernel) > 0
+            scope[y1:y2, x1:x2] = _dilate_binary_source(source[y1:y2, x1:x2].astype(np.uint8), kernel) > 0
         else:
             scope = np.zeros((h, w), dtype=bool)
         scopes.append(scope)
@@ -62,10 +66,8 @@ def _extract_region_damage_masks(
     region_damages: Dict[int, np.ndarray] = {}
     for idx, r in enumerate(free_regions):
         claimed = (owner == idx) & active_damage & scopes[idx]
-        # Preserve captured inpaint pixels; use source geometry for legacy pages.
         claimed |= source_masks[idx] if not np.any(raw_mask) else False
         region_damages[id(r)] = claimed.astype(np.uint8)
-
     return region_damages
 
 
@@ -83,7 +85,6 @@ def build_free_text_ownership_zones(
     ]
     if not free_regions:
         return {}
-
     shape = obstacles.panel_mask.shape[:2]
     h, w = shape
     panel_constraints = (
@@ -104,7 +105,6 @@ def build_free_text_ownership_zones(
     ]
     owner = np.argmin(np.stack(distances, axis=0), axis=0)
     damage_dict = _extract_region_damage_masks(free_regions, shape, inpaint_mask, seeds, owner)
-
     zones: Dict[int, FreeTextZone] = {}
     for index, region in enumerate(free_regions):
         rid = id(region)

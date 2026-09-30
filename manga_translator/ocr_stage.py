@@ -4,6 +4,7 @@ import os
 import time
 
 from .config import Config
+from .ocr.model_ppocrv6 import call_ocr_with_policy
 from .utils import Context
 
 
@@ -30,14 +31,8 @@ async def run_ocr(owner, config: Config, ctx: Context, *, dispatch_ocr, finish_t
         os.environ["MANGA_OCR_RESULT_DIR"] = ocr_result_dir
 
     try:
-        textlines = await owner._mps_call(
-            dispatch_ocr,
-            config.ocr.ocr,
-            ctx.img_rgb,
-            ctx.textlines,
-            config.ocr,
-            owner.device,
-            owner.verbose,
+        textlines = await call_ocr_with_policy(
+            owner, dispatch_ocr, config.ocr.ocr, ctx.img_rgb, ctx.textlines, config.ocr, owner.device, owner.verbose,
         )
     finally:
         if old_ocr_dir is not None:
@@ -66,7 +61,8 @@ async def run_ocr_batch(
     )
     for _, config in pages:
         owner._model_usage_timestamps[("ocr", config.ocr.ocr)] = time.time()
-    outputs = await owner._mps_call(
+    outputs = await call_ocr_with_policy(
+        owner,
         dispatch_ocr_batch,
         pages[0][1].ocr.ocr,
         [(ctx.img_rgb, ctx.textlines, config.ocr) for ctx, config in pages],

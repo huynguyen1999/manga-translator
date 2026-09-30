@@ -26,6 +26,8 @@ from server.manga_summary import (
     summary_error_details,
     is_page_text_extracted,
     DEFAULT_SUMMARY_CHUNK_LIMITS,
+    MAX_SYNOPSIS_LLM_CONCURRENCY,
+    get_synopsis_llm_semaphore,
 )
 
 
@@ -270,6 +272,7 @@ class TestMangaSummaryPerformance(unittest.IsolatedAsyncioTestCase):
 
         prompt = calls[0]["messages"][0]["content"]
         for expected in (
+            "NON-GRAPHIC METADATA POLICY",
             "OVERVIEW",
             "SETTING AND PREMISE",
             "KEY CHARACTERS AND RELATIONSHIPS",
@@ -300,18 +303,42 @@ class TestMangaSummaryPerformance(unittest.IsolatedAsyncioTestCase):
         self.assertIn("never combine unrelated stories or invent continuity", prompt)
         self.assertIn("keep every detail attached to the correct story", prompt)
 
-    async def test_summary_completion_handles_missing_response_message(self):
+    async def test_summary_completion_classifies_gemini_safety_refusal(self):
+        from manga_translator.translators.gemini_keys import GeminiBlockedResponse
+
         class Models:
             async def generate_content(self, **_kwargs):
                 return SimpleNamespace(
-                    candidates=[SimpleNamespace(finish_reason="SAFETY")],
+                    candidates=[SimpleNamespace(
+                        finish_reason="SAFETY",
+                        finish_message="policy blocked",
+                        safety_ratings=[SimpleNamespace(category="SEXUALLY_EXPLICIT", blocked=True)],
+                    )],
+                    prompt_feedback=SimpleNamespace(block_reason=None, safety_ratings=[]),
+                    text=None,
+                )
+
+        client = SimpleNamespace(aio=SimpleNamespace(models=Models()))
+
+        with self.assertRaises(GeminiBlockedResponse) as raised:
+            await _summary_completion(client, "ENG", "text", False, "gemini-test", "gemini")
+        self.assertIn("Gemini safety refusal", str(raised.exception))
+        self.assertIn("finish_reason=SAFETY", str(raised.exception))
+        self.assertIn("candidate_safety_ratings=", str(raised.exception))
+        self.assertIn("blocked=True", str(raised.exception))
+
+    async def test_summary_completion_keeps_unblocked_empty_response_distinct(self):
+        class Models:
+            async def generate_content(self, **_kwargs):
+                return SimpleNamespace(
+                    candidates=[SimpleNamespace(finish_reason="STOP")],
                     prompt_feedback=None,
                     text=None,
                 )
 
         client = SimpleNamespace(aio=SimpleNamespace(models=Models()))
 
-        with self.assertRaisesRegex(RuntimeError, "Gemini returned no text .*finish_reason=SAFETY"):
+        with self.assertRaisesRegex(RuntimeError, "Gemini returned no text .*finish_reason=STOP"):
             await _summary_completion(client, "ENG", "text", False, "gemini-test", "gemini")
 
     async def test_summary_chunks_are_generated_concurrently(self):
@@ -417,8 +444,15 @@ class TestMangaSummaryPerformance(unittest.IsolatedAsyncioTestCase):
             )
             for setting in config.safety_settings
         }
-        self.assertTrue(
-            ("HARM_CATEGORY_SEXUALLY_EXPLICIT", "BLOCK_NONE") in settings
+        self.assertEqual(
+            settings,
+            {
+                ("HARM_CATEGORY_HARASSMENT", "BLOCK_NONE"),
+                ("HARM_CATEGORY_HATE_SPEECH", "BLOCK_NONE"),
+                ("HARM_CATEGORY_SEXUALLY_EXPLICIT", "BLOCK_NONE"),
+                ("HARM_CATEGORY_DANGEROUS_CONTENT", "BLOCK_NONE"),
+                ("HARM_CATEGORY_CIVIC_INTEGRITY", "BLOCK_NONE"),
+            },
         )
         self.assertEqual(gemini_requests[0]["model"], "gemini-test")
 
@@ -426,9 +460,118 @@ class TestMangaSummaryPerformance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolve_summary_model("deepseek-chat")[1], "deepseek-flash")
         self.assertEqual(resolve_summary_model("deepseek-reasoner")[1], "deepseek-flash")
 
+    async def test_openrouter_summary_completion_fallback(self):
+        attempted_models = []
+
+        class Completions:
+            async def create(self, **kwargs):
+                model = kwargs.get("model")
+                attempted_models.append(model)
+                if model == "qwen/qwen3.8-27b:free":
+                    raise RuntimeError("RateLimitError 429 upstream rate limit")
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content="fallback summary success"))]
+                )
+
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=Completions()),
+            with_options=lambda **_kwargs: client,
+        )
+
+        result = await _summary_completion(
+            client, "ENG", "sample transcript", False, "qwen/qwen3.8-27b:free", "openrouter"
+        )
+        self.assertEqual(result, "fallback summary success")
+        self.assertEqual(
+            attempted_models,
+            ["qwen/qwen3.8-27b:free", "thinking-machines/inkling:free"],
+        )
+
+    async def test_openrouter_summary_completion_all_fail(self):
+        attempted_models = []
+
+        class Completions:
+            async def create(self, **kwargs):
+                model = kwargs.get("model")
+                attempted_models.append(model)
+                raise RuntimeError(f"Failed model {model}")
+
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=Completions()),
+            with_options=lambda **_kwargs: client,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Failed model nvidia/nemotron-3.5-lightning:free"):
+            await _summary_completion(
+                client, "ENG", "sample transcript", False, "qwen/qwen3.8-27b:free", "openrouter"
+            )
+        self.assertEqual(
+            attempted_models,
+            [
+                "qwen/qwen3.8-27b:free",
+                "thinking-machines/inkling:free",
+                "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "nvidia/nemotron-3.5-lightning:free",
+            ],
+        )
+
+    def test_tokenharbor_synopsis_model_resolution(self):
+        from manga_translator.translators import keys
+
+        with patch.object(keys, "TOKEN_HARBOR_MODEL", "deepseek-v4.1-flash:free"), \
+             patch.object(keys, "TOKEN_HARBOR_API_KEY", "th-key"), \
+             patch.object(keys, "TOKEN_HARBOR_API_BASE", "https://tokenharbor.ai/v1"):
+            self.assertEqual(
+                resolve_summary_model("tokenharbor"),
+                ("tokenharbor", "deepseek-v4.1-flash:free", "th-key", "https://tokenharbor.ai/v1"),
+            )
+            self.assertEqual(
+                resolve_summary_model("deepseek-v4.1-flash:free"),
+                ("tokenharbor", "deepseek-v4.1-flash:free", "th-key", "https://tokenharbor.ai/v1"),
+            )
+            self.assertEqual(
+                resolve_summary_model("mimo-v2.6-flash:free"),
+                ("tokenharbor", "mimo-v2.6-flash:free", "th-key", "https://tokenharbor.ai/v1"),
+            )
+            self.assertEqual(
+                resolve_summary_model("tokenharbor:mimo-v2.6-flash:free"),
+                ("tokenharbor", "mimo-v2.6-flash:free", "th-key", "https://tokenharbor.ai/v1"),
+            )
+
+    def test_openrouter_synopsis_model_resolution(self):
+        from manga_translator.translators import keys
+
+        with patch.object(keys, "OPENROUTER_MODEL", "qwen/qwen3.8-27b:free"), \
+             patch.object(keys, "OPENROUTER_API_KEY", "or-key"), \
+             patch.object(keys, "OPENROUTER_API_BASE", "https://openrouter.ai/api/v1"):
+            self.assertEqual(
+                resolve_summary_model("openrouter"),
+                ("openrouter", "qwen/qwen3.8-27b:free", "or-key", "https://openrouter.ai/api/v1"),
+            )
+            self.assertEqual(
+                resolve_summary_model("qwen/qwen3.8-27b:free"),
+                ("openrouter", "qwen/qwen3.8-27b:free", "or-key", "https://openrouter.ai/api/v1"),
+            )
+            self.assertEqual(
+                resolve_summary_model("thinking-machines/inkling:free"),
+                ("openrouter", "thinking-machines/inkling:free", "or-key", "https://openrouter.ai/api/v1"),
+            )
+            self.assertEqual(
+                resolve_summary_model("openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"),
+                ("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free", "or-key", "https://openrouter.ai/api/v1"),
+            )
+
+    def test_tokenharbor_translator_timeout_settings(self):
+        from manga_translator.translators.tokenharbor import TokenHarborTranslator
+        translator = TokenHarborTranslator(check_openai_key=False, api_key="dummy")
+        self.assertEqual(TokenHarborTranslator.MODEL_TIMEOUT_SECONDS, 300)
+        self.assertEqual(translator._TIMEOUT, 300)
+
     def test_provider_specific_chunk_limits(self):
         self.assertEqual(get_summary_chunk_limit("deepseek"), 64_000)
         self.assertEqual(get_summary_chunk_limit("gemini"), 120_000)
+        self.assertEqual(get_summary_chunk_limit("tokenharbor"), 64_000)
+        self.assertEqual(get_summary_chunk_limit("openrouter"), 64_000)
         self.assertEqual(get_summary_chunk_limit("groq"), 3_500)
         self.assertEqual(get_summary_chunk_limit("unknown"), 3_500)
 
@@ -642,6 +785,36 @@ class TestSummaryExtractionProgress(unittest.IsolatedAsyncioTestCase):
         finally:
             main.RESULT_ROOT = original_root
             shutil.rmtree(root, ignore_errors=True)
+
+    def test_generate_synopsis_limits_llm_concurrency(self):
+        self.assertEqual(MAX_SYNOPSIS_LLM_CONCURRENCY, 10)
+        semaphore = get_synopsis_llm_semaphore()
+        self.assertEqual(semaphore._value, 10)
+
+        max_in_flight = 0
+        current_in_flight = 0
+
+        async def fake_summary_completion(*_args, **_kwargs):
+            nonlocal max_in_flight, current_in_flight
+            current_in_flight += 1
+            if current_in_flight > max_in_flight:
+                max_in_flight = current_in_flight
+            await asyncio.sleep(0.02)
+            current_in_flight -= 1
+            return "partial summary"
+
+        # Create 25 transcript chunks
+        transcript = [f"Page {i}: dialogue text" for i in range(25)]
+
+        async def run():
+            with patch("server.manga_summary._summary_completion", new=fake_summary_completion), \
+                 patch("server.manga_summary.openai") as mock_openai:
+                mock_openai.AsyncOpenAI.return_value = AsyncMock()
+                return await generate_synopsis(transcript, "en", lambda t: 100, model="deepseek", chunk_limit=50)
+
+        result = asyncio.run(run())
+        self.assertEqual(result, "partial summary")
+        self.assertLessEqual(max_in_flight, 10)
 
 
 if __name__ == "__main__":

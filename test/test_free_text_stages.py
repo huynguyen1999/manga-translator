@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from manga_translator.rendering.layout import free_text_stages, free_text_typography, free_text_solver
+from manga_translator.rendering.layout import free_text_context, free_text_stages, free_text_typography, free_text_solver
 from manga_translator.rendering.layout.profiling import reset_solver_profile
 from manga_translator.rendering.layout.models import (
     BandSlot,
@@ -33,6 +33,47 @@ def _config(font_size=None, minimum=8, no_hyphenation=True):
         font_size=font_size, font_size_minimum=minimum, line_spacing=0,
         no_hyphenation=no_hyphenation,
     ))
+
+
+def test_offset_bbox_prefilter_rejects_only_impossible_bounds():
+    reject = free_text_stages._free_text_offset_bbox_rejection
+    assert reject((10, 10, 20, 20), (11, 11, 19, 19), 0, 0, 0, 0,
+                  (100, 100), (10, 10, 20, 20), False) is None
+    assert reject((10, 10, 20, 20), (11, 11, 19, 19), 0, 0, -2, 0,
+                  (100, 100), (10, 10, 20, 20), False) == "local_domain"
+    assert reject((10, 10, 20, 20), (11, 11, 19, 19), 0, 0, -11, 0,
+                  (100, 100), (10, 10, 20, 20), False) == "page_bounds"
+    assert reject((10, 10, 20, 20), (11, 11, 19, 19), 0, 0, 20, 0,
+                  (100, 100), (10, 10, 20, 20), True) is None
+
+
+def test_search_bbox_prefilter_applies_candidate_translation_once():
+    profile = reset_solver_profile()
+    candidate = SimpleNamespace(font_size=12)
+    visual = np.ones((10, 10), dtype=bool)
+    zone = SimpleNamespace(domain_center_only=False, rejections={})
+    obstacles = SimpleNamespace(panel_mask=np.ones((100, 100), dtype=np.uint8))
+
+    def search_offset(item, *_args):
+        profile.free_text_offsets_tested += 1
+        profile.free_text_candidates_geometry_evaluated += 1
+        return SimpleNamespace(typography_candidate=item, score=0)
+
+    def search(domain_bbox):
+        return free_text_stages._search_first_viable_stage(
+            [[candidate]],
+            lambda _: (None, (10, 10, 20, 20), None, visual, None, (0, 0), (0, 0, 0, 0), 5, 3, 0),
+            {}, _profile(), (0, 0), 0, 0, zone, obstacles, None,
+            lambda _radius: [(0, 0)], lambda *_args, **_kwargs: [], search_offset,
+            validate_results=lambda items: items, domain_bbox=domain_bbox,
+        )
+
+    assert search((15, 13, 25, 23))
+    assert zone.rejections == {}
+    assert not search((16, 13, 25, 23))
+    assert zone.rejections == {"local_domain": 1}
+    assert profile.free_text_offsets_tested == 2
+    assert profile.free_text_candidates_geometry_evaluated == 1
 
 
 def _cheap_typography(monkeypatch):
@@ -70,11 +111,11 @@ def _free_text_solver_case(monkeypatch, *, reject_source=False, reject_ideal=Fal
     )
 
     monkeypatch.setattr(free_text_solver, "_render_text", lambda _region: "TEXT")
-    monkeypatch.setattr(free_text_solver, "build_original_layout_profile", lambda *_: _profile())
-    monkeypatch.setattr(free_text_solver, "_free_text_typography_candidates", lambda *_a, **_k: [source, shrink])
-    monkeypatch.setattr(free_text_solver, "_source_height_candidates", lambda candidates, *_: candidates)
-    monkeypatch.setattr(free_text_solver.stroke, "get_text_stroke_width", lambda *_: 0)
-    monkeypatch.setattr(free_text_solver, "fg_bg_compare", lambda fg, bg: (fg, bg))
+    monkeypatch.setattr(free_text_context, "build_original_layout_profile", lambda *_: _profile())
+    monkeypatch.setattr(free_text_context, "_free_text_typography_candidates", lambda *_a, **_k: [source, shrink])
+    monkeypatch.setattr(free_text_context, "_source_height_candidates", lambda candidates, *_: candidates)
+    monkeypatch.setattr(free_text_context.stroke, "get_text_stroke_width", lambda *_: 0)
+    monkeypatch.setattr(free_text_context, "fg_bg_compare", lambda fg, bg: (fg, bg))
     monkeypatch.setattr(free_text_solver, "rasterize_candidate", lambda *_: raster)
     monkeypatch.setattr(free_text_solver, "_candidate_raster_at_offset", lambda *_: (
         (40, 40, 42, 42), raster.ink_crop, raster.visual_crop, raster.block_crop,
@@ -142,7 +183,104 @@ def test_source_font_search_checks_actual_raster_before_accepting_stage(monkeypa
         assert free_text_solver.get_solver_profile().free_text_full_search_fallbacks == 1
 
 
-def test_local_lazy_candidate_never_early_returns(monkeypatch):
+def test_domain_retry_reuses_invariant_preparation_and_preserves_layout(monkeypatch):
+    from collections import Counter
+    from manga_translator.rendering.layout import free_text_constraints
+
+    def solve(force_retry):
+        with monkeypatch.context() as patch:
+            region, zone, obstacles, _, _ = _free_text_solver_case(patch)
+            calls = Counter()
+            domain_calls = []
+            search_attempts = []
+            offset_radii = []
+
+            def counted(name, function):
+                def call(*args, **kwargs):
+                    calls[name] += 1
+                    return function(*args, **kwargs)
+                return call
+
+            for name in (
+                "build_original_layout_profile", "_free_text_typography_candidates",
+                "_source_height_candidates",
+            ):
+                function = getattr(free_text_context, name)
+                patch.setattr(free_text_context, name, counted(name, function))
+            for name in ("rasterize_candidate", "_candidate_raster_at_offset"):
+                function = getattr(free_text_solver, name)
+                patch.setattr(free_text_solver, name, counted(name, function))
+            stroke_function = free_text_context.stroke.get_text_stroke_width
+            patch.setattr(
+                free_text_context.stroke, "get_text_stroke_width",
+                counted("stroke", stroke_function),
+            )
+
+            def build_domain(_region, _source, _damage, _obstacles, _panel, *, distance):
+                domain_calls.append(distance)
+                zone._domain_attempt = len(domain_calls)
+                return np.ones((100, 100), dtype=np.uint8), {"geodesic_limit_px": distance}
+
+            patch.setattr(free_text_constraints, "_build_free_text_placement_domain", build_domain)
+
+            def search_result(candidate, raster, *_args):
+                search_attempts.append(zone._domain_attempt)
+                if force_retry and zone._domain_attempt == 1:
+                    zone.rejections["local_domain"] = zone.rejections.get("local_domain", 0) + 1
+                    return None
+                coverage = {
+                    key: 1.0 for key in (
+                        "c_ink", "c_visual", "c_block", "c_damage", "c_core",
+                        "cleanup_mask_coverage",
+                    )
+                }
+                coverage["u_damage"] = 0.0
+                return SearchResult(
+                    candidate, raster, 0, 0, 0, 0, candidate.penalty,
+                    coverage, (50, 50), 0, 0, (45, 45, 55, 55),
+                )
+
+            patch.setattr(free_text_solver, "_free_text_search_result", search_result)
+            offset_search = free_text_solver._free_text_offset_search
+            def record_offset_search(radius):
+                offset_radii.append(radius)
+                return offset_search(radius)
+            patch.setattr(free_text_solver, "_free_text_offset_search", record_offset_search)
+            result, _, _ = free_text_solver._solve_free_text_region(
+                region, zone, obstacles, _config(), (100, 100), 2, 8,
+            )
+            assert result is not None
+            return result, region, calls, domain_calls, search_attempts, offset_radii
+
+    baseline, _, _, baseline_domains, _, _ = solve(False)
+    retried, region, calls, domains, search_attempts, offset_radii = solve(True)
+
+    assert domains == [3, 6]
+    assert baseline_domains == [3]
+    assert search_attempts == [1, 1, 2]
+    assert offset_radii == [3, 3, 6]
+    assert region._free_text_attempt_qa["placement_attempts"][0]["rejections"] == {"local_domain": 2}
+    assert region._free_text_attempt_qa["placement_attempts"][1]["rejections"] == {}
+    assert calls == {
+        "build_original_layout_profile": 1,
+        "_free_text_typography_candidates": 1,
+        "_source_height_candidates": 1,
+        "stroke": 1,
+        "rasterize_candidate": 2,
+        "_candidate_raster_at_offset": 2,
+    }
+    assert retried.font_size == baseline.font_size == 20
+    assert [(line.text, line.x, line.y) for line in retried.lines] == [
+        (line.text, line.x, line.y) for line in baseline.lines
+    ]
+    for key in (
+        "hard_constraints", "render_footprint_validated", "ink_overflow",
+        "damage_coverage", "core_damage_coverage", "layout_width", "layout_height",
+    ):
+        assert retried.qa[key] == baseline.qa[key]
+
+
+def test_local_candidate_early_returns_after_render_validation(monkeypatch):
     region, zone, obstacles, _, _ = _free_text_solver_case(monkeypatch)
     monkeypatch.setattr(free_text_solver, "_layout_env_enabled", lambda _name: True)
     gate_calls = []
@@ -157,10 +295,12 @@ def test_local_lazy_candidate_never_early_returns(monkeypatch):
     )
 
     assert gate_calls
-    assert selected.status == "free_text"
+    assert selected.status == "free_text_local"
+    assert selected.qa["render_footprint_validated"] is True
+    assert region._free_text_candidate_pool == [selected]
     assert free_text_solver.get_solver_profile().free_text_local_search_successes == 1
-    assert free_text_solver.get_solver_profile().free_text_full_search_runs == 1
-    assert free_text_solver.get_solver_profile().free_text_full_search_fallbacks == 1
+    assert free_text_solver.get_solver_profile().free_text_full_search_runs == 0
+    assert free_text_solver.get_solver_profile().free_text_full_search_fallbacks == 0
 
 
 def test_local_search_without_requested_ideal_fast_path_does_not_count_fallback(monkeypatch):
@@ -175,10 +315,62 @@ def test_local_search_without_requested_ideal_fast_path_does_not_count_fallback(
     )
 
     profile = free_text_solver.get_solver_profile()
-    assert selected.status == "free_text"
-    assert profile.free_text_local_search_successes == 1
-    assert profile.free_text_full_search_runs == 1
+    assert selected.status == "free_text_local"
+    assert profile.free_text_local_search_successes >= 1
+    assert profile.free_text_full_search_runs == 0
     assert profile.free_text_full_search_fallbacks == 0
+
+
+def test_local_search_success_counter_requires_compositor_validation(monkeypatch):
+    region, zone, obstacles, _, _ = _free_text_solver_case(monkeypatch)
+    monkeypatch.setattr(free_text_solver, "_layout_env_enabled", lambda name: name == "LAYOUT_LAZY_CANDIDATES")
+    monkeypatch.setattr(free_text_solver, "_layout_env_disabled", lambda name: name == "LAYOUT_FAST_FREE_TEXT")
+    monkeypatch.setattr(free_text_solver, "_free_text_fast_gate", lambda *_args: (True, 0.0))
+    from manga_translator.rendering.layout import candidate_footprint
+    monkeypatch.setattr(candidate_footprint, "filter_renderable_candidates", lambda *_args: [])
+
+    free_text_solver._solve_free_text_region(
+        region, zone, obstacles, _config(), (100, 100), 2, 8,
+        allow_early_accept=True,
+    )
+
+    profile = free_text_solver.get_solver_profile()
+    assert profile.free_text_local_search_attempts > 0
+    assert profile.free_text_local_search_successes == 0
+
+
+def test_local_fast_path_retains_render_validated_placement_alternatives(monkeypatch):
+    region, zone, obstacles, _, _ = _free_text_solver_case(monkeypatch)
+
+    def result_at_offset(candidate, raster, *args):
+        base_box, _ink, _visual, _block, base_centroid, ink_bbox = args[:6]
+        ideal_dx, ideal_dy, rel_dx, rel_dy = args[6:10]
+        dx, dy = ideal_dx + rel_dx, ideal_dy + rel_dy
+        coverage = {key: 1.0 for key in ("c_ink", "c_visual", "c_block", "c_damage", "c_core", "cleanup_mask_coverage")}
+        coverage["u_damage"] = 0.0
+        return SearchResult(
+            candidate, raster, dx, dy, rel_dx, rel_dy, abs(rel_dx) + abs(rel_dy),
+            coverage, (base_centroid[0] + dx, base_centroid[1] + dy), 0, 0,
+            tuple(value + delta for value, delta in zip(ink_bbox, (dx, dy, dx, dy))),
+        )
+
+    monkeypatch.setattr(free_text_solver, "_free_text_search_result", result_at_offset)
+    monkeypatch.setattr(
+        free_text_solver, "_free_text_fast_gate",
+        lambda result, *_args: ((result.relative_dx != 0 or result.relative_dy != 0), 0.0),
+    )
+
+    selected, _, _ = free_text_solver._solve_free_text_region(
+        region, zone, obstacles, _config(), (100, 100), 2, 8,
+        allow_early_accept=True,
+    )
+
+    pool = region._free_text_candidate_pool
+    assert selected is pool[0]
+    assert len(pool) == 8
+    assert all(candidate.status == "free_text_local" for candidate in pool)
+    assert all(candidate.qa["render_footprint_validated"] for candidate in pool)
+    assert len({tuple((line.x, line.y) for line in candidate.lines) for candidate in pool}) == 8
 
 
 @pytest.mark.parametrize("rejection", ["page", "center", "core", "overflow"])
@@ -305,8 +497,13 @@ def test_rejected_ideal_fast_path_runs_exhaustive_search_once(monkeypatch, rejec
     profile = free_text_solver.get_solver_profile()
     assert selected is not None
     assert attempted
-    assert profile.free_text_full_search_fallbacks == 1
-    assert profile.free_text_full_search_runs == 1
+    if rejection == "compositor":
+        assert selected.status == "free_text_local"
+        assert profile.free_text_full_search_fallbacks == 0
+        assert profile.free_text_full_search_runs == 0
+    else:
+        assert profile.free_text_full_search_fallbacks == 1
+        assert profile.free_text_full_search_runs == 1
 
 
 def test_auto_sizes_search_down_to_configured_floor(monkeypatch):

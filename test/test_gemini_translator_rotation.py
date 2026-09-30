@@ -447,25 +447,73 @@ class TestGeminiTranslatorRotationIntegration(unittest.TestCase):
         self.assertIn("骗人", fallback_zh)
         self.assertIn("做爱", fallback_zh)
 
-    def test_safety_settings_include_civic_integrity(self):
-        from manga_translator.translators.gemini import GeminiTranslator
+    def test_text_and_json_requests_include_all_safety_settings(self):
+        from manga_translator.translators.constants import DEFAULT_GEMINI_SAFETY_SETTINGS
+        from manga_translator.translators.gemini import GeminiTranslator, _GeminiTranslator_json
+
         translator = GeminiTranslator.__new__(GeminiTranslator)
         translator.logger = MagicMock()
-        translator.key_manager = MagicMock()
-        translator.key_manager.valid_keys = ["mock_key"]
+        translator.safety_settings = DEFAULT_GEMINI_SAFETY_SETTINGS
+        translator.config = {}
+        translator._canUseCache = False
+        translator.get_chat_sample = lambda _lang: None
+        translator.get_json_sample = lambda _lang: None
+        translator.formatLog = lambda _values: ""
 
-        translator.safety_settings = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
-        ]
-        categories = {s["category"] for s in translator.safety_settings}
-        self.assertIn("HARM_CATEGORY_SEXUALLY_EXPLICIT", categories)
-        self.assertIn("HARM_CATEGORY_CIVIC_INTEGRITY", categories)
-        for s in translator.safety_settings:
-            self.assertEqual(s["threshold"], "BLOCK_NONE")
+        text_config, _ = translator._build_chat_request_payload(
+            "mock_key", "model", MagicMock(), "ENG", "source"
+        )
+        json_translator = _GeminiTranslator_json.__new__(_GeminiTranslator_json)
+        json_translator.translator = translator
+        json_translator.logger = MagicMock()
+        json_translator.ppJSON = lambda value: value
+        json_config, _ = json_translator._build_json_request_payload(
+            "mock_key", "model", MagicMock(), "ENG", "source"
+        )
+
+        expected = {
+            (setting["category"], setting["threshold"])
+            for setting in DEFAULT_GEMINI_SAFETY_SETTINGS
+        }
+        for config in (text_config, json_config):
+            self.assertEqual(
+                {
+                    (setting["category"], setting["threshold"])
+                    for setting in config["safety_settings"]
+                },
+                expected,
+            )
+        self.assertEqual({threshold for _, threshold in expected}, {"BLOCK_NONE"})
+
+    def test_translation_uses_shared_gemini_block_diagnostics(self):
+        from manga_translator.translators.gemini import GeminiTranslator
+        from manga_translator.translators.gemini_keys import GeminiBlockedResponse
+
+        translator = GeminiTranslator.__new__(GeminiTranslator)
+        translator.logger = MagicMock()
+        translator.token_count = 0
+        translator.token_count_last = 0
+        response = types.SimpleNamespace(
+            usage_metadata=None,
+            candidates=[types.SimpleNamespace(
+                finish_reason="PROHIBITED_CONTENT",
+                finish_message="policy blocked",
+                safety_ratings=[types.SimpleNamespace(category="SEXUALLY_EXPLICIT", blocked=True)],
+            )],
+            prompt_feedback=None,
+            response_id="response-1",
+            model_version="gemini-test",
+        )
+
+        with self.assertRaises(GeminiBlockedResponse) as raised:
+            translator._extract_response_text_and_usage(response)
+
+        detail = str(raised.exception)
+        self.assertIn("finish_reason=PROHIBITED_CONTENT", detail)
+        self.assertIn("finish_message=policy blocked", detail)
+        self.assertIn("candidate_safety_ratings=", detail)
+        self.assertIn("response_id=response-1", detail)
+        self.assertIn("model_version=gemini-test", detail)
 
     def test_adult_dialogue_fallback_when_gemini_refuses(self):
         from manga_translator.translators.gemini import GeminiTranslator

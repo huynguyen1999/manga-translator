@@ -67,6 +67,37 @@ def test_forced_split_keeps_short_words_at_least_two_letters_on_each_side(monkey
     assert too_short_changes[0]["strategies"] == ["emergency"]
 
 
+def test_single_hyphen_split_fallback_when_fragments_exceed_width_limit(monkeypatch):
+    from manga_translator.rendering import text_render
+    monkeypatch.setattr(text_render, "select_hyphenator", lambda _: None)
+    monkeypatch.setattr(readable_text, "precompute_widths",
+                        lambda words, _: ([len(word) for word in words], 1))
+
+    split, changes = readable_text.split_oversized_words(["abcdef"], 12, 2, "ENG")
+
+    assert split == ["abc-", HARD_LINE_BREAK, "def"]
+    assert changes[0]["strategies"] == ["emergency"]
+
+
+def test_emergency_split_fragments_can_be_isolated_overwide_lines(monkeypatch):
+    from manga_translator.rendering.layout import free_text_typography, hard_line_break_layout, line_breaking
+    from manga_translator.rendering.layout.models import OriginalLayoutProfile
+
+    monkeypatch.setattr(line_breaking, "_precompute_widths", lambda words, _size: ([3] * len(words), 1))
+    monkeypatch.setattr(free_text_typography, "_free_text_typography_score", lambda *_a, **_k: 0.0)
+    args = (
+        ["abc-", HARD_LINE_BREAK, "def"], 12, 2, 100, 12, 1,
+        0.0, 2, 100, 0.02,
+        OriginalLayoutProfile(12, 1, [], (10, 10), (0, 0, 20, 20), 20, 20, 0.5),
+        None, None,
+    )
+
+    assert hard_line_break_layout.explicit_break_candidate(*args) is None
+    candidate = hard_line_break_layout.explicit_break_candidate(*args, allow_oversized_single_word=True)
+    assert candidate is not None
+    assert [line.width for line in candidate.lines] == [3, 3]
+
+
 def test_failed_translated_and_preserved_text_restore_source():
     for policy in ("translate", "preserve"):
         assert should_restore_source(SimpleNamespace(translation="１０：５６", translation_policy=policy,

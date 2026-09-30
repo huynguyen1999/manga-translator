@@ -130,7 +130,7 @@ def put_char_vertical(font_size: int, cdpt: str, pen_l: Tuple[int, int], canvas_
 
     # 将位图缓冲区转换为NumPy数组  
     # Convert bitmap buffer to NumPy array  
-    bitmap_char = np.array(bitmap.buffer, dtype=np.uint8).reshape((char_bitmap_rows, char_bitmap_width))  
+    bitmap_char = bitmap.array
 
     # --- 计算原始字符在画布上的放置位置 (左上角) ---  
     # --- Calculate the placement position of the original character on canvas (top-left corner) ---  

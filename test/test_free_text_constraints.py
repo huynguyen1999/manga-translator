@@ -149,3 +149,65 @@ def test_hard_constraint_rejection_order_and_labels_are_stable():
     page_panel = np.ones(shape, dtype=np.uint8)
     page_panel[2:4, 2:4] = 0
     rejected("panel_mask", panel_mask=page_panel)
+
+
+def test_invariant_collision_cache_replays_diagnostic_after_domain_retry(monkeypatch):
+    from manga_translator.rendering.layout import free_text_search
+
+    shape = (10, 10)
+    source = np.zeros(shape, dtype=np.uint8)
+    protected = np.zeros(shape, dtype=np.uint8)
+    protected[2:4, 2:4] = 1
+    obstacles = _obstacles(source, protected=protected)
+    other_text = np.zeros(shape, dtype=bool)
+    visual = np.ones((2, 2), dtype=bool)
+    zone = _zone(np.ones(shape, dtype=np.uint8))
+    zone.rejections = {"old": 1}
+    zone.domain_center_only = True
+    real_any = free_text_search.np.any
+    checked_obstacle_masks = 0
+
+    def count_any(*args, **kwargs):
+        nonlocal checked_obstacle_masks
+        checked_obstacle_masks += 1
+        return real_any(*args, **kwargs)
+
+    monkeypatch.setattr(free_text_search.np, "any", count_any)
+
+    assert not _free_text_hard_valid((2, 2, 4, 4), visual, zone, obstacles, other_text)
+    assert zone.rejections == {"old": 1, "protected_bubble": 1}
+    assert checked_obstacle_masks > 0
+
+    zone.placement_domain_mask = np.ones(shape, dtype=np.uint8)
+    zone.rejections = {}
+    checked_obstacle_masks = 0
+    assert not _free_text_hard_valid((2, 2, 4, 4), visual, zone, obstacles, other_text)
+
+    assert zone.rejections == {"protected_bubble": 1}
+    assert checked_obstacle_masks == 0
+
+
+def test_domain_rejection_is_rechecked_after_domain_expands():
+    shape = (10, 10)
+    source = np.zeros(shape, dtype=np.uint8)
+    obstacles = _obstacles(source)
+    other_text = np.zeros(shape, dtype=bool)
+    visual = np.ones((2, 2), dtype=bool)
+    zone = _zone(np.zeros(shape, dtype=np.uint8))
+    zone.rejections = {}
+    zone.domain_center_only = True
+
+    assert not _free_text_hard_valid((2, 2, 4, 4), visual, zone, obstacles, other_text)
+    assert zone.rejections == {"local_domain": 1}
+    assert next(iter(zone._free_text_domain_rejections.values()))[1] == "local_domain"
+    assert not zone._free_text_invariant_rejections
+
+    assert not _free_text_hard_valid((2, 2, 4, 4), visual, zone, obstacles, other_text)
+    assert zone.rejections == {"local_domain": 2}
+
+    zone.placement_domain_mask = np.ones(shape, dtype=np.uint8)
+    zone.rejections = {}
+
+    assert _free_text_hard_valid((2, 2, 4, 4), visual, zone, obstacles, other_text)
+    assert zone.rejections == {}
+    assert not zone._free_text_domain_rejections

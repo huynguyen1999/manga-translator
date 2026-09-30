@@ -10,7 +10,8 @@ import numpy as np
 from PIL import Image
 
 from manga_translator.config import Config
-from manga_translator.detection.bubble import deserialize_bubble_detections, serialize_bubble_detections
+from manga_translator.detection.bubble import serialize_bubble_detections
+from manga_translator.detection.bubble_state import restore_bubble_detections
 from manga_translator.detection.panel import deserialize_panel_detections
 from manga_translator.mask_builder import build_inpaint_masks
 from manga_translator.pipeline.cpu import CPU_PRIORITY_BACKGROUND
@@ -100,8 +101,7 @@ async def complete_translation_pipeline(
         bubble_doc = _load_stage_doc(owner, ctx, 'bubble_detections.json')
         if bubble_doc is not None and getattr(ctx, 'img_rgb', None) is not None:
             try:
-                ctx.bubble_detections = deserialize_bubble_detections(bubble_doc, ctx.img_rgb.shape)
-                ctx._bubble_detection_done = True
+                restore_bubble_detections(ctx, bubble_doc, ctx.img_rgb.shape)
                 group_regions = getattr(config.bubble_detection, 'group_regions', False)
                 ctx.text_regions = group_regions_by_bubbles(
                     ctx.text_regions, ctx.bubble_detections, group=group_regions

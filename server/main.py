@@ -788,12 +788,9 @@ async def _generate_manga_summary(
             source_snapshot=source_snapshot,
             summary_error_details=summary_error_details,
             transcript_pages=transcript_pages,
+            release_summary_extraction=lambda *keys: summary_scheduler.release_extraction(*keys) if summary_scheduler else None,
         ),
     )
-
-
-
-
 
 
 #todo: restart if crash

@@ -138,7 +138,7 @@ def _free_text_wrap_candidate(
     line_spacing: float,
     line_count: int,
     target_width: float,
-    max_line_width: Optional[float] = None,
+    max_line_width: Optional[float] = None, allow_oversized_single_word: bool = False,
 ) -> Optional[LayoutCandidate]:
     """Build one ordinary paragraph shape; every word stays atomic."""
     if not words or line_count < 1 or line_count > len(words):
@@ -154,7 +154,7 @@ def _free_text_wrap_candidate(
                 run_width += widths[end - 1]
                 if end - start > 1:
                     run_width += space_width
-                if max_line_width is not None and run_width > max_line_width:
+                if max_line_width is not None and run_width > max_line_width and not (allow_oversized_single_word and end - start == 1):
                     break
                 remaining = line_count - used - 1
                 remaining_words = len(words) - end

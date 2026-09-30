@@ -182,10 +182,9 @@ class Colorizer(str, Enum):
         raise ValueError(f"{value} is not a valid {cls.__name__}")
 
 class Ocr(str, Enum):
-    ocr32px = "32px"
-    ocr48px = "48px"
+    ocr32px, ocr48px = "32px", "48px"
     ocr48px_ctc = "48px_ctc"
-    mocr = "mocr"
+    mocr, ppocrv6 = "mocr", "ppocrv6"
 
     def __str__(self):
         return self.value
@@ -203,6 +202,8 @@ class Ocr(str, Enum):
             return cls.ocr48px_ctc
         if val in ('mocr', 'manga_ocr', 'mangaocr'):
             return cls.mocr
+        if val in ('ppocrv6', 'ppocr', 'pp_ocrv6', 'ppocrv6_manga', 'ppocrv6_small_manga', 'pp_ocr_v6'):
+            return cls.ppocrv6
         raise ValueError(f"{value} is not a valid {cls.__name__}")
 
 class Translator(str, Enum):
@@ -210,7 +211,7 @@ class Translator(str, Enum):
     gemini = "gemini"
     chatgpt = "chatgpt"
     groq = "groq"
-    openrouter, tokenharbor = "openrouter", "tokenharbor"
+    openrouter, tokenharbor, dash = "openrouter", "tokenharbor", "dash"
     sugoi = "sugoi"
     custom_openai = "custom_openai"
     sakura = "sakura"
@@ -229,17 +230,16 @@ class Translator(str, Enum):
     def _missing_(cls, value):
         if not isinstance(value, str):
             raise ValueError(f"{value} is not a valid {cls.__name__}")
-        val = value.lower()
-        if val.startswith('gpt') or val == 'openai':
+        val = value.lower().replace('-', '_')
+        if val.startswith('gpt') or val in ('openai', 'chatgpt_2stage'):
             return cls.chatgpt
         if val in ('gemini_2stage',):
             return cls.gemini
-        if val in ('chatgpt_2stage',):
-            return cls.chatgpt
+        if val in ('dashscope', 'dash_llm', 'dashscope_llm'):
+            return cls.dash
         if val in ('offline', 'jparacrawl', 'jparacrawl_big'):
             return cls.sugoi
         raise ValueError(f"{value} is not a valid {cls.__name__}")
-
 
 class Upscaler(str, Enum):
     waifu2x = "waifu2x"

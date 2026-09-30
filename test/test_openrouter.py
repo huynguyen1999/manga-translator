@@ -12,7 +12,7 @@ if _repo_root not in sys.path:
 from manga_translator.config import Translator, TranslatorConfig, Config
 from manga_translator.translators.common import MissingAPIKeyException
 from manga_translator.translators.deepseek import DeepseekTranslator
-from manga_translator.translators.openrouter import OpenRouterTranslator
+from manga_translator.translators.openrouter import OpenRouterTranslator, OPENROUTER_MODELS, FALLBACK_MODELS
 from manga_translator.translators import TRANSLATORS, GPT_TRANSLATORS, translator_cache
 
 
@@ -34,13 +34,28 @@ class TestOpenRouterTranslator(unittest.IsolatedAsyncioTestCase):
         """Test default values for OpenRouter."""
         with patch.dict(os.environ, {}, clear=False):
             tr = OpenRouterTranslator(check_openai_key=False)
-            self.assertEqual(tr.model, "deepseek/deepseek-v4-flash-0731")
+            self.assertEqual(tr.model, "qwen/qwen3.8-27b:free")
             self.assertEqual(str(tr.client.base_url).rstrip("/"), "https://openrouter.ai/api/v1")
             self.assertEqual(tr.provider_sort, "price")
             self.assertEqual(
                 tr._build_provider_config(),
                 {"order": ["reka", "inceptron"], "allow_fallbacks": False, "sort": "price"},
             )
+            self.assertEqual(
+                tr._get_fallback_chain(),
+                [
+                    "qwen/qwen3.8-27b:free",
+                    "thinking-machines/inkling:free",
+                    "nvidia/nemotron-3-ultra-550b-a55b:free",
+                    "nvidia/nemotron-3.5-lightning:free",
+                ],
+            )
+
+    def test_model_alias_resolution(self):
+        """Test short alias resolution for OpenRouter models."""
+        for alias, full_name in OPENROUTER_MODELS.items():
+            tr = OpenRouterTranslator(check_openai_key=False, model=alias)
+            self.assertEqual(tr.model, full_name)
 
     def test_env_overrides(self):
         """Test environment variable overrides for model, base, key, and provider routing."""
@@ -49,19 +64,24 @@ class TestOpenRouterTranslator(unittest.IsolatedAsyncioTestCase):
             {
                 "OPENROUTER_API_KEY": "sk-or-test-key",
                 "OPENROUTER_API_BASE": "https://openrouter.ai/api/v1",
-                "OPENROUTER_MODEL": "deepseek/deepseek-v4-flash-0731",
+                "OPENROUTER_MODEL": "thinking-machines/inkling:free",
                 "OPENROUTER_PROVIDER_SORT": "price",
             },
             clear=True,
         ):
             tr = OpenRouterTranslator(check_openai_key=True)
             self.assertEqual(tr.client.api_key, "sk-or-test-key")
-            self.assertEqual(tr.model, "deepseek/deepseek-v4-flash-0731")
+            self.assertEqual(tr.model, "thinking-machines/inkling:free")
             self.assertEqual(str(tr.client.base_url).rstrip("/"), "https://openrouter.ai/api/v1")
             self.assertEqual(tr.provider_sort, "price")
             self.assertEqual(
-                tr._build_provider_config(),
-                {"order": ["reka", "inceptron"], "allow_fallbacks": False, "sort": "price"},
+                tr._get_fallback_chain(),
+                [
+                    "thinking-machines/inkling:free",
+                    "qwen/qwen3.8-27b:free",
+                    "nvidia/nemotron-3-ultra-550b-a55b:free",
+                    "nvidia/nemotron-3.5-lightning:free",
+                ],
             )
 
     def test_missing_key_validation(self):
@@ -98,7 +118,7 @@ class TestOpenRouterTranslator(unittest.IsolatedAsyncioTestCase):
 
         tr.client.chat.completions.create.assert_awaited_once()
         call_kwargs = tr.client.chat.completions.create.call_args.kwargs
-        self.assertEqual(call_kwargs["model"], "deepseek/deepseek-v4-flash-0731")
+        self.assertEqual(call_kwargs["model"], "qwen/qwen3.8-27b:free")
         self.assertIn("extra_body", call_kwargs)
         self.assertEqual(
             call_kwargs["extra_body"],
@@ -120,6 +140,59 @@ class TestOpenRouterTranslator(unittest.IsolatedAsyncioTestCase):
 
         results = await tr._translate("JPN", "ENG", ["こんにちは", "世界"])
         self.assertEqual(results, ["Hello", "World"])
+
+    async def test_fallback_flow_when_primary_fails(self):
+        """Verify _translate falls back in order when the primary model fails."""
+        tr = OpenRouterTranslator(check_openai_key=False, api_key="test-key")
+
+        mock_success_response = MagicMock()
+        mock_choice = MagicMock()
+        mock_choice.message.content = "<|1|>Hello\n<|2|>World"
+        mock_choice.text = None
+        mock_success_response.choices = [mock_choice]
+        mock_success_response.usage.total_tokens = 30
+
+        models_attempted = []
+
+        async def mock_create(**kwargs):
+            model = kwargs.get("model")
+            models_attempted.append(model)
+            if model == "qwen/qwen3.8-27b:free":
+                raise Exception("Rate limit reached on qwen")
+            return mock_success_response
+
+        tr.client.chat.completions.create = AsyncMock(side_effect=mock_create)
+
+        results = await tr._translate("JPN", "ENG", ["こんにちは", "世界"])
+        self.assertEqual(results, ["Hello", "World"])
+        # Should have attempted qwen first (which failed), then inkling (which succeeded)
+        self.assertIn("qwen/qwen3.8-27b:free", models_attempted)
+        self.assertIn("thinking-machines/inkling:free", models_attempted)
+
+    async def test_fallback_chain_all_fail(self):
+        """Verify _translate attempts all fallback models and raises when all fail."""
+        tr = OpenRouterTranslator(check_openai_key=False, api_key="test-key")
+
+        models_attempted = []
+
+        async def mock_create(**kwargs):
+            models_attempted.append(kwargs.get("model"))
+            raise Exception("Model failure")
+
+        tr.client.chat.completions.create = AsyncMock(side_effect=mock_create)
+
+        with self.assertRaises(Exception):
+            await tr._translate("JPN", "ENG", ["こんにちは", "世界"])
+
+        self.assertEqual(
+            list(dict.fromkeys(models_attempted)),
+            [
+                "qwen/qwen3.8-27b:free",
+                "thinking-machines/inkling:free",
+                "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "nvidia/nemotron-3.5-lightning:free",
+            ],
+        )
 
 
 if __name__ == "__main__":

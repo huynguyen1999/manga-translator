@@ -51,11 +51,12 @@ MANIFEST
 .history
 /venv
 .venv/
-
+/results/
+*.dump
 # Input and Output
 /input/
 /input-translated/
-
+.scratch
 # SSL Used for running server locally
 cert.pem
 key.pem

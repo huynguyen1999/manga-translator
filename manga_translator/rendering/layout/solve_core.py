@@ -1,13 +1,9 @@
 """Shape-aware candidate search for bubble and free-text regions."""
-
 from __future__ import annotations
-
 import math
 from time import perf_counter
 from typing import Dict, List, Optional, Tuple, Union
-
 import numpy as np
-
 from .geometry import BubbleGeometry
 from .models import BandSlot, LayoutCandidate, PlacedLine
 from .scoring import _WEIGHT_SRC_LINES, _composite_penalty, _font_penalty
@@ -23,10 +19,9 @@ from .line_breaking import (
 from .paragraph_flow import _classify_adjacent_gaps, _compact_vertical_rhythm
 from .centering import _center_layout_block, _optimize_x
 from .profiling import get_solver_profile
+from .search_budget import get_search_budget, SearchDeadlineReached
 from .text_normalization import normalize_words
 from .readable_text import centered_candidate_key
-
-
 def solve_layout(
     geom: BubbleGeometry,
     words: List[str],
@@ -48,7 +43,6 @@ def solve_layout(
     forced_break_after: Optional[int] = None,
 ) -> Union[Optional[LayoutCandidate], List[LayoutCandidate]]:
     """Generate and rank layout candidates; return one or the best ``top_k``.
-
     The mask determines *where text may exist* (hard validation); language,
     typography, and the original page's layout profile shape the soft score.
     ``hyphenate`` is accepted for API compatibility — normalized words are
@@ -56,19 +50,19 @@ def solve_layout(
     """
     if not words:
         return None
-
     # Phase 2: repair OCR hyphen splits so ordinary words are atomic.
     norm_words = list(words) if forced_break_after is not None else normalize_words(words)
     if forced_break_after is not None and not 0 <= forced_break_after < len(norm_words) - 1:
         return None
-
     if line_spacing_options is None:
         line_spacing_options = [line_spacing]
-
     font_target = font_size_max
     candidates: List[LayoutCandidate] = []
     prof = get_solver_profile()
-
+    budget = get_search_budget()
+    initial = budget is not None and budget.initial
+    if initial:
+        max_y_origin_trials = min(max_y_origin_trials, 2)
     # Determine font size sequence: coarse stepping for wide ranges, then fine refinement
     font_range = list(range(font_size_max, font_size_min - 1, -1))
     if len(font_range) > 10:
@@ -84,30 +78,28 @@ def solve_layout(
     else:
         candidate_font_queue = list(font_range)
         fine_refined_fonts = set(font_range)
-
+    queued_fonts = set(candidate_font_queue)
     queue_idx = 0
     while queue_idx < len(candidate_font_queue):
+        if budget is not None and budget.expired():
+            break
         S = candidate_font_queue[queue_idx]
         queue_idx += 1
         prof.fonts_tested += 1
-
+        prof.attempted_font_sizes.append(S)
         if not geom.has_safe_pixels(S, stroke_width, margin):
             continue
-
         x1, y1, x2, y2 = geom.safe_bounding_box(S, stroke_width, margin)
         if x2 <= x1 or y2 <= y1:
             continue
-
         t_w0 = perf_counter()
         word_widths, space_w = _precompute_widths(norm_words, S)
         prof.width_precompute_ms += (perf_counter() - t_w0) * 1000.0
         if not word_widths:
             continue
-
         # Feasibility check: max single word width must fit in safe width
         if max(word_widths) > (x2 - x1):
             continue
-
         # Precompute reusable row-slot table for font size S
         min_slot_w = max(S, 8)
         t_rst0 = perf_counter()
@@ -117,7 +109,6 @@ def solve_layout(
         prof.row_slot_table_ms += (perf_counter() - t_rst0) * 1000.0
         if not row_slot_table:
             continue
-
         t_pt0 = perf_counter()
         target_geom = _cached_placement_target(
             geom, S, stroke_width, margin,
@@ -126,7 +117,6 @@ def solve_layout(
             is_single_region=is_single_region,
         )
         prof.placement_target_ms += (perf_counter() - t_pt0) * 1000.0
-
         for ls in line_spacing_options:
             prof.spacing_tested += 1
             line_h = _line_height(S, ls)
@@ -161,19 +151,24 @@ def solve_layout(
             tested_y = set()
 
             for y_orig in promising_y:
+                if (initial and len(tested_y) >= max_y_origin_trials) or (budget is not None and budget.expired()):
+                    break
                 if y_orig in tested_y:
                     continue
                 tested_y.add(y_orig)
                 prof.y_origins_tested += 1
                 t_dp0 = perf_counter()
-                cand_wrappings = _try_placement_rows(
+                try:
+                    cand_wrappings = _try_placement_rows(
                     geom, norm_words, word_widths, space_w,
                     S, y_orig, ls, line_h, stroke_width, margin,
                     zone_profile=zone_profile,
-                    max_per_bucket=2,
+                    max_per_bucket=1 if initial else 2,
                     row_slot_table=row_slot_table,
                     forced_break_after=forced_break_after,
                 )
+                except SearchDeadlineReached:
+                    break
                 prof.dp_search_ms += (perf_counter() - t_dp0) * 1000.0
                 if not cand_wrappings:
                     continue
@@ -187,7 +182,7 @@ def solve_layout(
                     break
 
             # Fine Y refinement around best coarse wrappings
-            if raw_wrappings and len(y_origins) > len(promising_y) and trials_after_first < max_y_origin_trials:
+            if not initial and raw_wrappings and len(y_origins) > len(promising_y) and trials_after_first < max_y_origin_trials:
                 best_y_origs = [item[0] for item in raw_wrappings[:2]]
                 for best_y in best_y_origs:
                     for neighbor_y in (best_y - y_origin_step, best_y + y_origin_step):
@@ -195,7 +190,8 @@ def solve_layout(
                             tested_y.add(neighbor_y)
                             prof.y_origins_tested += 1
                             t_dp0 = perf_counter()
-                            cand_wrappings = _try_placement_rows(
+                            try:
+                                cand_wrappings = _try_placement_rows(
                                 geom, norm_words, word_widths, space_w,
                                 S, neighbor_y, ls, line_h, stroke_width, margin,
                                 zone_profile=zone_profile,
@@ -203,6 +199,8 @@ def solve_layout(
                                 row_slot_table=row_slot_table,
                                 forced_break_after=forced_break_after,
                             )
+                            except SearchDeadlineReached:
+                                break
                             prof.dp_search_ms += (perf_counter() - t_dp0) * 1000.0
                             if cand_wrappings:
                                 for placed in cand_wrappings:
@@ -219,8 +217,9 @@ def solve_layout(
             if S not in fine_refined_fonts:
                 fine_refined_fonts.add(S)
                 for neighbor_S in (S + 1, S - 1, S - 2):
-                    if font_size_min <= neighbor_S <= font_size_max and neighbor_S not in fine_refined_fonts:
+                    if font_size_min <= neighbor_S <= font_size_max and neighbor_S not in queued_fonts:
                         fine_refined_fonts.add(neighbor_S)
+                        queued_fonts.add(neighbor_S)
                         candidate_font_queue.append(neighbor_S)
 
             # Phase 2: Heuristic pre-score raw wrappings, grouping by line count to preserve diversity
@@ -244,10 +243,12 @@ def solve_layout(
                 elite_raw.extend(group[:2])  # top 2 per line count bucket
 
             elite_raw.sort(key=lambda x: x[0])
-            del elite_raw[max(8, top_k * 4):]
+            del elite_raw[4 if initial else max(8, top_k * 4):]
             prof.pre_score_survivors += len(elite_raw)
 
             for _, y_orig, placed in elite_raw:
+                if budget is not None and budget.expired():
+                    break
                 # 1. Vertical Compaction Pass: Continuous Y refinement & Spring chain
                 t_comp0 = perf_counter()
                 placed_compacted = _compact_vertical_rhythm(
@@ -421,7 +422,6 @@ def solve_layout(
     if top_k > 1:
         return valid_candidates[:top_k]
     return valid_candidates[0] if valid_candidates else None
-
 
 def _line_height(font_size: int, line_spacing: float) -> int:
     spacing = int(font_size * max(0.0, line_spacing))

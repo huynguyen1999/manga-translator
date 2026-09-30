@@ -16,24 +16,24 @@ export const timestampTooltip = (value?: string | number | Date | null): string 
 };
 
 export const resolveTranslationTiming = (
-  manifest: PipelineRunManifest | null | undefined,
-  finishedAt?: string | number | Date | null,
-  startedAt?: string | number | Date | null,
-  durationMs?: number | null,
+  manifest: PipelineRunManifest | null | undefined, finishedAt?: string | number | Date | null,
+  startedAt?: string | number | Date | null, durationMs?: number | null,
 ) => {
-  const startAt = startedAt || manifest?.createdAt || null;
-  const endAt = finishedAt || manifest?.updatedAt || null;
+  const stageStarts = manifest?.stages?.map((s) => s.startedAt).filter((t): t is string => Boolean(t));
+  const stageEnds = manifest?.stages?.map((s) => s.finishedAt).filter((t): t is string => Boolean(t));
+  const firstStageStart = stageStarts?.[0], lastStageEnd = stageEnds?.[stageEnds.length - 1];
+  let startAt = startedAt || firstStageStart || manifest?.createdAt || null;
+  let endAt = (manifest?.status === "completed" ? (lastStageEnd || manifest?.updatedAt || finishedAt) : (finishedAt || lastStageEnd || manifest?.updatedAt)) || null;
   const startMs = startAt instanceof Date ? startAt.getTime() : startAt ? Date.parse(String(startAt)) : NaN;
-  const endMs = endAt instanceof Date ? endAt.getTime() : endAt ? Date.parse(String(endAt)) : NaN;
-  const stageDuration = manifest?.stages?.reduce<number | null>(
-    (total, stage) => Number.isFinite(stage.durationMs) ? (total ?? 0) + (stage.durationMs || 0) : total, null,
-  ) ?? null;
+  let endMs = endAt instanceof Date ? endAt.getTime() : endAt ? Date.parse(String(endAt)) : NaN;
+  if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs < startMs) {
+    if (lastStageEnd && Date.parse(lastStageEnd) >= startMs) { endAt = lastStageEnd; endMs = Date.parse(lastStageEnd); }
+    else if (manifest?.updatedAt && Date.parse(manifest.updatedAt) >= startMs) { endAt = manifest.updatedAt; endMs = Date.parse(manifest.updatedAt); }
+  }
+  const stageDuration = manifest?.stages?.reduce<number | null>((total, stage) => Number.isFinite(stage.durationMs) ? (total ?? 0) + (stage.durationMs || 0) : total, null) ?? null;
   return {
-    startAt,
-    endAt,
-    durationMs: stageDuration ?? (durationMs != null && Number.isFinite(durationMs)
-      ? durationMs
-      : Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs ? endMs - startMs : null),
+    startAt, endAt,
+    durationMs: stageDuration ?? (durationMs != null && Number.isFinite(durationMs) ? durationMs : Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs ? endMs - startMs : null),
   };
 };
 

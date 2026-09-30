@@ -14,7 +14,6 @@ from manga_translator.pipeline.stages import (
     stage_from_progress,
 )
 
-
 async def process_pipeline_rerun_item(
     scheduler, batch_id: str, item_id: str, instance: Any, *,
     log_token, set_item_stage, correlation_id_ctx, logger,
@@ -74,6 +73,7 @@ async def process_pipeline_rerun_item(
 
         ctx, state = await load_rerun_context(result_dir, plan, config, database=database, record_id=item.get("pageId"))
 
+        ctx._background_batch_render = True
         async def update_progress(stage: str):
             canonical_stage = stage_from_progress(stage)
             if canonical_stage is not None and canonical_stage not in stage_runs:
@@ -156,8 +156,8 @@ async def process_pipeline_rerun_item(
                 page_id=item.get("pageId"),
             )
 
-        needs_review = any(
-            bool(getattr(region, "review_required", False))
+        needs_review = bool(getattr(executed_ctx, "manual_review_required", False)) or any(
+            bool(region.get("review_required") if isinstance(region, dict) else getattr(region, "review_required", False))
             for region in (getattr(executed_ctx, "text_regions", None) or [])
         )
 

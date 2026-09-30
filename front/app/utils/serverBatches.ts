@@ -17,8 +17,7 @@ export interface ServerBatchItem {
   sourcePath?: string | null;
   mangaTitle?: string;
   status: "queued" | "processing" | "completed" | "error";
-  stage?: string | null;
-  stageStartedAt?: number | string | null;
+  stage?: string | null; stageStartedAt?: number | string | null; finishedAt?: number | string | null;
   error?: string | null;
   addedAt?: number | string;
   inputUrl?: string | null;
@@ -242,7 +241,7 @@ export const toTranslationBatch = (batch: ServerBatch | ServerBatchSummary): Tra
     mangaTitle: item.mangaTitle || batch.mangaTitle || batch.title,
     step: item.stage || undefined,
     stepStartedAt: item.stageStartedAt == null ? undefined : asDate(item.stageStartedAt),
-    error: item.error || undefined,
+    finishedAt: item.finishedAt == null ? undefined : asDate(item.finishedAt), error: item.error || undefined,
     folder: item.resultFolder || undefined,
     inputUrl: item.inputUrl,
     resultUrl: item.resultUrl,

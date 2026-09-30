@@ -1,6 +1,147 @@
 # Notable changes
 
+## 2026-10-01 — Fix timing overview start/end timestamp inversion and record batch duration for GPU-batched stages
+
+- Reason: Ensure page detail timing overview displays coherent, monotonic start and end timestamps (preventing `endAt < startAt` caused by reusing queue insertion timestamps) and ensure per-stage breakdowns accurately reflect the total batch execution time for stages batched to GPU.
+- Updated [`front/app/utils/pageDetailTiming.ts`](../front/app/utils/pageDetailTiming.ts) (`resolveTranslationTiming`) to derive start and end times from manifest stages or `manifest.updatedAt` and guard against stale/early `finishedAt` values.
+- Updated [`front/app/features/batches/BatchCard.tsx`](../front/app/features/batches/BatchCard.tsx), [`front/app/utils/serverBatches.ts`](../front/app/utils/serverBatches.ts), and [`front/app/types.ts`](../front/app/types.ts) to avoid assigning `item.addedAt` as `finishedAt`.
+- Updated [`server/batch_stage_executor.py`](../server/batch_stage_executor.py) (`process_checkpointed_ocr_group`, `process_checkpointed_model_group`) and [`manga_translator/pipeline/retry.py`](../manga_translator/pipeline/retry.py) (`execute_retry_stage`) to preserve start timestamps during batched stages and assign the full batch duration to each stage's `durationMs`.
+- Added test coverage in [`front/app/components/PageDetailModal.test.ts`](../front/app/components/PageDetailModal.test.ts) and [`test/test_pipeline_timing.py`](../test/test_pipeline_timing.py).
+
+## 2026-10-01 — Add asynchronous CPU input prefetching and GPU detection pipelining for batch translation
+
+- Reason: Avoid blocking GPU text detection while waiting for disk I/O and synchronous CPU image decoding/RGB conversion, and prevent holding full uncompressed batch chunks in memory simultaneously.
+- Added [`manga_translator/pipeline/batch/prefetch.py`](../manga_translator/pipeline/batch/prefetch.py) (`prefetch_input_stream`, `_load_single_image`) to asynchronously load, decode, and normalize images on CPU worker threads using a bounded queue (`max_prefetch=2`).
+- Updated [`manga_translator/pipeline/batch/workflow.py`](../manga_translator/pipeline/batch/workflow.py) (`translate_batch`) to stream prefetched images so an image that finishes the CPU input stage immediately advances to GPU detection and preparation while the next image is decoded on CPU in the background.
+- Updated [`manga_translator/mode/local.py`](../manga_translator/mode/local.py) (`_process_batch_chunk`) to pass file paths directly to `translate_batch` instead of synchronously decoding all batch images into memory upfront.
+- Added unit tests in [`test/test_batch_prefetch.py`](../test/test_batch_prefetch.py).
+
+## 2026-10-01 — Optimize gallery manga listing (`list_groups`) and add partial/covering PostgreSQL indexes
+
+- Reason: Reduce `GET /api/results/groups?limit=25` latency from ~300–420 ms (~1.23 GB of buffer/TOAST reads across 96.8k pages) down to ~11–15 ms (~807 buffer hits, zero TOAST reads).
+- Added [`server/migrations/017_gallery_query_indexes.sql`](../server/migrations/017_gallery_query_indexes.sql) with partial/covering indexes for pending-review pages (`pages_active_review_group_idx`), non-empty summaries (`manga_summaries_active_group_idx`), translated pages (`pages_active_translated_group_idx`), cover page order (`pages_active_group_order_folder_idx`), and group page counts/timestamps (`pages_active_group_finished_only_idx`).
+- Updated [`MangaRepository.list_groups`](../server/manga_repository.py) and [`MangaRepository._page_item`](../server/manga_repository.py) to aggregate review counts via `pages_active_review_group_idx`, paginate into `limited_groups` before `LATERAL` cover and summary checks, and pass precomputed `has_review_flags` without fetching `cover.text_regions`.
+- Added regression coverage in [`test/test_postgres_store.py`](../test/test_postgres_store.py).
+
+## 2026-10-01 — Add PP-OCRv6 Small Manga (`ppocrv6`) CPU-optimized OCR model and resource policy
+
+- Reason: Support `Kellenok/PP-OCRv6_manga` (`manga_rec_v0.2.onnx`) as a selectable OCR model (`ppocrv6` / `"PP-OCRv6 Small Manga"`) that runs on CPU via ONNX Runtime without corrupting SVTRv2 global self-attention through cross-width zero-padding and without contending for GPU/MPS execution slots.
+- Added [`manga_translator/ocr/model_ppocrv6.py`](../manga_translator/ocr/model_ppocrv6.py) (`ModelPPOCRv6`, `estimate_crop_colors`, `decode_ctc_greedy`, `prepare_crop_tensor`, `call_ocr_with_policy`, `ocr_operation`) with `models/recognition/ppocrv6/` + `models/ocr/` path resolution, HuggingFace auto-download, tuned `CPUExecutionProvider` `SessionOptions`, exact-width crop grouping with bounded `ThreadPoolExecutor` parallelism, and Otsu foreground/background color estimation.
+- Added `Ocr.ppocrv6` and aliases (`ppocr`, `pp_ocrv6`, `ppocrv6_manga`, `ppocrv6_small_manga`, `pp_ocr_v6`) in [`manga_translator/config.py`](../manga_translator/config.py), [`manga_translator/ocr/__init__.py`](../manga_translator/ocr/__init__.py), [`manga_translator/ocr_stage.py`](../manga_translator/ocr_stage.py), and [`docker_prepare.py`](../docker_prepare.py).
+- Classified `ocr == "ppocrv6"` as `ResourceClass.CPU_HEAVY` in [`server/batch_resource_policy.py`](../server/batch_resource_policy.py) so batch scheduling dispatches per-page on CPU lanes instead of GPU multi-page batches.
+- Added `"PP-OCRv6 Small Manga"` (`ppocrv6`) to [`front/app/config.ts`](../front/app/config.ts) and [`front/app/utils/pageDetailSettings.ts`](../front/app/utils/pageDetailSettings.ts), with unit coverage in [`test/test_ocr_ppocrv6.py`](../test/test_ocr_ppocrv6.py), [`test/test_config.py`](../test/test_config.py), [`test/test_batch_scheduler.py`](../test/test_batch_scheduler.py), and [`front/app/components/PageDetailModal.test.ts`](../front/app/components/PageDetailModal.test.ts).
+
+## 2026-09-30 — Trace Python dependencies, add Python 3.13 support, and clean requirements.txt
+
+- Reason: Ensure all active third-party packages imported across the core pipeline (`manga_translator`), inpainting modules, and desktop GUI are captured with flexible version bounds (`>=`) that support Python 3.10 through Python 3.13, removing obsolete freeze remnants (such as `tensorflow-io-gcs-filesystem`, `qdrant-client`, and strict `==` pins that blocked Python 3.13 wheel availability).
+- Updated [`pyproject.toml`](../pyproject.toml) `requires-python = ">=3.10"`.
+- Cleaned [`requirements.txt`](../requirements.txt) to include all direct dependencies (`albumentations>=1.4.0`, `PySide6>=6.7.0`, `pytorch-lightning>=2.4.0`, etc.) verified across Python 3.10, 3.11, 3.12, and 3.13.
+
+## 2026-09-30 — Update scrollbar hover styling with dark slate track and inset pill thumb
+
+- Reason: Match the requested design where hovering the scrollbar reveals a dark slate track (`#212b34`) with a subtle left border line and highlights the thumb as a high-contrast rounded pill (`#9a9fa2`) with padding inset.
+- Updated scrollbar definitions in `front/app/app.css` for global scrollbars, manga reader scrollbars, and modal/synopsis scroll containers with hover and active states.
+
+## 2026-09-30 — Load repository history on demand
+
+- Reason: Historical bug and change logs are useful for related work but add noise when read wholesale.
+- Updated `AGENTS.md`, `GEMINI.md`, and the current-state guide to direct agents to search for relevant entries and read detailed snapshots only when needed.
+
+## 2026-09-30 — Defer detailed current-state notes until needed
+
+- Reason: The 98 KB current-state page was loaded before substantial work even when most subsystem details were irrelevant.
+- Kept `CURRENT.md` as a compact orientation page, moved its existing detailed snapshot to `CURRENT_DETAILS.md`, and linked both from the repository-state README. This preserves the information while letting agents open it only when a task needs it.
+
 Record new features and large changes here. Keep implementation detail in code, tests, or dedicated documentation.
+
+## 2026-09-30 — Add local image/folder check-and-reuse stage workflow to `devscripts/pipeline_case.py` and `manga-pipeline-case` skill
+
+- Reason: Enable focusing on a specific pipeline stage (such as `layout`, `ocr`, `translation`, `inpainting`, or `rendering`) for local images or folders (e.g. `~/Downloads/slow`) by automatically checking `./devscripts/data` first, running the full pipeline from scratch on the first run to populate baseline JSON + stage images in `./devscripts/data`, and reusing the saved JSON state on subsequent runs to execute only from the target stage into a separate output directory without overwriting `./devscripts/data`.
+- Added `devscripts/pipeline_case_local.py` and extended `devscripts/pipeline_case.py` with `check` (`status`), `run`, `compare`, and local-path support in `get`/`inspect` and `rerun`, plus `.agents/skills/manga-pipeline-case/SKILL.md` workflow instructions and unit coverage in `test/test_pipeline_case.py`.
+
+## 2026-09-30 — Add single-file Moebius inpainting + MiniCPM-V 4.6 vision GPU server and Colab/Kaggle notebook
+
+- Reason: Enable hosting both `hustvl/Moebius` image inpainting and Ollama `minicpm-v4.6` visual understanding on a single remote GPU machine (Google Colab, Kaggle, or standalone server) with batch inference, dynamic GPU request coalescing, GPU work/VRAM thresholds, and public Cloudflared tunnel connectivity.
+- Added `devscripts/moebius_minicpm_server.py` implementing `/api/inpaint`, `/api/inpaint/batch`, `/api/vision`, `/api/vision/batch`, `/v1/chat/completions`, `/api/chat`, `/api/status`, and `/api/tunnel` with `GPUInferenceEngine` (dynamic micro-batching queue for concurrent single calls, configurable `--max-gpu-active`, `--max-inpaint-batch`, `--max-vision-concurrency`, and `--gpu-vram-threshold` limiter) and `CloudflaredManager`.
+- Added `devscripts/moebius_minicpm_server.ipynb` with dependency installation, Ollama + `minicpm-v4.6` setup, standalone server script materialization for isolated Kaggle/Colab CLI execution, and Cloudflared tunnel startup.
+
+## 2026-09-30 — Bound page layout search and reuse exact raster work
+
+- Reason: Repeated font/DP trials, compositor glyph conversion, and competing layout threads inflated saved-page layout latency.
+- Added page-local progressive search/deadline state, unique font queues, local-first typography stages, validated candidate retention, reviewed small-text rescue, immutable font-aware glyph arrays, and page compositor reuse. Batch admission preserves other resource capacities; typesetting reruns use the same policy.
+- Algorithm revision 6 regenerates layouts on rerun while keeping saved results intact. Translation/detection contracts, API shapes, schema, and pipeline order are unchanged. Added focused raster, deadline, rescue, admission, and saved-collision checks plus a replay benchmark separating queue waiting from execution. Measurements and input provenance are recorded in `LAYOUT_PERFORMANCE.md`. Large binary source-scope dilation uses equivalent native correlation with exact pixel checks; benchmark modes use the same one-thread OpenCV setting. The 5s/10s continuation gates retain completed valid work and allow unresolved/conflicting work until the hard deadline.
+
+## 2026-09-30 — Fix queued summary job pickup when active job reaches final synopsis step
+
+- Reason: When an active summary job transitioned to the final LLM synopsis generation step (`summarizing` stage at 85%), queued jobs remained stuck waiting for an available worker because `release_extraction()` short-circuited in `any()` and did not release all tracked keys, and multiple keys per job bloated the extraction concurrency count.
+- Updated `SummaryScheduler.release_extraction()` in `server/summary_scheduler.py` to discard all matching keys using a set difference update rather than short-circuiting in an `any()` generator.
+- Tracked only the canonical `group_key` in `SummaryScheduler._extraction_running` so each active job consumes exactly one extraction concurrency slot against `max_concurrent_extraction`.
+- Added unit test in `test/test_summary_scheduler.py` verifying that when a job with distinct `groupId` and `mangaTitle` reaches the LLM summarizing step, queued jobs are immediately picked up for extraction.
+
+
+
+## 2026-09-30 — Add OpenRouter to synopsis and summary options & update free models
+
+- Reason: Users need OpenRouter available as a selectable provider for manga synopsis generation and story analysis, defaulting to Qwen 3.8 27B (`qwen/qwen3.8-27b:free`) with automatic ordered fallback across free tier models (`thinking-machines/inkling:free`, `nvidia/nemotron-3-ultra-550b-a55b:free`, `nvidia/nemotron-3.5-lightning:free`).
+- Added OpenRouter to `summaryModelOptions` in `front/app/config.ts`, job row provider inference in `front/app/components/SummaryJobRow.tsx`, and `/api/results/group/summary/config` API route in `server/api/routes/summaries.py`.
+- Added OpenRouter provider resolution and chunk limits (`64,000` tokens) in `server/manga_summary.py` and `server/summary_completion.py`.
+- Defined `OPENROUTER_MODELS` mapping in `manga_translator/translators/keys.py` and `manga_translator/translators/openrouter.py`.
+- Updated OpenRouter default model to `qwen/qwen3.8-27b:free` across backend keys, translator class, frontend settings, `README.md`, and `Example.env`.
+- Implemented multi-model fallback chain (`qwen` -> `inkling` -> `nemotron_ultra` -> `nemotron_lightning`) in both `OpenRouterTranslator._translate` / `_request_translation` and `server/summary_completion.py:_summary_completion` for translation, story analysis, and manga synopsis generation upon 429 rate limits or upstream errors.
+- Added unit tests covering synopsis model resolution, OpenRouter fallback chain ordering, synopsis completion failover, and multi-step error recovery.
+
+## 2026-09-30 — Disallow Cmd/Ctrl + Up/Down from hijacking tab navigation
+
+- Reason: Pressing Command + Up / Down arrow was intercepted by `useShortcutNavigation` and switched top-level navigation tabs instead of allowing the browser's native behavior of scrolling to the top/bottom of the page.
+- Restricted global navigation shortcuts in `useShortcutNavigation.ts` exclusively to `Cmd/Ctrl + ArrowLeft` and `Cmd/Ctrl + ArrowRight`.
+- Extracted `getShortcutNavigationDirection` and added unit test coverage in `useShortcutNavigation.test.ts` ensuring `ArrowUp` and `ArrowDown` never trigger view tab changes.
+
+## 2026-09-30 — Page range filter submit on Enter and dynamic submit button
+
+- Reason: Typing in the gallery page range inputs (Min/Max) previously triggered `handlePageRangeChange` and fetched/refiltered on every single keystroke. Users need page count filters to be applied only when pressing Enter or submitting, with an explicit submit button visible when the form or an element inside it is focused.
+- Wrapped the Page Range filter in a `<form onSubmit={handlePageRangeSubmit}>` with focus tracking in `GalleryFilterControls.tsx`.
+- Removed intermediate filtering on `onChange` so users can freely type multi-digit min/max page numbers without triggering premature fetches.
+- Added a submit button with a checkmark icon (`carbon:checkmark`, tooltip "Apply page range (Enter)") that appears when the form or inputs are focused.
+- Supported pressing Enter in either input or clicking submit to commit the page range filter.
+
+## 2026-09-30 — Remove 20-item cap on JobsDrawer completed section and make "Clear completed" atomic
+
+- Reason: The Jobs drawer completed section truncated the completed list to 20 items, causing the count badge to always read 20 even with dozens of finished jobs, and clearing completed jobs fired un-awaited background requests that suffered from race conditions with server SSE event syncs.
+- Removed the hardcoded `.slice(0, 20)` in `JobsDrawer.tsx` so all completed jobs are visible and the badge displays the true completed job count.
+- Updated `dismissTranslationBatch` in `useBatchActions.ts` to return a `Promise<void>`.
+- Updated `JobsDrawer.tsx`'s "Clear completed" and "Clear needs-attention" actions to `await Promise.all(...)` on all batch and summary dismissals so that all items are cleared in a single click.
+
+
+## 2026-09-30 — Normalize Dash LLM model resolution and DeepSeek provider remapping
+
+- Reason: When `dash`, `deepseek:dash`, or `deepseek-v3` was requested for synopsis or translation, requests could route to the official DeepSeek API endpoint with `model="dash"` instead of DashScope with `deepseek-v3`, triggering HTTP 400 bad request errors.
+- Updated `resolve_summary_model()` in `server/manga_summary.py` to route `dash` and `deepseek-v3` models to the `dash` provider and default to `deepseek-v3`.
+- Preserved provider prefixes when resuming summary jobs in `server/api/routes/summaries.py`.
+- Added model alias normalization in `DashTranslator` (defaulting `"dash"` to `"deepseek-v3"`) and `DeepseekTranslator` (falling back to `DEEPSEEK_MODEL` / `"deepseek-chat"`).
+
+## 2026-09-30 — Separate non-graphic story metadata from faithful translation
+
+- Reason: Synopsis and translation context should retain plot-relevant consent, coercion, threats, motivations, and consequences without reproducing graphic detail, while balloon translations remain faithful to the raw source.
+- Added one non-graphic metadata policy for Story Analysis, analysis consolidation, and Manga Synopsis; kept translation prompt fidelity instructions unchanged. Shared Gemini response diagnostics now classify safety blocks distinctly and retain finish reasons and ratings.
+
+## 2026-09-30 — Dash LLM / DashScope DeepSeek integration across translation, synopsis, and story analysis
+
+- Reason: Users need Alibaba Cloud DashScope / Dash LLM as a selectable provider for translation, story analysis, and manga synopsis generation with DeepSeek (`deepseek-v3`) as the default model.
+- Added `DashTranslator` in `manga_translator/translators/dash.py` using OpenAI-compatible DashScope endpoint (`https://dashscope.aliyuncs.com/compatible-mode/v1`) with configurable `DASHSCOPE_API_KEY` / `DASH_API_KEY`, `DASHSCOPE_API_BASE` / `DASH_API_BASE`, and `DASHSCOPE_MODEL` / `DASH_MODEL` (defaulting to `deepseek-v3`).
+- Added `Translator.dash` to `manga_translator/config.py` and `manga_translator/translators/__init__.py` with alias normalization (`dashscope`, `dash_llm`, `dash-llm`).
+- Integrated `dash` / `dashscope` into manga synopsis resolution and generation (`server/manga_summary.py`, `server/api/routes/summaries.py`) with 64k token chunk limits.
+- Exposed Dash LLM in Web Studio translation engine, Story Analysis model, and Manga Synopsis model selectors (`front/app/config.ts`, `front/app/types.ts`, `front/app/components/OptionsPanel.tsx`, `front/app/components/SummaryJobRow.tsx`, `front/app/utils/getTranslatorName.ts`, `front/app/utils/pageDetailSettings.ts`) and Desktop MangaStudio constants/templates (`MangaStudio_Data/app/core/constants.py`, `MangaStudio_Data/app/ui/main_window_api.py`, `examples/Example.env`).
+
+## 2026-09-30 — Profile and reduce saved-page layout work
+
+- Reason: Six saved pages spent 18.1–57.2 seconds in layout, with repeated free-text preparation and large typography/placement searches.
+- Added opt-in per-region layout profiling and a repeatable saved-page benchmark. Reuse free-text preparation across retries, cache retry-invariant placement checks, lazily generate typography and emergency hyphenation, and validate nearby candidates before escalating only failed or conflicting regions. Add an explicit bubble-detection state and conservative geometry fallback for empty, failed, and unknown detections; reject weak panel associations and unknown multiclass detector IDs. Preserve exact skipped font sizes. Bubble profiling remains enabled; a measured suffix-capacity pruning experiment reduced DP calls but increased total runtime, so it was discarded. On the six slow saved pages, layout fell from 175.1s to 61.8s total (65% faster); five renders stayed byte-identical. One validated `CHURU` free-text placement grew from 47px to 54px with no new QA or suppression findings. The slowest current page remains 20.1s due to bubble DP. Layout scoring and hard placement rules remain unchanged.
+
+## 2026-09-30 — 5-minute timeout for Token Harbor free models and concurrent synopsis processing
+
+- Reason: Free models on Token Harbor (such as DeepSeek V4.1 Flash and MiMo V2.6 Flash) can experience high load and queuing, requiring a generous 5-minute request timeout. Furthermore, once a synopsis job finishes local text extraction/OCR and enters the final LLM stage, subsequent queued synopsis jobs should immediately begin processing extraction instead of waiting for LLM network latency.
+- Set `MODEL_TIMEOUT_SECONDS = 300` and `_TIMEOUT = 300` in `TokenHarborTranslator`, allowing 605s total across fallback models in translation, and configured a 300s timeout in `_summary_completion` for Token Harbor synopsis requests.
+- Updated `SummaryScheduler` and `generate_manga_summary` to release the extraction slot when a job enters `summarizing`, enabling subsequent queued synopsis jobs to execute their OCR / extraction immediately in parallel.
 
 ## 2026-09-30 — Add Token Harbor to LLM model selectors
 
@@ -14,8 +155,9 @@ Record new features and large changes here. Keep implementation detail in code, 
 
 ## 2026-09-30 — Unified multi-model text detection and fine-grained character stroke segmentation
  
-- Reason: Developers and researchers need a unified tool to benchmark and switch between different state-of-the-art text detection and segmentation models (`PP-OCRv6_manga v0.2`, core app `DBNet ResNet-34`, `Comic Text Detector / CTD`, and `ContemporaryCat / Manga-Text-Segmentation`) across pages and datasets with visual overlays, confidence badges, coarse text masks, and fine-grained character stroke/glyph masks (white ink characters on pure black background).
+- Reason: Developers and researchers need a unified tool to benchmark and switch between different state-of-the-art text detection and segmentation models (`PP-OCRv6_manga v0.2`, core app `DBNet ResNet-34`, `Comic Text Detector / CTD`, and `ContemporaryCat / Manga-Text-Segmentation`) across pages and datasets with visual overlays, confidence badges, coarse text masks, fine-grained character stroke/glyph masks (white ink characters on pure black background), and integrated text recognition (OCR).
 - Added multi-model support in `devscripts/detect_text.py` and `devscripts/detect_text_ppocrv6.py` with `--model` / `--detector` switching across `ppocrv6`, `default`, `ctd`, and `contemporarycat`.
+- Added PP-OCRv6 Japanese and Chinese text recognition (OCR) with `-r` / `--rec` / `--ocr`, auto-downloading `manga_rec_v0.2.onnx` and `ppocrv6_dict.txt` (18,708 vocab tokens) with vertical text rotation, CTC decoding, and per-line confidence scoring.
 - Upgraded stroke segmentation (`--stroke-mask`, `--stroke-overlay`) with adaptive Otsu binarization, polarity detection, connected-component noise cleaning, and polygon boundary spatial gating to isolate crisp, individual character glyphs and radicals without solid block fills.
 - Standardized output geometries, confidence scoring, binary text mask generation, and visual overlays across all 4 detection engines with Apple Silicon MPS/CoreML, CUDA, and CPU acceleration.
 
@@ -1660,3 +1802,18 @@ Record new features and large changes here. Keep implementation detail in code, 
 
 - Reason: Manga search was buried after the filters and the toolbar controls wrapped poorly on narrow screens.
 - Moved search to the first, expanding filter position, added the `/` focus shortcut and visible key hint, and reflowed mobile controls into touch-sized rows.
+
+## 2026-09-30 — Skip impossible free-text placement offsets
+
+- Reason: Full pixel-mask checks spent most of their time on offsets outside the reachable page or placement-domain bounds.
+- Cache local-domain rejections only for the same domain and validation mode, then use necessary crop/glyph bounding checks to skip impossible offsets before the existing mask and compositor validation. The saved paragraph on page `1790698805417` still considered 15,372 offsets, but only 339 required full geometry evaluation; 15,033 failed the bounds precheck. Across three direct replays, median page time fell 5.5s→4.4s and region time 3.5s→2.3s, with identical typography and coordinates. The profile exposes total offsets and full geometry evaluations separately.
+
+## 2026-09-30 — Reduce bubble DP path-deduplication overhead
+
+- Reason: The bubble-heavy saved page still spent most of its layout time in DP candidate deduplication, even after the broader recovery work.
+- Replaced generator-based duplicate-path checks with an ordered loop and removed temporary tuple allocation from path identity comparisons. On three direct replays of page `1790698339244`, median layout time fell 17.8s→17.1s and the hottest bubble region fell 11.4s→10.7s. Candidate ordering, scoring, and layout snapshot hash remained unchanged; bucket insertion experiments without stable gains were discarded.
+
+## 2026-09-30 — Glyph copying and bubble row batching
+
+- Reason: remove Python bitmap indexing and repeated row interval preparation without changing solver decisions. Supported grayscale buffers use an owned native copy; unsupported layouts retain the binding path. Bubble intervals use signed batched transitions with preserved geometry and ordering.
+- Glyph-only and combined candidates each match 36 fresh-process page/diagnostic replays exactly. Lifetime/fallback and row geometry checks pass. Performance validation remains pending; solver semantics, public interfaces, search policy, layout decisions, API/schema and pipeline order are unchanged.

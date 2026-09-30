@@ -123,14 +123,11 @@ async def process_item(
             nonlocal batch_finished
             for entry in manifest.get("items", []):
                 if entry.get("id") == item_id:
-                    entry.update(
-                        status="completed",
-                        stage="finished",
-                        error=None,
-                        resultFolder=folder,
-                        model=model,
-                        needsReview=bool(getattr(context, "manual_review_required", False)),
+                    needs_review = bool(getattr(context, "manual_review_required", False)) or any(
+                        r.get("review_required") if isinstance(r, dict) else getattr(r, "review_required", False)
+                        for r in (getattr(context, "text_regions", None) or [])
                     )
+                    entry.update(status="completed", stage="finished", error=None, resultFolder=folder, model=model, needsReview=needs_review)
                     entry.pop("retryFromStage", None)
                     entry.pop("pipelineStage", None)
             pending = any(

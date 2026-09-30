@@ -121,6 +121,21 @@ class TestConfig(unittest.TestCase):
         config_validate_lower = Config.model_validate({"render": {"letter_case": "lower"}})
         self.assertTrue(config_validate_lower.render.lowercase)
 
+    def test_dash_translator_alias(self):
+        self.assertEqual(Translator("dash"), Translator.dash)
+        self.assertEqual(Translator("dashscope"), Translator.dash)
+        self.assertEqual(Translator("dash-llm"), Translator.dash)
+        self.assertEqual(Translator("dash_llm"), Translator.dash)
+        config = Config.model_validate({"translator": {"translator": "dash", "analysis_translator": "dash"}})
+        self.assertEqual(config.translator.translator, Translator.dash)
+        self.assertEqual(config.translator.analysis_translator, Translator.dash)
+
+    def test_ppocrv6_ocr_aliases_and_validation(self):
+        for alias in ("ppocrv6", "ppocr", "pp_ocrv6", "pp-ocrv6", "ppocrv6_manga", "ppocrv6_small_manga", "pp_ocr_v6"):
+            self.assertEqual(Ocr(alias), Ocr.ppocrv6)
+        config = Config.model_validate({"ocr": {"ocr": "ppocrv6"}})
+        self.assertEqual(config.ocr.ocr, Ocr.ppocrv6)
+
 
 if __name__ == "__main__":
     unittest.main()

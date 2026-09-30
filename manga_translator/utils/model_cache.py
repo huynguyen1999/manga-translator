@@ -34,10 +34,8 @@ def _model_is_loaded(model):
 def set_model_executor(executor):
     return _active_executor.set(executor)
 
-
 def reset_model_executor(token):
     _active_executor.reset(token)
-
 
 def get_model_executor():
     return _active_executor.get()
@@ -297,15 +295,12 @@ def model_operation(operation):
 def set_model_cache(cache: dict):
     return _active_cache.set(cache)
 
-
 def reset_model_cache(token):
     _active_cache.reset(token)
-
 
 def get_model_cache(name: str, default: dict) -> dict:
     cache = _active_cache.get()
     return default if cache is None else cache.setdefault(name, {})
-
 
 def get_cached_model(name: str, default: dict, key, factory):
     """Return one shared model instance, creating it once across executor threads."""
@@ -320,11 +315,9 @@ def get_cached_model(name: str, default: dict, key, factory):
             executor.acquire_model(name, key, model)
         return model
 
-
 def remove_cached_model(name: str, default: dict, key):
     with _model_cache_lock:
         return get_model_cache(name, default).pop(key, None)
-
 
 def clear_model_cache(name: str, default: dict):
     with _model_cache_lock:

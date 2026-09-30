@@ -2,12 +2,148 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-10-01 — Timing overview showed inverted start/end times and batched GPU stages reported only serialization time
+
+- Symptom: Timing overview in the page detail modal showed an "Ended at" timestamp earlier than "Started at" (e.g., Started at 01:33:09, Ended at 01:33:00) with a positive total duration, and GPU-batched stages in the per-stage breakdown recorded only sequential disk writing time instead of the full batch processing time.
+- Root cause:
+  1. `BatchCard.tsx` populated `FinishedImage.finishedAt` with `item.addedAt` (queue insertion time). When the modal resolved timing, `resolveTranslationTiming` used `manifest.createdAt` for start time and `image.finishedAt` (`item.addedAt`) for end time, causing `endAt < startAt`.
+  2. `resolveTranslationTiming` did not inspect manifest stage timestamps and did not guard against `endMs < startMs`.
+  3. In `server/batch_stage_executor.py` (`process_checkpointed_ocr_group` and `process_checkpointed_model_group`) and `manga_translator/pipeline/retry.py`, GPU-batched inferences reset `run.started[stage_id]` and `stage["startedAt"]` right before serialization, wiping out batch inference start times and recording only post-inference file saves.
+- Fix:
+  1. Updated `resolveTranslationTiming` in `front/app/utils/pageDetailTiming.ts` to derive start/end timestamps from the earliest/latest completed stages or `manifest.updatedAt` and guard against inverted end times.
+  2. Updated `BatchCard.tsx` and `serverBatches.ts` so `finishedAt` reflects true completion rather than `item.addedAt`.
+  3. Updated `server/batch_stage_executor.py` and `manga_translator/pipeline/retry.py` so batched GPU stages measure the full batch duration across all claimed items and record the batch time on each stage's `durationMs`.
+- Prevention: Never reuse queue arrival timestamps (`addedAt`) as completion timestamps (`finishedAt`), always resolve pipeline duration from stage intervals or manifest completion state, and preserve monotonic batch start timestamps across shared GPU stages.
+
+## 2026-10-01 — Batch item `needsReview` stayed `false` in Jobs Drawer when layout/rendering flagged a page for review
+
+- Symptom: A completed page (`shot-muljpqp9.png`, folder `1790790657917-99ecbb08-2048-ENG-deepl`) had `needsReview: true` (`reviewStatus: "pending"`, `review_reason: "render_suppressed"`) in the gallery and page detail view, but appeared as `• Done` instead of `• Review` (with `needsReviewCount: 0` and no `Edit` button) in the Jobs Drawer batch card.
+- Root cause:
+  1. `process_checkpointed_prepare_item` in `server/batch_checkpointed_prepare.py` computed `needs_review` at the end of the `rendering` stage solely from `run._document("translations.json")`. Because `translations.json` is written at the end of the `translation` stage before `layout` and `rendering` run, any `review_required` flags added during layout or rendering (such as `render_suppressed`, `text_requires_emergency_compression`, or `closest_valid_bubble_placement`) were written to `text_regions.json` and `meta.json` (`reviewStatus: "pending"`) but not back to `translations.json`.
+  2. `batch_item_runner.py` only checked `context.manual_review_required` (set during translation) without checking `region.review_required` on `context.text_regions`.
+  3. `PostgresBatchStore._hydrate_manifest` and `list_batch_summaries` only read `batch_items.payload->>'needsReview'` without checking the linked `pages` row (`reviewStatus = 'pending'` or `text_regions @> '[{"review_required": true}]'`).
+- Fix:
+  1. Updated `server/batch_checkpointed_prepare.py` to check `text_regions.json`, `run.ctx.text_regions`, and `meta.json` (`reviewStatus == "pending"`) in addition to `translations.json` when completing the `rendering` stage.
+  2. Updated `server/batch_item_runner.py` and `server/batch_pipeline_rerun.py` to check `region.review_required` (for both dict and object regions) alongside `manual_review_required`.
+  3. Updated `PostgresBatchStore._hydrate_manifest` and `list_batch_summaries` in `server/postgres_batch_store.py` to derive `needsReview` and `needsReviewCount` from the linked `pages` row when present.
+- Prevention: Never derive post-rendering review status from pre-layout `translations.json` alone; always inspect the final rendered `text_regions.json` / `meta.json` (or the indexed `pages` record) so layout and rendering review flags propagate to batch job states.
+
+## 2026-10-01 — Gallery manga listing (`list_groups`) took ~300–400 ms for 25 items
+
+- Symptom: Fetching 25 gallery manga groups (`GET /api/results/groups?limit=25&offset=0&sort=date-desc`) against local PostgreSQL took ~290–420 ms and read ~1.23 GB of 8 KB buffers (`shared hit=137370 read=17261`).
+- Root cause:
+  1. `grouped` in `server/manga_repository.py` evaluated `p.metadata->>'reviewStatus'='pending' OR p.text_regions @> '[{"review_required": true}]'::jsonb` inside `count(*) FILTER (...)` across all 96,772 active `pages` rows, forcing PostgreSQL to fetch and decompress TOASTed `text_regions` JSONB chunks for every page on every request (~175–235 ms).
+  2. `page_rows` joined `LATERAL (SELECT p.* ... LIMIT 1) cover` before applying `ORDER BY ... LIMIT 25`, executing 1,131 index scans + incremental sorts and fetching `p.text_regions` for all groups instead of only the 25 paginated groups.
+  3. `EXISTS (SELECT 1 FROM manga_summaries ms ...)` was planned as an uncorrelated hashed `SubPlan` that sequentially scanned `manga_summaries` and de-TOASTed `payload->>'summary'` (~12 ms).
+- Fix:
+  1. Added partial and covering indexes in `server/migrations/017_gallery_query_indexes.sql` (`pages_active_review_group_idx`, `manga_summaries_active_group_idx`, `pages_active_translated_group_idx`, `pages_active_group_order_folder_idx`, `pages_active_group_finished_only_idx`).
+  2. Restructured `MangaRepository.list_groups` in `server/manga_repository.py` to compute review counts via an index-only scan on `pages_active_review_group_idx`, paginate into `limited_groups` (`LIMIT $1 OFFSET $2`) before running `LATERAL` cover/summary lookups for the 25 visible rows, and return a precomputed `has_review_flags` boolean instead of transferring `cover.text_regions`.
+- Prevention: Never evaluate unindexed JSONB containment (`@>`) or text extraction (`->>`) on TOASTed columns inside full-table aggregates; isolate sparse predicates into partial indexes and apply pagination (`LIMIT`/`OFFSET`) before `LATERAL` per-row lookups.
+
+## 2026-09-30 — Layout repeated work and premature tiny local acceptance
+
+- Symptom: Font refinement queued duplicate sizes, candidate validation repeatedly converted/drew glyph buffers, and concurrent batch layout threads doubled per-page latency. During optimization replay, a local-only coarse pass accepted an 11px caption whose existing 82px placement was viable nearby.
+- Cause: Refinement tracked only fine neighbors rather than all queued sizes; draw paths re-read FreeType buffers; admission followed CPU allocation. Restricting all coarse stages to local offsets prematurely preferred the smallest locally feasible stage.
+- Fix: Deduplicate on first queue insertion, cache immutable glyph arrays and fully keyed page compositor crops, admit one background layout before CPU work, and widen offsets at each failing typography stage before reducing size. Retain candidates by region identity and revalidate them under changed domains.
+- Additional findings: Large elliptical source-scope dilation consumed 2.2s on a page; native double-precision binary correlation preserves the dilation pixels with an ambiguity fallback. Observe the source-scope helper in calibration tests rather than assuming a particular OpenCV operation. Queue wait is consumed once per page execution so context reuse does not report an old wait. Restore the pre-existing 50% panel-association coverage rule; raising confidence/coverage floors was outside the layout performance change and broke panel contracts.
+- Prevention: Compare font/wrapping/position deltas as well as runtime; require exact raster tests for reuse, a saved collision case, and engine-level deadline/source-restoration checks. Do not merge expanded plans by positional zip or reuse page preparation across budgets.
+
+## 2026-09-30 — SummaryScheduler did not pick up queued jobs when active job reached final LLM summarizing step
+
+- Symptom: When an active summary job reached the final `summarizing` stage (85% progress: generating synopsis with LLM), queued summary jobs remained in `queued` status ("Waiting for an available worker") instead of starting extraction/OCR.
+- Root cause:
+  1. `release_extraction(*keys)` in `server/summary_scheduler.py` used `any(...)` over a generator expression with in-place discard side-effects. Because `any()` short-circuits on the first truthy value, only the first key (`group_value`) was discarded from `_extraction_running`, leaving `clean_title` in the set.
+  2. `_launch_available()` added both `group_key` and `clean_title` to `_extraction_running`, causing each job to consume 2 slots towards `max_concurrent_extraction`. When `release_extraction` failed to clear the second key, `len(_extraction_running)` remained `>= 1`, permanently blocking queued jobs from launching until the entire task completed.
+- Fix:
+  1. Updated `release_extraction(*keys)` to perform a bulk set difference update (`self._extraction_running.difference_update(to_remove)`).
+  2. Stored only the canonical `group_key` in `_extraction_running` so that each active extraction occupies exactly one concurrency slot.
+- Prevention: Never rely on `any()` with generator expressions that perform in-place mutation side effects; use explicit set operations or loops, and ensure slot counters in concurrency sets reflect one item per unit of work.
+
+
+
+## 2026-09-30 — Command + Up/Down arrow changed navigation tab instead of scrolling
+
+- Symptom: Pressing `Cmd + ArrowUp` or `Cmd + ArrowDown` on macOS switched the active view/tab (Studio, Gallery, Series, Search Lab) instead of scrolling to the top or bottom of the page.
+- Root cause: `useShortcutNavigation.ts` matched `ArrowDown` as `isNext` and `ArrowUp` as `isPrev` alongside `ArrowRight` and `ArrowLeft`, calling `event.preventDefault()` whenever `metaKey` or `ctrlKey` was held.
+- Fix: Restricted navigation shortcut direction handling in `useShortcutNavigation.ts` to `ArrowRight` and `ArrowLeft` only.
+- Prevention: Never intercept vertical arrow keys with Cmd/Ctrl modifiers globally so standard macOS document scroll (top/bottom) semantics remain intact.
+
+## 2026-09-30 — JobsDrawer completed section truncated at 20 items and "Clear completed" fired un-awaited dismissals
+
+- Symptom: The Jobs drawer completed section only displayed 20 items and capped the accordion counter at 20 (`Completed 20`). Clearing completed required clicking "Clear completed" multiple times to dismiss all completed batches.
+- Root cause:
+  1. `JobsDrawer.tsx` hardcoded `result.completed = result.completed.slice(0, 20);` in the `groups` memo, capping both the displayed list and the accordion item counter `{entries.length}` to 20.
+  2. `onDismissBatch` in `useBatchActions.ts` returned `void` and fired background dismiss calls without returning the Promise.
+  3. `clear-completed` and `clear-attention` in `JobsDrawer.tsx` iterated with `forEach` without awaiting individual batch dismiss operations, leading to SSE re-sync race conditions where uncompleted server updates caused batches to reappear.
+- Fix:
+  1. Removed `result.completed.slice(0, 20)` in `JobsDrawer.tsx` so all completed jobs are visible and the counter reflects the true total completed count.
+  2. Updated `dismissTranslationBatch` in `useBatchActions.ts` to return `Promise<void>`.
+  3. Wrapped batch and summary dismissal in `await Promise.all(...)` in `JobsDrawer.tsx` for atomic, single-click clearing of completed and needs-attention jobs.
+- Prevention: Always return Promises from asynchronous mutation callbacks and await bulk operations with `Promise.all` to avoid race conditions with live SSE sync streams. Avoid hardcoded slice limits on collection states that feed UI count badges.
+
+
+## 2026-09-30 — Synopsis generation and translator passed `dash` model name to DeepSeek endpoint
+
+- Symptom: Running manga synopsis generation or translation with `dash` failed with `Error code: 400 - The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed dash.` at `https://api.deepseek.com/chat/completions`.
+- Root cause: When `deepseek:dash`, `deepseek-v3`, or resumed summary jobs with stripped provider prefixes were passed, `resolve_summary_model()` defaulted to `provider="deepseek"` with `model="dash"`, sending `model="dash"` to the official DeepSeek API endpoint (`https://api.deepseek.com`). Additionally, `DashTranslator` and `DeepseekTranslator` did not normalize the alias string `"dash"` to their default model configurations.
+- Fix:
+  1. Updated `resolve_summary_model()` in `server/manga_summary.py` to remap `dash` alias models and `deepseek-v3` / `qwen-*` models to the `dash` provider (defaulting model to `deepseek-v3`).
+  2. Preserved provider prefixes when resuming summary jobs in `server/api/routes/summaries.py`.
+  3. Added model alias normalization in `DashTranslator` (defaulting `"dash"` to `"deepseek-v3"`) and `DeepseekTranslator` (falling back from `"dash"` to `DEEPSEEK_MODEL` / `"deepseek-chat"`).
+- Prevention: Ensure all provider aliases and model aliases map to valid provider endpoints and supported model IDs, and test prefix-less and prefixed model name resolution.
+
+## 2026-09-30 — Gemini synopsis safety blocks looked like empty responses
+
+- Symptom: A policy-blocked synopsis response surfaced as the generic `Gemini returned no text` error.
+- Root cause: Synopsis code duplicated finish-reason and safety-rating checks but reported blocked responses through the empty-output path.
+- Fix: Share Gemini block diagnostics with the translation path and raise the existing `GeminiBlockedResponse` for recognized prompt or candidate blocks.
+- Prevention: Keep Gemini finish reasons, block reasons, and safety ratings in one response inspector and test blocked and unblocked empty responses separately.
+
+## 2026-09-30 — Synopsis generation routed Token Harbor models to DeepSeek endpoint
+
+- Symptom: Running manga synopsis generation with `tokenharbor` (or models like `deepseek-v4.1-flash:free` / `mimo-v2.6-flash:free`) failed with `openai.BadRequestError: Error code: 400 - The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed tokenharbor.` at `https://api.deepseek.com/chat/completions`.
+- Root cause: `resolve_summary_model()` split on the first colon using `raw.partition(":")`, which caused model identifiers containing colons like `deepseek-v4.1-flash:free` to split into `provider = "deepseek-v4.1-flash"` and fail provider validation. When `"tokenharbor"` was passed as a model name without a recognized provider mapping in earlier logic, it defaulted to `provider = "deepseek"` and sent `"tokenharbor"` directly to DeepSeek's official endpoint instead of Token Harbor (`https://tokenharbor.ai/v1`). Furthermore, `keys.py` lacked Token Harbor configuration defaults.
+- Fix:
+  1. Updated `resolve_summary_model()` in `server/manga_summary.py` to parse explicit provider prefixes (`tokenharbor:`, `deepseek:`, `groq:`, `gemini:`) and automatically classify `:free`, `deepseek-v4*`, `mimo-*`, and `qwen3*` model identifiers to the `tokenharbor` provider.
+  2. Added `TOKEN_HARBOR_API_KEY`, `TOKEN_HARBOR_API_BASE`, and `TOKEN_HARBOR_MODEL` to `manga_translator/translators/keys.py`.
+  3. Added `tokenharbor` with a 64,000 token chunk limit to `DEFAULT_SUMMARY_CHUNK_LIMITS`.
+- Prevention: Test model resolution with colon-containing model identifiers (`:free`) and multi-part provider strings across all supported AI synopsis providers.
+
+
 ## 2026-09-29 — Layout fallback exhausts free-text search
 
 - Symptom: Six saved pages spent 18.1–57.2 seconds in Layout; the longest `layout_page` CPU-stage run was 57.0 seconds.
-- Root cause: When the fast ideal free-text placement fails renderability checks, fallback walks one-pixel font sizes down to the minimum and searches offsets for each typography candidate without a work budget. Example: page `1790698805417-a04ee7a7-2048-ENG-deepl`, region `b23871b41e2944ce848ca5463f41d610`, generated 830 candidates and 48,589 rejected positions from a 145px source-font estimate. Page `1790698338792-3e2f500d-2048-ENG-deepl` generated 1,241 candidates across seven free-text regions. On page `1790698805417`, completed empty bubble detection also routed every region to free-text after `1ded73b` disabled bubble inference for completed empty results.
-- Fix: No code change in this diagnosis. Page `1790698339244` is not isolated by free-text counters (103 candidates); its nine bubble regions make bubble candidate generation the likely remaining cost, but saved artifacts lack per-mode timings.
-- Prevention: Bound or coarsen typography/offset fallback after validating layout quality, and retain per-mode timing counters plus extreme OCR-geometry regressions.
+- Root cause: When the fast ideal free-text placement fails renderability checks, fallback walks one-pixel font sizes down to the minimum and searches offsets for each typography candidate without a work budget. Example: page `1790698805417-a04ee7a7-2048-ENG-deepl`, region `b23871b41e2944ce848ca5463f41d610`, generated 830 candidates and 48,589 rejected positions from a 145px source-font estimate. Page `1790698338792-3e2f500d-2048-ENG-deepl` generated 1,241 candidates across seven free-text regions. Completed-empty bubble detection was also treated as conclusive no-bubble, bypassing geometry recovery for unmatched regions that strongly resemble bubbles.
+- Fix: Added per-region saved-page profiling and a repeatable JSON benchmark. Bubble routing now distinguishes unknown, completed-with-results, completed-empty, and failed detector states; conservative geometry inference is requested for empty, failed, and unknown states. Free-text preparation reuses page-invariant inputs across domain retries, caches retry-invariant placement checks, and generates typography and emergency hyphenation stages on demand. The first pass tries ideal and small local placements, applies full compositor validation, keeps up to eight validated local alternatives, and invokes exhaustive search only when candidates fail or conflict at page level. Exact skipped font sizes remain reachable. Domain rejections are cached only for the same domain and validation mode. A necessary page/domain bounding-box check now skips offsets that cannot pass existing hard validation; the exact pixel-mask and compositor checks remain authoritative. On page `1790698805417`, three direct saved-case replays reduced median layout time from 5.5s to 4.4s and the long paragraph's median solve time from 3.5s to 2.3s. Candidate geometry evaluations fell from 15,372 to 339; the other 15,033 offset attempts were rejected by bounds. Font, lines, coordinates, and the layout snapshot hash stayed identical. Hard placement checks and typography scoring are unchanged.
+- Prevention: Keep a six-page saved-page corpus and known-good controls in `python devscripts/pipeline_case.py benchmark --repeat N --output FILE ...`. Compare font, lines, coordinates, render hashes, suppression, overflow, collisions, and review flags alongside timing; retain exhaustive fallback for any failed validation or unavoidable page conflict. A bounding-box prefilter may reject only placements that necessarily violate page or domain bounds. A running server must load the profiled code before its JSON can be used for solver-level comparisons. Keep fallback inference conservative and test all four detector states plus unknown classes from multiclass models. Profile bubble DP separately; deduplication hot-loop cleanup is safe only while path identity, traversal order, and output hashes remain identical.
+
+### Bubble DP hot-loop work remained expensive after free-text recovery
+
+- Symptom: Saved page `1790698339244` still spent roughly 17–22 seconds in layout, with one bubble region invoking DP about 730k times.
+- Root cause: Candidate deduplication called `any()` with a generator for every candidate and allocated two temporary tuples for each path-identity comparison. Profiling showed about 9.2 million `_add_candidates` calls and 15.4 million identity comparisons.
+- Fix: Use an explicit ordered loop and compare the two path fields directly, preserving the same comparison sequence, bucket insertion order, scoring, and DP results. The three-run direct median fell from 17.8s to 17.1s for the page and 11.4s to 10.7s for its hottest region; the layout snapshot hash stayed `13e0341b…`.
+- Prevention: Require identical page output and stable repeated timings before keeping bubble hot-loop changes; do not tune DP scoring or pruning without profiling and separate quality comparisons.
+
+## 2026-09-30 — Lazy free-text diagnostics included filtered candidates
+
+- Symptom: Panel-rejected large typography stages could set an unnecessarily wide glyph stroke, and local-search success counts included candidates the compositor rejected.
+- Root cause: Stroke width used the largest generated font before source-height filtering; the local success counter advanced after a cheap geometry gate instead of render validation.
+- Fix: Derive stroke width from the first source-height-valid stage and count local success only after compositor validation.
+- Prevention: Test a filtered high-font stage and a gate-passing candidate rejected by the compositor.
+
+## 2026-09-30 — Unknown detector classes were treated as speech bubbles
+
+- Symptom: A multiclass bubble detector could route an unmapped class into bubble layout.
+- Root cause: Unknown class IDs defaulted to the balloon class instead of retaining unknown semantics.
+- Fix: Map explicit class names when available, use the balloon fallback only for a known single-class balloon model, and leave other unmapped classes as unknown.
+- Prevention: Cover known bubble, known panel, unknown multiclass, and known single-class model outputs.
+
+## 2026-09-30 — Emergency word splits were blocked by the ordinary width limit
+
+- Symptom: The documented one-hyphen emergency rescue could not recover a word when neither resulting fragment fit the current width limit.
+- Root cause: Split selection discarded every over-width fragment pair, and downstream wrapping rejected an emergency oversized fragment even when it was the only token on its line.
+- Fix: Prefer fitting dictionary/emergency splits, then allow the balanced emergency split when enabled; permit its oversized single-token line through both free-text and explicit-break wrapping.
+- Prevention: Test the split and both downstream layout paths together; keep numeric tokens unsplittable and limit rescue to one introduced hyphen.
 
 ## 2026-09-29 — PostgreSQL summary retry crashed with `NameError: name 'value' is not defined`
 
@@ -1744,3 +1880,24 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 - Root cause: The synopsis adapter omitted some candidate feedback, and the translation adapter reduced blocked responses to empty text; professional analysis retried generic parse failures and could fall back to another provider.
 - Fix: Preserve HTTP status, response/model IDs, prompt block reason, candidate finish reason/message, safety ratings, and API error metadata. Raise a typed terminal error for recognized Gemini blocks so professional analysis does not retry or automatically route the same request to another provider.
 - Prevention: Preserve provider response metadata at the API adapter boundary and keep policy blocks distinct from malformed output and transient API errors.
+
+## 2026-09-30 — Missing experiment package blocks full-suite collection
+
+- Symptom: collecting the Python suite fails in the manga-search experiment tests with missing `experiments.manga_search`; 1,015 other tests were initially collectable.
+- Root cause: the checkout contains experiment tests but not the imported experiment package; this predates the initial-layout preparation implementation.
+- Fix: unresolved outside this optimization scope. Continue-on-collection-errors permits remaining tests to run but does not make the full suite pass. Restore the package or deliberately retire its tests in a separate change.
+- Prevention: check experiment package/test availability together before declaring full-suite coverage.
+
+## 2026-09-30 — Project interpreter removed during validation
+
+- Symptom: `.venv/bin/python` now fails with no such file; its Python 3.10 Conda target is absent.
+- Root cause: the external environment path recorded in the venv symlink no longer exists; the removal action is unknown.
+- Fix: pending restoration of the recorded environment or a prospective replacement/provenance decision. Python 3.13/3.14 cannot reuse its compiled Python 3.10 dependencies.
+- Prevention: preserve the benchmark runtime for the duration of matched validation; do not substitute runtime versions mid-series.
+
+## 2026-10-01 — Expanded layout corpus retains baseline validation findings
+
+- Symptom: eight of 37 Downloads images report source leaks, restored-source overlaps, drawable collisions or text outside a safe bubble shape. `text collision.png` also exceeds the 6 s page-median target (6.194 s candidate).
+- Root cause: individual geometry/mask/association causes remain undiagnosed. The preserved pre-optimization control produces exactly the same findings and output; the native-copy/row-batching changes introduce no new findings in these replays.
+- Fix: unresolved, separate correctness/performance investigation required; no solver or masking changes were made in this performance survey. Per-page region IDs and errors are retained in `.scratch/initial-layout-implementation/expanded/performance-1/report.md` and raw JSON.
+- Prevention: report absolute validation findings alongside matched parity; exact output preservation alone does not establish defect-free layout or accepted latency.

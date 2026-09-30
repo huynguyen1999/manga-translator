@@ -2,15 +2,14 @@
 
 from typing import List
 
+from manga_translator.pipeline.batch.prefetch import prefetch_input_stream
 from manga_translator.utils import Context, is_preserved_region
 
 
 async def translate_and_render_batch(
     owner, contexts_with_configs: List[tuple], batch_size: int = None, *, logger
 ) -> List[Context]:
-    """
-    Translate an aggregate batch of prepared contexts and render the final images.
-    """
+    """Translate an aggregate batch of prepared contexts and render the final images."""
     translated_contexts = await owner.translate_batch_contexts(contexts_with_configs, batch_size)
     results = []
     logger.debug('Starting post-processing phase...')
@@ -57,11 +56,11 @@ async def translate_batch(owner, images_with_configs: List[tuple], batch_size: i
     for offset in range(0, len(images_with_configs), batch_size):
         pre_translation_contexts = []
         chunk = images_with_configs[offset:offset + batch_size]
-        for index, (image, config) in enumerate(chunk, start=offset):
-            logger.debug(f'Pre-processing image {index+1}/{len(images_with_configs)}')
+        async for index, image, config, err in prefetch_input_stream(chunk, start_index=offset):
             try:
+                if err is not None or image is None:
+                    raise err or RuntimeError("No image loaded")
                 ctx = await owner.prepare(image, config)
-                logger.debug(f'Image {index+1} pre-processing successful')
             except Exception as e:
                 logger.error(f'Image {index+1} pre-processing error: {e}')
                 ctx = Context(input=image, text_regions=[])

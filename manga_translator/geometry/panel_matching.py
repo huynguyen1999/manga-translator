@@ -4,7 +4,6 @@ from typing import Any, Iterable
 
 import numpy as np
 
-
 def match_panel_to_source(source_mask: np.ndarray, panel_detections: Iterable[Any]) -> Any:
     """Return the best substantial panel match, or None for CV fallback."""
     ys, xs = np.nonzero(source_mask)

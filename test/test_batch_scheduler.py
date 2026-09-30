@@ -66,6 +66,16 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             [{**item, "settings": {"ocr": "mocr"}} for item in items[:2]],
         )
         self.assertEqual([item["id"] for item in mocr_group], ["p1", "p2"])
+        ppocrv6_cfg = Config.model_validate({"ocr": {"ocr": "ppocrv6"}})
+        self.assertEqual(_stage_resource("ocr", ppocrv6_cfg, "mps"), ResourceClass.CPU_HEAVY)
+        self.assertEqual(_stage_resource("ocr", ppocrv6_cfg, "cuda"), ResourceClass.CPU_HEAVY)
+        self.assertEqual(
+            scheduler._find_ocr_group(
+                batch,
+                [{**item, "settings": {"ocr": "ppocrv6"}} for item in items[:2]],
+            ),
+            [],
+        )
 
     def test_page_inference_group_batches_only_matching_model_settings(self):
         scheduler = BatchScheduler(
@@ -335,6 +345,97 @@ class BatchSchedulerMemoryTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(run.started_at)
             self.assertEqual(store.manifest["items"][0]["stage"], "ocr")
             self.assertEqual(store.manifest["items"][0]["pipelineStage"], "ocr")
+
+    async def test_checkpointed_prepare_sets_needs_review_from_text_regions(self):
+        class Store:
+            def __init__(self):
+                self.manifest = {
+                    "id": "manga-a",
+                    "items": [{
+                        "id": "p1",
+                        "status": "processing",
+                        "pipelineStage": "rendering",
+                        "resultFolder": "folder-1",
+                    }],
+                }
+
+            async def get_batch(self, _batch_id):
+                return self.manifest
+
+            async def mutate(self, _batch_id, mutator):
+                mutator(self.manifest)
+
+            async def input_path(self, _batch_id, _item_id):
+                return Path("/tmp/fake-input.png")
+
+        class Run:
+            manifest = {
+                "createdAt": "now",
+                "stages": [{"id": stage, "status": "completed"} for stage in [
+                    "input", "colorization", "upscaling", "detection", "ocr",
+                    "textline_merge", "bubble_detection", "translation",
+                    "mask_generation", "layout", "inpainting", "rendering"
+                ]],
+            }
+            ctx = None
+            translator = None
+
+            def _document(self, name):
+                if name == "translations.json":
+                    return [{"review_required": False}]
+                if name == "text_regions.json":
+                    return [{"review_required": True}]
+                if name == "meta.json":
+                    return {"reviewStatus": "pending"}
+                return None
+
+            def _ensure_context(self):
+                return SimpleNamespace(input=None)
+
+            async def retry_stage(self, stage_id, *_args, **_kwargs):
+                self._stage(stage_id)["status"] = "completed"
+
+            def _stage(self, stage_id):
+                return next(stage for stage in self.manifest["stages"] if stage["id"] == stage_id)
+
+            async def checkpoint(self):
+                pass
+
+            def release_runtime(self):
+                pass
+
+        class Executors:
+            async def free_executor(self, _instance):
+                pass
+
+        class Instance:
+            def __init__(self):
+                self.translator = SimpleNamespace(
+                    _set_image_context=lambda *args: None,
+                    _current_image_context={},
+                    _pipeline_run=None,
+                )
+
+            async def _run_translation(self, operation):
+                return await operation()
+
+        with tempfile.TemporaryDirectory() as root:
+            result_dir = Path(root) / "folder-1"
+            result_dir.mkdir(parents=True)
+            (result_dir / "final.png").write_bytes(b"final image")
+            store = Store()
+            scheduler = BatchScheduler(store, Executors(), root)
+            run = Run()
+            instance = Instance()
+            with (
+                patch.object(scheduler, "_checkpoint_run", AsyncMock(return_value=run)),
+                patch.object(BatchScheduler, "_config_for", return_value=Config()),
+            ):
+                await scheduler._process_checkpointed_prepare_item("manga-a", "p1", instance)
+
+            self.assertTrue(store.manifest["items"][0]["needsReview"])
+            self.assertEqual(store.manifest["items"][0]["status"], "completed")
+            self.assertEqual(store.manifest["items"][0]["stage"], "finished")
 
     async def test_stage_resource_slots_cap_gpu_at_two_and_allow_cpu_work(self):
         limits = stage_resource_limits(4, 3)

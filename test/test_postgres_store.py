@@ -670,6 +670,42 @@ class PostgresStoreGroupsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fetch_args[4], "oyako gal")
         self.assertIn("regexp_split_to_array", fetch_args[0])
 
+    async def test_list_groups_paginates_before_cover_lookup_and_uses_review_flags(self):
+        database = PostgresStore("unused", "/tmp/results")
+        pool = AsyncMock()
+        pool.fetch = AsyncMock(return_value=[{
+            "id": "page-1",
+            "folder": "page-folder",
+            "original_name": "001.png",
+            "page_order": 1,
+            "manga_title": "Series",
+            "metadata": {},
+            "has_review_flags": True,
+            "asset_version": 1,
+            "input_name": None,
+            "source_type": "translated",
+            "finished_at": dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+            "has_inpainted": False,
+            "has_regions": True,
+            "page_count": 3,
+            "review_count": 1,
+            "latest_finished_at": dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+            "group_id": "group-1",
+            "has_summary": True,
+            "total_groups": 1,
+            "total_images": 3,
+        }])
+        database.pool = pool
+
+        res = await database.list_groups(limit=25, offset=0, sort="date-desc")
+        query = pool.fetch.call_args[0][0]
+        self.assertIn("WITH review_groups AS", query)
+        self.assertIn("limited_groups AS", query)
+        self.assertLess(query.index("LIMIT $1 OFFSET $2"), query.index("JOIN LATERAL"))
+        self.assertEqual(res["groups"][0]["cover"]["reviewStatus"], "pending")
+        self.assertTrue(res["groups"][0]["cover"]["needsReview"])
+        self.assertTrue(res["groups"][0]["hasSummary"])
+
     async def test_resolve_group_id_with_manga_hash(self):
         database = PostgresStore("unused", "/tmp/results")
         pool = AsyncMock()
@@ -740,6 +776,34 @@ class PostgresStoreGroupsTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(snapshot["items"][1]["needsReview"])
         self.assertEqual(connection.execute.await_count, 2)
         self.assertIn("UPDATE batch_items", connection.execute.await_args_list[0].args[0])
+
+    async def test_hydrate_manifest_derives_needs_review_from_pages_table(self):
+        database = PostgresStore("unused", "/tmp/results")
+        pool = AsyncMock()
+        pool.fetch = AsyncMock(return_value=[{
+            "id": "item-1",
+            "manga_group_id": "group-1",
+            "manga_title": "Test Manga",
+            "page_id": "page-1",
+            "page_order": 1,
+            "result_folder": "folder-1",
+            "status": "completed",
+            "stage": "finished",
+            "stage_started_at": 1000,
+            "error": None,
+            "request_id": "req-1",
+            "payload": json.dumps({"needsReview": False}),
+            "page_exists": "page-1",
+            "page_metadata": json.dumps({"reviewStatus": "pending"}),
+            "page_text_regions": json.dumps([{"review_required": True, "text": "hello"}]),
+        }])
+        database.pool = pool
+        store = PostgresBatchStore(database, "/tmp/batches", "/tmp/results")
+        hydrated = await store._hydrate_manifest({
+            "id": "batch-1",
+            "items": [{"id": "item-1", "name": "1.png", "needsReview": False}],
+        })
+        self.assertTrue(hydrated["items"][0]["needsReview"])
 
 
 class PostgresStoreHelpersTest(unittest.TestCase):

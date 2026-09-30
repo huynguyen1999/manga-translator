@@ -27,6 +27,8 @@ def is_model_selected(family: str, key: str, models: set[str]) -> bool:
     }
     if key_str in ("mocr", "manga_ocr", "mangaocr"):
         candidates.update({"mocr", "ocr.mocr", "manga_ocr", "ocr.manga_ocr", "mangaocr", "ocr.mangaocr"})
+    if key_str in ("ppocrv6", "ppocr", "pp_ocrv6", "ppocrv6_manga", "ppocrv6_small_manga", "pp_ocr_v6"):
+        candidates.update({"ppocrv6", "ocr.ppocrv6", "ppocr", "ocr.ppocr", "ppocrv6_manga", "ocr.ppocrv6_manga"})
     return bool(candidates & models)
 
 

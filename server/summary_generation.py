@@ -42,6 +42,7 @@ class SummaryGenerationRuntime:
     source_snapshot: Callable[..., Any]
     summary_error_details: Callable[..., Any]
     transcript_pages: Callable[..., Any]
+    release_summary_extraction: Callable[..., Any] | None = None
 
 
 async def generate_manga_summary(
@@ -283,19 +284,12 @@ async def generate_manga_summary(
 
         transcript = await asyncio.to_thread(transcript_pages, snapshot)
         await _update_summary_job_for(
-            store,
-            group_value,
-            clean_title,
-            "generating",
-            None,
-            "summarizing",
-            85,
-            f"Generating the manga synopsis with {summary_model}",
-            page_count,
-            page_count,
-            pages_with_text,
-            extraction_required,
+            store, group_value, clean_title, "generating", None, "summarizing",
+            85, f"Generating the manga synopsis with {summary_model}", page_count,
+            page_count, pages_with_text, extraction_required,
         )
+        if runtime.release_summary_extraction is not None:
+            runtime.release_summary_extraction(group_value, clean_title)
         provider_started_at = time.perf_counter()
         _summary_log(
             "summarization_started",

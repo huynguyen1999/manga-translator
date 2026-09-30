@@ -85,32 +85,17 @@ def _measure_damage_coverage_crop(
 
 
 def _free_text_shift_candidate(candidate: LayoutCandidate, dx: int, dy: int) -> LayoutCandidate:
+    lines = [PlacedLine(
+        line.text, line.y + dy, line.x + dx, line.width, line.height,
+        BandSlot(line.slot.left + dx, line.slot.right + dx,
+                 line.slot.y_start + dy, line.slot.y_end + dy),
+    ) for line in candidate.lines]
+    bounds = tuple(value + delta for value, delta in zip(candidate.layout_bounds, (dx, dy, dx, dy))) if candidate.layout_bounds is not None else None
     return LayoutCandidate(
-        font_size=candidate.font_size,
-        y_origin=candidate.y_origin + dy,
-        line_spacing=candidate.line_spacing,
-        lines=[
-            PlacedLine(
-                text=line.text,
-                y=line.y + dy,
-                x=line.x + dx,
-                width=line.width,
-                height=line.height,
-                slot=BandSlot(
-                    left=line.slot.left + dx,
-                    right=line.slot.right + dx,
-                    y_start=line.slot.y_start + dy,
-                    y_end=line.slot.y_end + dy,
-                ),
-            )
-            for line in candidate.lines
-        ],
-        penalty=candidate.penalty,
-        glyph_clearance_p5=candidate.glyph_clearance_p5,
-        status="free_text",
-        valid=True,
-        layout_bounds=tuple(value + delta for value, delta in zip(candidate.layout_bounds, (dx, dy, dx, dy))) if candidate.layout_bounds is not None else None,
-        qa=dict(candidate.qa),
+        font_size=candidate.font_size, y_origin=candidate.y_origin + dy,
+        line_spacing=candidate.line_spacing, lines=lines,
+        penalty=candidate.penalty, glyph_clearance_p5=candidate.glyph_clearance_p5,
+        status="free_text", valid=True, layout_bounds=bounds, qa=dict(candidate.qa),
     )
 
 
@@ -172,60 +157,75 @@ def _free_text_hard_valid(
     ``ownership_mask`` partitions damage between regions; it is deliberately not
     a placement boundary because translated text can be wider than its source.
     """
-    def reject(reason):
+    domain, center_only = zone.placement_domain_mask, bool(getattr(zone, "domain_center_only", False))
+    context = (obstacles, other_text, zone.ownership_mask, zone.panel_constraint)
+    previous = getattr(zone, "_free_text_rejection_context", ())
+    cache = getattr(zone, "_free_text_invariant_rejections", None)
+    if cache is None or any(old is not current for old, current in zip(previous, context)):
+        zone._free_text_rejection_context, zone._free_text_invariant_rejections = context, (cache := {})
+    cache_key = (crop_box, id(visual_crop), block_bbox)
+    domain_context = (domain, center_only)
+    previous_domain = getattr(zone, "_free_text_domain_rejection_context", ())
+    domain_cache = getattr(zone, "_free_text_domain_rejections", None)
+    if domain_cache is None or any(old is not current for old, current in zip(previous_domain, domain_context)):
+        zone._free_text_domain_rejection_context, zone._free_text_domain_rejections = domain_context, (domain_cache := {})
+
+    def reject(reason, *, cache_result=False):
         counts = getattr(zone, "rejections", {})
         counts[reason] = counts.get(reason, 0) + 1
         zone.rejections = counts
+        if cache_result:
+            cache[cache_key] = (visual_crop, reason)
         return False
+
     x1, y1, x2, y2 = crop_box
     h_obs, w_obs = obstacles.panel_mask.shape[:2]
     if x1 < 0 or y1 < 0 or x2 > w_obs or y2 > h_obs:
         return reject("page_bounds")
     if not visual_crop.any():
         return reject("empty_raster")
-    domain = zone.placement_domain_mask
     if domain is not None:
         if domain.shape != obstacles.panel_mask.shape:
             return reject("local_domain")
-        outside = (not domain[(y1 + y2) // 2, (x1 + x2) // 2] if getattr(zone, "domain_center_only", False)
-                   else np.any(visual_crop & ~(domain[y1:y2, x1:x2] > 0)))
+        cached_domain = domain_cache.get(cache_key)
+        if cached_domain is not None and cached_domain[0] is visual_crop:
+            return reject(cached_domain[1])
+        outside = (not domain[(y1 + y2) // 2, (x1 + x2) // 2] if center_only else np.any(visual_crop & ~(domain[y1:y2, x1:x2] > 0)))
         if outside:
+            domain_cache[cache_key] = (visual_crop, "local_domain")
             return reject("local_domain")
 
-    panel = zone.panel_constraint
-    if panel is not None:
+    if (cached := cache.get(cache_key)) is not None and cached[0] is visual_crop:
+        return cached[1] is True or reject(cached[1])
+
+    if (panel := zone.panel_constraint) is not None:
         left, top, right, bottom = panel.bounds
         margin = max(0, int(panel.margin))
         safe_bounds = (left + margin, top + margin, right - margin, bottom - margin)
         if block_bbox is not None:
             bx1, by1, bx2, by2 = block_bbox
             if bx1 < safe_bounds[0] or by1 < safe_bounds[1] or bx2 > safe_bounds[2] or by2 > safe_bounds[3]:
-                return reject("panel_bounds")
+                return reject("panel_bounds", cache_result=True)
         ys, xs = np.nonzero(visual_crop)
         if len(xs):
             vx1, vy1 = x1 + int(xs.min()), y1 + int(ys.min())
             vx2, vy2 = x1 + int(xs.max()) + 1, y1 + int(ys.max()) + 1
             if vx1 < safe_bounds[0] or vy1 < safe_bounds[1] or vx2 > safe_bounds[2] or vy2 > safe_bounds[3]:
-                return reject("panel_bounds")
+                return reject("panel_bounds", cache_result=True)
         if panel.mask is not None and panel.mask.shape == obstacles.panel_mask.shape:
             panel_crop = panel.mask[y1:y2, x1:x2] > 0
             if np.any(visual_crop & ~panel_crop):
-                return reject("panel_mask")
+                return reject("panel_mask", cache_result=True)
 
-    bubble_sub = obstacles.protected_bubble_mask[y1:y2, x1:x2]
-    other_sub = other_text[y1:y2, x1:x2]
-    panel_sub = obstacles.panel_mask[y1:y2, x1:x2]
+    bubble_sub, other_sub, panel_sub = obstacles.protected_bubble_mask[y1:y2, x1:x2], other_text[y1:y2, x1:x2], obstacles.panel_mask[y1:y2, x1:x2]
+    if np.any(bubble_sub) and np.any(visual_crop & (bubble_sub > 0)):
+        return reject("protected_bubble", cache_result=True)
+    if np.any(other_sub) and np.any(visual_crop & other_sub):
+        return reject("other_text", cache_result=True)
+    if not np.all(panel_sub > 0) and np.any(visual_crop & ~(panel_sub > 0)):
+        return reject("panel_mask", cache_result=True)
 
-    if np.any(bubble_sub):
-        if np.any(visual_crop & (bubble_sub > 0)):
-            return reject("protected_bubble")
-    if np.any(other_sub):
-        if np.any(visual_crop & other_sub):
-            return reject("other_text")
-    if not np.all(panel_sub > 0):
-        if np.any(visual_crop & ~(panel_sub > 0)):
-            return reject("panel_mask")
-
+    cache[cache_key] = (visual_crop, True)
     return True
 
 

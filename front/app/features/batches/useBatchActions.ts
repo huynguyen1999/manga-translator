@@ -133,10 +133,9 @@ export const useBatchActions = ({
     void removeTranslationBatchFromIDB(batchId).catch(() => {});
     if (batchId.startsWith("upload-") || batchId.startsWith("legacy-") || batchId.startsWith("original-")) {
       // If it's a client or imported batch, try dismiss on server if exists, but don't revert on 404
-      void batchAction(batchId, "dismiss").catch(() => {});
-      return;
+      return batchAction(batchId, "dismiss").catch(() => {}).then(() => {});
     }
-    void batchAction(batchId, "dismiss").catch((error) => {
+    return batchAction(batchId, "dismiss").catch((error) => {
       const status = (error as { status?: number })?.status;
       if (status !== 404 && !String(error).includes("404")) {
         optimisticDismissedBatchIdsRef.current.delete(batchId);
@@ -145,7 +144,7 @@ export const useBatchActions = ({
         ));
         console.warn("Failed to dismiss batch:", error);
       }
-    });
+    }).then(() => {});
   }, []);
 
   const removeTranslationBatch = useCallback((batchId: string) => {

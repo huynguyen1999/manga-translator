@@ -69,7 +69,7 @@ def put_char_horizontal(font_size: int, cdpt: str, pen_l: Tuple[int, int], canva
     # --- For valid bitmap, proceed with rendering ---
     # 将位图缓冲区转换为 numpy 数组
     # Convert bitmap buffer to numpy array
-    bitmap_char = np.array(bitmap.buffer, dtype=np.uint8).reshape((bitmap.rows, bitmap.width))
+    bitmap_char = bitmap.array
 
     # --- Calculate character placement ---
     # pen[0] is horizontal origin (cursor x)
@@ -227,4 +227,3 @@ def put_char_horizontal(font_size: int, cdpt: str, pen_l: Tuple[int, int], canva
                          f"target={target_slice.shape}, source={bitmap_border_slice.shape}")
 
     return char_offset_x  # Return horizontal advance 返回水平步进距离
-

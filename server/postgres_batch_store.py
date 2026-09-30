@@ -58,10 +58,11 @@ class PostgresBatchStore(BatchStore):
             """
             SELECT i.id, i.manga_group_id, g.title AS manga_title,
                    i.page_id, i.page_order, p.folder AS result_folder,
-                   i.status, i.stage, i.stage_started_at, i.error, i.request_id, i.payload
+                   i.status, i.stage, i.stage_started_at, i.error, i.request_id, i.payload,
+                   p.id AS page_exists, p.metadata AS page_metadata, p.text_regions AS page_text_regions
             FROM batch_items i
             LEFT JOIN manga_groups g ON g.id=i.manga_group_id
-            LEFT JOIN pages p ON p.id=i.page_id
+            LEFT JOIN pages p ON (p.id=i.page_id OR (i.page_id IS NULL AND p.folder=i.payload->>'resultFolder'))
             WHERE i.batch_id=$1
             """,
             manifest["id"],
@@ -86,12 +87,13 @@ class PostgresBatchStore(BatchStore):
                     if column == "stage_started_at" and row[column] is None:
                         continue
                     item[key] = row[column]
-            item["mangaGroupId"] = row["manga_group_id"]
-            item["pageId"] = row["page_id"]
-            item["pageOrder"] = row["page_order"]
+            item["mangaGroupId"], item["pageId"], item["pageOrder"] = row["manga_group_id"], row["page_id"], row["page_order"]
             item["mangaTitle"] = row["manga_title"] or item.get("mangaTitle", hydrated.get("mangaTitle"))
             if row["result_folder"] is not None:
                 item["resultFolder"] = row["result_folder"]
+            if row.get("page_exists") is not None:
+                pm, pr = _json_load(row.get("page_metadata"), {}), _json_load(row.get("page_text_regions"), [])
+                item["needsReview"] = pm.get("reviewStatus") == "pending" or any(isinstance(r, dict) and r.get("review_required") for r in pr)
         return hydrated
 
     async def _db_manifest(
@@ -260,38 +262,28 @@ class PostgresBatchStore(BatchStore):
                 COUNT(*) FILTER (WHERE i.status = 'queued' OR i.stage IN ('awaiting_translation', 'reserved')) AS queued_count,
                 COUNT(*) FILTER (WHERE i.status = 'processing' AND COALESCE(i.stage, '') NOT IN ('awaiting_translation', 'reserved')) AS processing_count,
                 COUNT(*) FILTER (WHERE i.status = 'error') AS failed_count,
-                COUNT(*) FILTER (WHERE i.payload->>'needsReview' = 'true') AS needs_review_count,
+                COUNT(*) FILTER (WHERE CASE WHEN p.id IS NOT NULL THEN (p.metadata->>'reviewStatus' = 'pending' OR p.text_regions @> '[{"review_required": true}]'::jsonb) ELSE i.payload->>'needsReview' = 'true' END) AS needs_review_count,
                 jsonb_agg(jsonb_build_object(
-                    'status', i.status,
-                    'stage', i.stage,
-                    'pipelineStage', i.payload->>'pipelineStage',
-                    'retryFromStage', i.payload->>'retryFromStage'
+                    'status', i.status, 'stage', i.stage,
+                    'pipelineStage', i.payload->>'pipelineStage', 'retryFromStage', i.payload->>'retryFromStage'
                 )) FILTER (WHERE i.id IS NOT NULL) AS stage_items
             FROM batches b
             LEFT JOIN batch_items i ON i.batch_id = b.id
+            LEFT JOIN pages p ON (p.id = i.page_id OR (i.page_id IS NULL AND p.folder = i.payload->>'resultFolder'))
             WHERE b.active
             GROUP BY b.id
-            ORDER BY CASE WHEN (b.manifest->>'priority')::boolean THEN 0 ELSE 1 END,
-                     b.added_at,
-                     b.id
+            ORDER BY CASE WHEN (b.manifest->>'priority')::boolean THEN 0 ELSE 1 END, b.added_at, b.id
             """
         )
         return [
             {
                 "id": row["id"], "title": row["title"], "mangaTitle": row["title"], "mangaGroupId": row["manga_group_id"],
                 "kind": row["kind"], "rerunMode": row.get("rerun_mode") if isinstance(row, dict) else row["rerun_mode"],
-                "status": row["status"],
-                "dismissed": bool(row["dismissed"]),
-                "addedAt": row["added_at"],
-                "updatedAt": row["updated_at"],
-                "settings": _json_load(row["settings"], {}),
-                "priority": bool(row["priority"]),
-                "totalItems": int(row["total_items"]),
-                "completedCount": int(row["completed_count"]),
-                "queuedCount": int(row["queued_count"] or 0),
-                "processingCount": int(row["processing_count"] or 0),
-                "failedCount": int(row["failed_count"] or 0),
-                "needsReviewCount": int(row["needs_review_count"] or 0),
+                "status": row["status"], "dismissed": bool(row["dismissed"]), "addedAt": row["added_at"], "updatedAt": row["updated_at"],
+                "settings": _json_load(row["settings"], {}), "priority": bool(row["priority"]),
+                "totalItems": int(row["total_items"]), "completedCount": int(row["completed_count"]),
+                "queuedCount": int(row["queued_count"] or 0), "processingCount": int(row["processing_count"] or 0),
+                "failedCount": int(row["failed_count"] or 0), "needsReviewCount": int(row["needs_review_count"] or 0),
                 **_batch_progress(_json_load(row["stage_items"], [])),
             }
             for row in rows

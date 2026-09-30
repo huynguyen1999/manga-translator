@@ -1,10 +1,7 @@
 """Non-fatal page-layout integrity checks."""
-
 from typing import Any, List, Tuple
-
 import numpy as np
 import math
-
 from ...utils import is_preserved_region, resolve_render_content
 from .geometry import BubbleGeometry
 from .models import LayoutDiagnostics, PageLayoutResult, PlacementMode, PlacedLine
@@ -14,14 +11,12 @@ from .render_output_validation import (
     validate_render_output,
 )
 from .raster import _render_line_alpha
-
 def validate_layout(ctx: Any, result: PageLayoutResult) -> LayoutDiagnostics:
     diagnostics = result.diagnostics
     regions = getattr(ctx, "text_regions", []) or []
     ownership = {}
     region_metrics = {}
     regions_by_id = {str(getattr(region, "region_id", "") or ""): region for region in regions}
-
     def suppress(region_id: str, reason: str) -> None:
         region = regions_by_id.get(region_id)
         if region is not None:
@@ -29,7 +24,6 @@ def validate_layout(ctx: Any, result: PageLayoutResult) -> LayoutDiagnostics:
             region._layout_failure_reason = reason
             region.review_required = True
             region.review_reason = getattr(region, "review_reason", None) or reason
-
     for region in regions:
         text = resolve_render_content(region).strip()
         if not text:
@@ -50,7 +44,6 @@ def validate_layout(ctx: Any, result: PageLayoutResult) -> LayoutDiagnostics:
             diagnostics.errors.append(f"duplicate source owner for {', '.join(duplicates)}")
         else:
             ownership.update({source_id: region_id for source_id in source_ids})
-
         lines = [line.text for line in (layout.lines if layout else [])]
         final_text = " ".join(lines).strip()
         source_snapshot = getattr(region, "source_text_snapshot", None)
@@ -67,7 +60,6 @@ def validate_layout(ctx: Any, result: PageLayoutResult) -> LayoutDiagnostics:
             diagnostics.errors.append(f"preserved content changed for region {region_id}")
         if source_leak:
             diagnostics.errors.append(f"source text leak for region {region_id}")
-
         font_policy = (
             getattr(region, "_font_policy_diagnostics", {})
             or getattr(region, "_solver_qa", {})
@@ -88,6 +80,14 @@ def validate_layout(ctx: Any, result: PageLayoutResult) -> LayoutDiagnostics:
             segment_sizes = [final_font]
         shape = getattr(getattr(ctx, "img_rgb", None), "shape", (0, 0))
         floor = max(int(font_policy.get("absolute_minimum", 0)), math.ceil(12 * max(shape[:2]) / 2048))
+        rescue = bool(getattr(region, "_solver_qa", {}).get("small_text_rescue"))
+        if rescue and not explicit_font and not is_preserved_region(region):
+            from .search_budget import small_text_rescue_minimum
+            rescue_floor = small_text_rescue_minimum(region, ctx._layout_render_config, shape) if hasattr(ctx, "_layout_render_config") else max(1, int(getattr(region, "_solver_qa", {}).get("rescue_minimum", 0)), math.ceil(8 * max(shape[:2]) / 2048))
+            if rescue_floor is not None:
+                floor = rescue_floor
+                region.review_required = True
+                region.review_reason = "small_text_rescue"
         if segment_sizes and min(segment_sizes) < floor and not is_preserved_region(region):
             suppress(region_id, "font_below_readability_floor")
         readability_ratio = min(segment_sizes) / readability_target if segment_sizes and readability_target else None

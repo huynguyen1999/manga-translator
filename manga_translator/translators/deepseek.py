@@ -29,20 +29,9 @@ class DeepseekTranslator(CommonGPTTranslator):
     _TIMEOUT_RETRY_ATTEMPTS = 3  # 在放弃之前重试超时请求的次数
     _RATELIMIT_RETRY_ATTEMPTS = 3  # 在放弃之前重试速率限制请求的次数
 
-    # 最大令牌数量，用于控制处理的文本长度
-    # Maximum token count for controlling the length of text processed
-    # 
-    # 最大输出长度: 8K
-    # MAX OUTPUT TOKENS: 8K
-    # -- https://api-docs.deepseek.com/quick_start/pricing
+    # 最大输出长度: 8K (https://api-docs.deepseek.com/quick_start/pricing)
     _MAX_TOKENS = 8000
-
-    # 将每个 prompt 限制为最大输出 tokens 的 50％。
-    # （这是一个任意比率，用于解释语言之间的差异。）
-    # 
-    # Limit each prompt to 50% max output tokens. 
-    # (This is an arbitrary ratio to account for variance between languages.)
-    _MAX_TOKENS_IN = _MAX_TOKENS // 2
+    _MAX_TOKENS_IN = _MAX_TOKENS // 2  # Limit each prompt to 50% max output tokens
 
     # 是否返回原始提示，用于控制输出内容
     _RETURN_PROMPT = False
@@ -61,6 +50,8 @@ class DeepseekTranslator(CommonGPTTranslator):
         fallback_to_openai_key: bool = True,
     ):
         resolved_model = model or os.getenv('DEEPSEEK_MODEL', DEEPSEEK_MODEL)
+        if resolved_model in {"dash", "dashscope", "dash-llm", "dash_llm"}:
+            resolved_model = DEEPSEEK_MODEL if DEEPSEEK_MODEL not in {"dash", "dashscope", "dash-llm", "dash_llm"} else "deepseek-chat"
         self.model = resolved_model
         _CONFIG_KEY = config_key or ('deepseek.' + self.model)
         CommonGPTTranslator.__init__(self, config_key=_CONFIG_KEY)

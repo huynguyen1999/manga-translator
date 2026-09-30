@@ -40,8 +40,7 @@ def _split_existing_breaks(token):
 
 def _single_hyphen_split(subtoken, width, width_limit, hyphenator, allow_emergency):
     boundaries = _grapheme_boundaries(subtoken)
-    if not boundaries:
-        return None
+    if not boundaries: return None
     dictionary = []
     core = subtoken.rstrip(".,!?;:…'\"”’)]-")
     min_letters = 2 if sum(c.isalpha() for c in core) <= 5 else 3
@@ -68,8 +67,9 @@ def _single_hyphen_split(subtoken, width, width_limit, hyphenator, allow_emergen
             continuation = "-" if subtoken[index - 1].isalpha() else ""
             left, right = subtoken[:index] + continuation, subtoken[index:]
             left_w, right_w = width(left), width(right)
-            if left_w <= width_limit and right_w <= width_limit:
-                valid.append(((max(left_w, right_w), abs(left_w - right_w), -index), left, right, strategy))
+            fits = left_w <= width_limit and right_w <= width_limit
+            if fits or strategy == "emergency":
+                valid.append(((not fits, max(left_w, right_w), abs(left_w - right_w), -index), left, right, strategy))
         if valid:
             _, left, right, strategy = min(valid, key=lambda item: item[0])
             return left, right, strategy

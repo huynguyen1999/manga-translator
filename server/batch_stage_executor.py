@@ -1,6 +1,5 @@
-"""Batch stage execution helpers for the persistent scheduler."""
-
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +16,8 @@ async def process_prepare_item(
         await scheduler._process_checkpointed_prepare_item(batch_id, item_id, instance)
         return
 
-    hook = None
-    image = None
-    folder = None
-    short_b = log_token(batch_id)
-    short_i = log_token(item_id)
-    token = correlation_id_ctx.set(f"batch-{short_b}/prep-{short_i}")
+    hook = image = folder = None
+    token = correlation_id_ctx.set(f"batch-{log_token(batch_id)}/prep-{log_token(item_id)}")
     logger.info(f"Starting preparation for batch item {item_id} (batch {batch_id})")
     try:
         batch = await scheduler.store.get_batch(batch_id)
@@ -176,10 +171,14 @@ async def process_checkpointed_ocr_group(
                 completed_textless_ids.add(item["id"])
                 continue
             run.ctx = ctx
+            run.translator = translator
+            await run.begin_stage("ocr", config)
             pages.append((item, folder, run, config, ctx))
 
         if pages:
             await scheduler._set_group_stage(batch_id, item_ids, "ocr")
+
+        ocr_start_time = time.monotonic()
 
         async def recognize_and_checkpoint():
             requests = []
@@ -193,16 +192,18 @@ async def process_checkpointed_ocr_group(
                 requests.append((ctx, config))
 
             outputs = await translator._run_ocr_batch(requests)
+            ocr_duration_ms = round((time.monotonic() - ocr_start_time) * 1000)
             for (_, folder, run, config, ctx), output in zip(pages, outputs):
                 translator._set_image_context(config, ctx.input)
                 if translator._current_image_context:
                     translator._current_image_context["subfolder"] = folder
                     translator._current_image_context["started_at"] = run.manifest.get("createdAt")
-                translator._pipeline_run = run
-                run.translator = translator
-                await run.retry_stage(
-                    "ocr", config, translator, precomputed_ocr=output
-                )
+                if hasattr(run, "retry_stage"):
+                    await run.retry_stage("ocr", config, translator, precomputed_ocr=output, stage_already_running=True)
+                if hasattr(run, "_stage"):
+                    run._stage("ocr")["durationMs"] = ocr_duration_ms
+                if hasattr(run, "checkpoint"):
+                    await run.checkpoint()
             return outputs
 
         outputs = await instance._run_translation(recognize_and_checkpoint) if pages else []
@@ -260,24 +261,13 @@ async def process_checkpointed_ocr_group(
 
 
 async def process_checkpointed_model_group(
-    scheduler,
-    batch_id: str,
-    claimed: list[dict[str, Any]],
-    instance: Any,
-    stage_id: str,
-    *,
-    log_token,
-    correlation_id_ctx,
-    logger,
-    set_item_stage,
-    deserialize_textblocks,
+    scheduler, batch_id: str, claimed: list[dict[str, Any]], instance: Any, stage_id: str,
+    *, log_token, correlation_id_ctx, logger, set_item_stage, deserialize_textblocks,
 ) -> None:
     if stage_id not in {"upscaling", "detection", "bubble_detection", "inpainting"}:
         raise ValueError(f"Unsupported batched model stage: {stage_id}")
     item_ids = [item["id"] for item in claimed]
-    pages = []
-    batch_finished = False
-    slot = None
+    pages, batch_finished, slot = [], False, None
     translator = getattr(instance, "translator", None)
     token = correlation_id_ctx.set(f"batch-{log_token(batch_id)}/{stage_id}-{log_token(item_ids[0])}")
     try:
@@ -324,6 +314,8 @@ async def process_checkpointed_model_group(
         if pages:
             await scheduler._set_group_stage(batch_id, item_ids, stage_id)
 
+        batch_start_time = time.monotonic()
+
         async def infer_batch():
             configs = [page[3] for page in pages]
             contexts = [page[4] for page in pages]
@@ -336,6 +328,7 @@ async def process_checkpointed_model_group(
             return await translator._run_inpainting_batch(configs, contexts)
 
         outputs = await instance._run_translation(infer_batch)
+        batch_duration_ms = round((time.monotonic() - batch_start_time) * 1000)
         if len(outputs) != len(pages):
             raise RuntimeError(f"{stage_id} returned {len(outputs)} pages for {len(pages)} inputs")
 
@@ -355,13 +348,12 @@ async def process_checkpointed_model_group(
                 kwargs = {"precomputed_detection": output}
             else:
                 kwargs = {"precomputed_inpainting": output}
-            await run.retry_stage(
-                stage_id,
-                config,
-                translator,
-                stage_already_running=True,
-                **kwargs,
-            )
+            if hasattr(run, "retry_stage"):
+                await run.retry_stage(stage_id, config, translator, stage_already_running=True, **kwargs)
+            if hasattr(run, "_stage"):
+                run._stage(stage_id)["durationMs"] = batch_duration_ms
+            if hasattr(run, "checkpoint"):
+                await run.checkpoint()
 
         for item, folder, run, _, _ in pages:
             next_stage = scheduler._next_batch_stage(run)
@@ -387,7 +379,7 @@ async def process_checkpointed_model_group(
     except Exception as exc:
         logger.error("Error running batched %s for %s: %s", stage_id, item_ids, exc)
         for _, _, run, _, _ in pages:
-            if run._stage(stage_id).get("status") == "running":
+            if hasattr(run, "_stage") and run._stage(stage_id).get("status") == "running" and hasattr(run, "fail_stage"):
                 try:
                     await run.fail_stage(stage_id, str(exc))
                 except Exception:

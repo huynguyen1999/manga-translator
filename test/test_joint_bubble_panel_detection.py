@@ -9,8 +9,9 @@ from manga_translator.detection.panel import (
     deserialize_panel_detections,
     sort_panel_detections_reading_order,
 )
-from manga_translator.detection.bubble import BubbleDetection, BubbleDetector
+from manga_translator.detection.bubble import BubbleDetection, BubbleDetectionState, BubbleDetector
 from manga_translator.geometry.panels import infer_panel_constraints
+from manga_translator.geometry.panel_matching import match_panel_to_source
 from manga_translator.utils.sort import sort_regions
 from manga_translator.utils.textblock import TextBlock
 
@@ -155,6 +156,15 @@ class TestInferPanelConstraintsWithPanels:
         assert c.bounds == (500, 0, 1000, 500)
         assert c.confidence == pytest.approx(0.95)
 
+    def test_panel_match_requires_confidence_and_substantial_source_coverage(self):
+        source = np.zeros((100, 100), dtype=np.uint8)
+        source[20:80, 20:80] = 1
+        low_confidence = PanelDetection([0, 0, 100, 100], [], confidence=0.4)
+        partial = PanelDetection([20, 20, 80, 40], [], confidence=0.95)
+
+        assert match_panel_to_source(source, [low_confidence]) is None
+        assert match_panel_to_source(source, [partial]) is None
+
 
 class TestBubbleDetectorJointParsing:
     def test_read_result_separates_panels_and_bubbles(self):
@@ -198,6 +208,31 @@ class TestBubbleDetectorJointParsing:
         assert panels[0].order_index == 1
         assert panels[0].xyxy == [10, 10, 190, 190]
 
+    @pytest.mark.parametrize("class_map,single_class,expected", [
+        ({0: "balloon", 1: "panel"}, False, 0),
+        ({0: "balloon"}, True, 1),
+    ])
+    def test_unknown_detector_class_is_only_a_bubble_for_known_single_class_model(
+        self, class_map, single_class, expected,
+    ):
+        detector = object.__new__(BubbleDetector)
+        detector.class_map = class_map
+        detector.single_class_bubble_model = single_class
+        result = MagicMock()
+        result.masks.data = [torch.ones((40, 40), dtype=torch.float32)]
+        result.masks.__len__.return_value = 1
+        box = MagicMock()
+        box.cls = torch.tensor([9])
+        box.xyxy = torch.tensor([[2, 2, 38, 38]])
+        result.boxes.__iter__.side_effect = lambda: iter([box])
+        result.boxes.conf = torch.tensor([0.95])
+        result.masks.xy = [np.array([[2, 2], [38, 2], [38, 38], [2, 38]])]
+
+        bubbles, panels = detector._read_result(result, (40, 40), 0.5, 0.5)
+
+        assert len(bubbles) == expected
+        assert panels == []
+
 
 class TestBubbleDetectionStageBatch:
     @pytest.mark.asyncio
@@ -226,9 +261,11 @@ class TestBubbleDetectionStageBatch:
         assert results[0] == ([bubble1], [panel1])
         assert ctx1.bubble_detections == [bubble1]
         assert ctx1.panel_detections == [panel1]
+        assert ctx1.bubble_detection_state is BubbleDetectionState.COMPLETED_WITH_RESULTS
         assert results[1] == ([], [])
         assert ctx2.bubble_detections == []
         assert ctx2.panel_detections == []
+        assert ctx2.bubble_detection_state is BubbleDetectionState.COMPLETED_EMPTY
 
     @pytest.mark.asyncio
     async def test_run_bubble_detection_precomputed_panels(self):
@@ -257,4 +294,32 @@ class TestBubbleDetectionStageBatch:
 
         assert ctx.panel_detections == [panel]
         assert ctx.bubble_detections == []
+        assert ctx.bubble_detection_state is BubbleDetectionState.COMPLETED_EMPTY
 
+    @pytest.mark.asyncio
+    async def test_run_bubble_detection_marks_failure_for_geometry_recovery(self):
+        from manga_translator.bubble_detection_stage import run_bubble_detection
+        from manga_translator.config import Config
+        from manga_translator.utils import Context
+
+        cfg = Config()
+        ctx = Context(img_rgb=np.zeros((100, 100, 3), dtype=np.uint8))
+        owner = MagicMock()
+        owner._pipeline_run = None
+        owner._current_image_context = None
+        detector = MagicMock(side_effect=RuntimeError("model unavailable"))
+        log = MagicMock()
+
+        await run_bubble_detection(
+            owner,
+            cfg,
+            ctx,
+            report_progress=False,
+            detect_bubbles=detector,
+            dispatch_detection=MagicMock(),
+            group_regions_by_bubbles=lambda regions, _bubbles, **_kwargs: regions,
+            logger=log,
+        )
+
+        assert ctx.bubble_detection_state is BubbleDetectionState.FAILED
+        assert ctx.bubble_detections == []

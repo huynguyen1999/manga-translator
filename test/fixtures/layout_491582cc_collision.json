@@ -1,0 +1,168 @@
+[
+  {
+    "region_id": "d31ab3e13de845d8bc2ffd5b6f51e2a3",
+    "source_lines": [
+      [
+        [
+          498,
+          1073
+        ],
+        [
+          514,
+          1073
+        ],
+        [
+          514,
+          1144
+        ],
+        [
+          498,
+          1144
+        ]
+      ],
+      [
+        [
+          484,
+          1074
+        ],
+        [
+          500,
+          1074
+        ],
+        [
+          500,
+          1122
+        ],
+        [
+          484,
+          1122
+        ]
+      ]
+    ],
+    "source_text": "\u5148\u8f29\u306e\u304a\u5b50\u6c17\u6301\u3061",
+    "translation": "HOW MY SENIOR FEELS ABOUT HER CHILD",
+    "font_size": 16,
+    "layout_bounds": [
+      465,
+      1065,
+      548,
+      1176
+    ],
+    "segments": [
+      {
+        "x": 465,
+        "y": 1065,
+        "width": 83,
+        "height": 111,
+        "text": "HOW MY SENIOR FEELS ABOUT HER CHILD",
+        "font_size": 16,
+        "lines": [
+          {
+            "text": "HOW MY",
+            "x": 465,
+            "y": 1065,
+            "width": 83,
+            "height": 16
+          },
+          {
+            "text": "SENIOR",
+            "x": 467,
+            "y": 1084,
+            "width": 78,
+            "height": 16
+          },
+          {
+            "text": "FEELS",
+            "x": 476,
+            "y": 1103,
+            "width": 61,
+            "height": 16
+          },
+          {
+            "text": "ABOUT",
+            "x": 473,
+            "y": 1122,
+            "width": 66,
+            "height": 16
+          },
+          {
+            "text": "HER",
+            "x": 488,
+            "y": 1141,
+            "width": 37,
+            "height": 16
+          },
+          {
+            "text": "CHILD",
+            "x": 477,
+            "y": 1160,
+            "width": 59,
+            "height": 16
+          }
+        ],
+        "rendered_png": null
+      }
+    ],
+    "layout_stroke_width": 2
+  },
+  {
+    "region_id": "4b067680241341598f4dc1502582756d",
+    "source_lines": [
+      [
+        [
+          550,
+          1115
+        ],
+        [
+          567,
+          1115
+        ],
+        [
+          567,
+          1297
+        ],
+        [
+          550,
+          1297
+        ]
+      ]
+    ],
+    "source_text": "\u3042\u305f\u3057\uff0e\uff0e\uff0e\u8ca0\u3051\u307e\u3057\u305f\u3002",
+    "translation": "I... LOST.",
+    "font_size": 17,
+    "layout_bounds": [
+      531,
+      1120,
+      591,
+      1302
+    ],
+    "segments": [
+      {
+        "x": 531,
+        "y": 1120,
+        "width": 60,
+        "height": 182,
+        "text": "I... LOST.",
+        "font_size": 17,
+        "lines": [
+          {
+            "text": "I...",
+            "x": 550,
+            "y": 1120,
+            "width": 22,
+            "height": 17
+          },
+          {
+            "text": "LOST.",
+            "x": 531,
+            "y": 1140,
+            "width": 60,
+            "height": 17
+          }
+        ],
+        "rendered_png": null
+      }
+    ],
+    "layout_stroke_width": 2
+  }
+]

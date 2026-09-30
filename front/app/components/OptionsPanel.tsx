@@ -21,7 +21,7 @@ const BATCH_TRANSLATORS: TranslatorKey[] = [
   "gemini",
   "openai",
   "groq",
-  "openrouter", "tokenharbor",
+  "openrouter", "tokenharbor", "dash",
   "custom_openai",
   "sakura",
   "deepl",

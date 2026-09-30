@@ -1,11 +1,7 @@
 """Shared resource limits and semaphore handling for batch work."""
-
 import asyncio
-
 from manga_translator.pipeline.stages import PipelineStage, ResourceClass, STAGE_RESOURCES
 from manga_translator.utils.model_cache import MODEL_EXECUTOR_CONCURRENCY
-
-
 _STAGE_RESOURCE_LIMITS = {
     ResourceClass.IO: 4,
     ResourceClass.GPU: 1,
@@ -13,14 +9,10 @@ _STAGE_RESOURCE_LIMITS = {
     ResourceClass.CPU_LIGHT: 2,
     ResourceClass.NETWORK: 4,
 }
-
-
 def _resource_family(resource: ResourceClass) -> ResourceClass:
     return ResourceClass.CPU_HEAVY if resource in {
         ResourceClass.CPU_HEAVY, ResourceClass.CPU_LIGHT
     } else resource
-
-
 def _device_resource(device: str | None) -> ResourceClass:
     value = str(device or "cpu").lower()
     return (
@@ -28,8 +20,6 @@ def _device_resource(device: str | None) -> ResourceClass:
         if value.startswith(("cuda", "mps", "xpu", "coreml", "vulkan"))
         else ResourceClass.CPU_HEAVY
     )
-
-
 def _value(value) -> str:
     return str(getattr(value, "value", value) or "").lower()
 
@@ -96,10 +86,10 @@ def _stage_resource(
         if detector == "none":
             return ResourceClass.CPU_LIGHT
         return _device_resource(device)  # CTD selects Torch or OpenCV ONNX by device.
-    if stage in {PipelineStage.OCR, PipelineStage.BUBBLE_DETECTION}:
-        if stage is PipelineStage.BUBBLE_DETECTION and not config.bubble_detection.enabled:
-            return ResourceClass.CPU_LIGHT
-        return _device_resource(device)
+    if stage is PipelineStage.OCR:
+        return ResourceClass.CPU_HEAVY if _value(config.ocr.ocr) == "ppocrv6" else _device_resource(device)
+    if stage is PipelineStage.BUBBLE_DETECTION:
+        return ResourceClass.CPU_LIGHT if not config.bubble_detection.enabled else _device_resource(device)
     if stage is PipelineStage.INPAINTING:
         if _value(config.inpainter.inpainter) in {"original", "none"}:
             return ResourceClass.CPU_LIGHT
@@ -148,6 +138,7 @@ class BatchResourceManager:
         self.active: dict[ResourceClass, dict[str, int]] = {
             resource: {} for resource in self.resource_limits
         }
+        self.layout_admission = asyncio.Semaphore(1)
         self._logger = logger
         self._correlation_id = correlation_id
 
@@ -170,7 +161,14 @@ class BatchResourceManager:
     async def acquire_stage(
         self, stage_id: str, resource: ResourceClass | None = None
     ) -> asyncio.Semaphore:
-        return await self.acquire(stage_id, resource or _stage_resource(stage_id))
+        if stage_id == "layout":
+            await self.layout_admission.acquire()
+        try:
+            return await self.acquire(stage_id, resource or _stage_resource(stage_id))
+        except BaseException:
+            if stage_id == "layout":
+                self.layout_admission.release()
+            raise
 
     def release_stage(
         self, stage_id: str, slot: asyncio.Semaphore, resource: ResourceClass | None = None
@@ -182,6 +180,8 @@ class BatchResourceManager:
             if not stages[stage_id]:
                 del stages[stage_id]
         slot.release()
+        if stage_id == "layout":
+            self.layout_admission.release()
         self._logger.debug(
             "stage_resource event=released stage=%s resource=%s capacity=%d request=%s",
             stage_id, resource.value, self.resource_limits[resource], self._correlation_id.get(),

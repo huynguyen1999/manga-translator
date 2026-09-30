@@ -5,6 +5,7 @@ from .model_32px import Model32pxOCR
 from .model_48px import Model48pxOCR
 from .model_48px_ctc import Model48pxCTCOCR
 from .model_manga_ocr import ModelMangaOCR
+from .model_ppocrv6 import ModelPPOCRv6, ocr_operation
 from ..config import Ocr, OcrConfig
 from ..utils import Quadrilateral
 from ..utils.model_cache import (
@@ -16,6 +17,7 @@ OCRS = {
     Ocr.ocr48px: Model48pxOCR,
     Ocr.ocr48px_ctc: Model48pxCTCOCR,
     Ocr.mocr: ModelMangaOCR,
+    Ocr.ppocrv6: ModelPPOCRv6,
 }
 ocr_cache = {}
 
@@ -24,14 +26,14 @@ def get_ocr(key: Ocr, *args, **kwargs) -> CommonOCR:
         raise ValueError(f'Could not find OCR for: "{key}". Choose from the following: %s' % ','.join(OCRS))
     return get_cached_model('ocr', ocr_cache, key, lambda: OCRS[key](*args, **kwargs))
 
-@model_operation
+@ocr_operation
 async def prepare(ocr_key: Ocr, device: str = 'cpu'):
     ocr = get_ocr(ocr_key)
     if isinstance(ocr, OfflineOCR):
         await ocr.download()
         await ocr.load(device)
 
-@model_operation
+@ocr_operation
 async def dispatch(ocr_key: Ocr, image: np.ndarray, regions: List[Quadrilateral], config:Optional[OcrConfig] = None, device: str = 'cpu', verbose: bool = False) -> List[Quadrilateral]:
     ocr = get_ocr(ocr_key)
     if isinstance(ocr, OfflineOCR):
@@ -39,7 +41,7 @@ async def dispatch(ocr_key: Ocr, image: np.ndarray, regions: List[Quadrilateral]
     config = config or OcrConfig()
     return await ocr.recognize(image, regions, config, verbose)
 
-@model_operation
+@ocr_operation
 async def dispatch_batch(ocr_key: Ocr, pages: list[tuple[np.ndarray, List[Quadrilateral], OcrConfig]], device: str = 'cpu', verbose: bool = False):
     ocr = get_ocr(ocr_key)
     if isinstance(ocr, OfflineOCR):
@@ -48,9 +50,7 @@ async def dispatch_batch(ocr_key: Ocr, pages: list[tuple[np.ndarray, List[Quadri
         from .batching import recognize_ctc_batch
 
         return recognize_ctc_batch(ocr, pages)
-    if isinstance(ocr, Model48pxOCR):
-        return await ocr._infer_batch(pages, verbose)
-    if isinstance(ocr, ModelMangaOCR):
+    if isinstance(ocr, (Model48pxOCR, ModelMangaOCR, ModelPPOCRv6)):
         return await ocr._infer_batch(pages, verbose)
     return [
         await ocr.recognize(image, regions, config, verbose)

@@ -203,10 +203,10 @@ async def process_checkpointed_prepare_item(
             index_result = getattr(scheduler.store, "register_result", None)
             if index_result is not None:
                 await index_result(folder, page_order=config.page_order, page_id=item.get("pageId"))
-            translated_regions = run._document("translations.json") or []
-            needs_review = any(
-                isinstance(region, dict) and region.get("review_required")
-                for region in translated_regions
+            final_regions = run._document("text_regions.json") or getattr(getattr(run, "ctx", None), "text_regions", None) or run._document("translations.json") or []
+            needs_review = (run._document("meta.json") or {}).get("reviewStatus") == "pending" or any(
+                region.get("review_required") if isinstance(region, dict) else getattr(region, "review_required", False)
+                for region in final_regions
             )
 
             def complete_page(manifest: dict[str, Any]):

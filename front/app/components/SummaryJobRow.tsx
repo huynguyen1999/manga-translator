@@ -8,11 +8,8 @@ import { RenderProfiler } from "@/utils/renderPerformance";
 type AsyncAction = () => void | Promise<void>;
 
 const stages = [
-  ["detecting", "Detection"],
-  ["ocr", "OCR"],
-  ["textline_merge", "Merge text lines"],
-  ["concatenating", "Combine transcript"],
-  ["summarizing", "Generate synopsis"],
+  ["detecting", "Detection"], ["ocr", "OCR"], ["textline_merge", "Merge text lines"],
+  ["concatenating", "Combine transcript"], ["summarizing", "Generate synopsis"],
 ] as const;
 
 const SummaryJobRow: React.FC<{
@@ -31,6 +28,8 @@ const SummaryJobRow: React.FC<{
     const provider = job.provider?.toLowerCase();
     const model = job.model?.toLowerCase() || "";
     if (provider === "tokenharbor") return "tokenharbor";
+    if (provider === "openrouter" || model.includes("openrouter") || model.includes("qwen3.8") || model.includes("inkling") || model.includes("nemotron")) return "openrouter";
+    if (provider === "dash" || provider === "dashscope" || model.includes("dash")) return "dash";
     if (provider === "gemini" || model.includes("gemini")) return "gemini";
     if (provider === "groq" || model.includes("groq")) return "groq";
     return "deepseek-flash";

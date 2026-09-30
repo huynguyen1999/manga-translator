@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image
 
 from manga_translator.config import Config
+from manga_translator.detection.bubble_state import restore_bubble_detections
 from manga_translator.pipeline.run import deserialize_textblocks
 from manga_translator.pipeline.stages import PipelineStage
 from manga_translator.rendering.bubble_layout import restore_bubble_assignments
@@ -103,9 +104,7 @@ async def load_rerun_context(
         ctx.mask = ctx.inpaint_mask
     if (b_raw := _read_json("bubble_detections.json")) is not None:
         try:
-            from manga_translator.detection.bubble import deserialize_bubble_detections
-            ctx.bubble_detections = deserialize_bubble_detections(b_raw, ctx.img_rgb.shape)
-            ctx._bubble_detection_done = True
+            restore_bubble_detections(ctx, b_raw, ctx.img_rgb.shape)
         except Exception:
             pass
     if (p_raw := _read_json("panel_detections.json")):

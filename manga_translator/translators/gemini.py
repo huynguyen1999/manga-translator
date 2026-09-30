@@ -19,6 +19,7 @@ from .gemini_keys import (
 )
 from .common_gpt import CommonGPTTranslator, _CommonGPTTranslator_JSON
 from .constants import DEFAULT_GEMINI_SAFETY_SETTINGS
+from ..gemini_response import inspect_gemini_response
 
 
 # Text Formatting:
@@ -617,44 +618,13 @@ class GeminiTranslator(CommonGPTTranslator):
 
         candidates = getattr(response, 'candidates', None) or []
         candidate = candidates[0] if candidates else None
-        details = []
-        prompt_feedback = getattr(response, 'prompt_feedback', None)
-        prompt_reason = getattr(prompt_feedback, 'block_reason', None)
-        prompt_ratings = getattr(prompt_feedback, 'safety_ratings', None) or []
-        prompt_has_blocked_rating = any(getattr(rating, 'blocked', False) for rating in prompt_ratings)
-        if prompt_reason is not None:
-            reason = getattr(prompt_reason, 'name', None) or str(prompt_reason).rsplit('.', 1)[-1]
-            if reason not in {'BLOCK_REASON_UNSPECIFIED', 'UNSPECIFIED', 'NONE'}:
-                details.append(f'prompt_block_reason={reason}')
-        if prompt_has_blocked_rating:
-            if not details:
-                details.append('prompt_block_type=SAFETY')
-            details.append(f'prompt_safety_ratings={str(prompt_ratings).replace(chr(10), " ")[:500]}')
-
-        finish_reason = getattr(candidate, 'finish_reason', None)
-        candidate_ratings = getattr(candidate, 'safety_ratings', None) or []
-        candidate_has_blocked_rating = any(getattr(rating, 'blocked', False) for rating in candidate_ratings)
-        if finish_reason is not None:
-            reason = getattr(finish_reason, 'name', None) or str(finish_reason).rsplit('.', 1)[-1]
-            if reason in {
-                'SAFETY', 'PROHIBITED_CONTENT', 'RECITATION', 'LANGUAGE',
-                'BLOCKLIST', 'SPII', 'IMAGE_SAFETY', 'CONTENT_BLOCKED',
-            }:
-                details.append(f'candidate_finish_reason={reason}')
-                finish_message = getattr(candidate, 'finish_message', None)
-                if finish_message:
-                    details.append(f'finish_message={str(finish_message).replace(chr(10), " ")[:500]}')
-        if candidate_has_blocked_rating:
-            if not any(detail.startswith('candidate_finish_reason=') for detail in details):
-                details.append('candidate_block_type=SAFETY')
-            details.append(f'candidate_safety_ratings={str(candidate_ratings).replace(chr(10), " ")[:500]}')
-
-        if details:
+        blocked, details = inspect_gemini_response(response)
+        if blocked:
             for name, value in (
                 ('response_id', getattr(response, 'response_id', None)),
                 ('model_version', getattr(response, 'model_version', None)),
             ):
-                if value:
+                if value and not any(item.startswith(f'{name}=') for item in details):
                     details.append(f'{name}={value}')
             detail = ', '.join(details)
             self.logger.warning('Gemini returned a blocked response (%s)', detail)

@@ -1,7 +1,5 @@
 """Bounded CPU lanes keep interactive work independent of batch work."""
-
 from __future__ import annotations
-
 import asyncio
 import contextvars
 import inspect
@@ -12,19 +10,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from typing import Any
-
 CPU_PRIORITY_INTERACTIVE = 0
 CPU_PRIORITY_NORMAL = 1
 CPU_PRIORITY_BACKGROUND = 2
 logger = logging.getLogger(__name__)
-
+_LAYOUT_ADMISSION = threading.Lock()
 _CPU_EXECUTOR_LOCK = threading.Lock()
 _CPU_STAGE_WORKERS = 1
 _CPU_STAGE_EXECUTORS: tuple[ThreadPoolExecutor, ThreadPoolExecutor] | None = None
 _CPU_ACTIVE_LOCK = threading.Lock()
 _CPU_ACTIVE = {"interactive": 0, "background": 0}
-
-
 def configure_cpu_stage_workers(background_workers: int) -> None:
     """Set the process-wide background CPU capacity before pipeline work starts."""
     global _CPU_STAGE_WORKERS, _CPU_STAGE_EXECUTORS
@@ -39,13 +34,9 @@ def configure_cpu_stage_workers(background_workers: int) -> None:
     if executors is not None:
         for executor in executors:
             executor.shutdown(wait=True)
-
-
 def cpu_stage_workers() -> int:
     with _CPU_EXECUTOR_LOCK:
         return _CPU_STAGE_WORKERS
-
-
 def _cpu_stage_executors() -> tuple[ThreadPoolExecutor, ThreadPoolExecutor]:
     global _CPU_STAGE_EXECUTORS
     with _CPU_EXECUTOR_LOCK:
@@ -55,8 +46,6 @@ def _cpu_stage_executors() -> tuple[ThreadPoolExecutor, ThreadPoolExecutor]:
                 ThreadPoolExecutor(max_workers=_CPU_STAGE_WORKERS, thread_name_prefix="cpu-background"),
             )
         return _CPU_STAGE_EXECUTORS
-
-
 class _CpuLane:
     def __init__(self, name: str, executor: ThreadPoolExecutor, concurrency: int) -> None:
         self.name = name
@@ -65,8 +54,7 @@ class _CpuLane:
         self.queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         self.sequence = itertools.count()
         self.workers = [asyncio.create_task(self._work()) for _ in range(concurrency)]
-
-    async def run(self, function: Callable[..., Any], args: tuple, kwargs: dict, priority: int):
+    async def run(self, function: Callable[..., Any], args: tuple, kwargs: dict, priority: int, queued_at=None):
         future = asyncio.get_running_loop().create_future()
         logger.debug(
             "cpu_stage event=waiting lane=%s function=%s queued=%d",
@@ -74,19 +62,18 @@ class _CpuLane:
             getattr(function, "__name__", type(function).__name__),
             self.queue.qsize(),
         )
-        self.queue.put_nowait((priority, next(self.sequence), function, args, kwargs, future))
+        self.queue.put_nowait((priority, next(self.sequence), function, args, kwargs, future, queued_at or time.monotonic()))
         return await future
-
     async def _work(self) -> None:
         while True:
-            _, _, function, args, kwargs, future = await self.queue.get()
+            _, _, function, args, kwargs, future, queued_at = await self.queue.get()
             try:
                 if future.cancelled():
                     continue
                 context = contextvars.copy_context()
                 result = await asyncio.get_running_loop().run_in_executor(
                     self.executor, context.run, _call, function, args, kwargs,
-                    self.name, self.concurrency,
+                    self.name, self.concurrency, queued_at,
                 )
                 if not future.done():
                     future.set_result(result)
@@ -99,44 +86,57 @@ class _CpuLane:
                     future.set_exception(error)
             finally:
                 self.queue.task_done()
-
     async def close(self) -> None:
         for worker in self.workers:
             worker.cancel()
         await asyncio.gather(*self.workers, return_exceptions=True)
         while not self.queue.empty():
             try:
-                _, _, _, _, _, future = self.queue.get_nowait()
+                _, _, _, _, _, future, _ = self.queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
             if not future.done():
                 future.cancel()
             self.queue.task_done()
-
-
 class _CpuStageExecutor:
     def __init__(self) -> None:
         interactive_executor, background_executor = _cpu_stage_executors()
         self.interactive = _CpuLane("interactive", interactive_executor, 1)
         self.background = _CpuLane("background", background_executor, cpu_stage_workers())
-
     async def run(self, function: Callable[..., Any], args: tuple, kwargs: dict, priority: int):
         lane = self.background if priority >= CPU_PRIORITY_BACKGROUND else self.interactive
-        return await lane.run(function, args, kwargs, priority)
-
+        queued_at = time.monotonic()
+        if lane is self.background and _is_layout(function):
+            while not _LAYOUT_ADMISSION.acquire(blocking=False):
+                await asyncio.sleep(0.01)
+            try:
+                task = asyncio.create_task(lane.run(function, args, kwargs, priority, queued_at))
+                try:
+                    return await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    await task  # The CPU thread must finish before admitting another layout.
+                    raise
+            finally:
+                _LAYOUT_ADMISSION.release()
+        return await lane.run(function, args, kwargs, priority, queued_at)
     async def close(self) -> None:
         await asyncio.gather(self.interactive.close(), self.background.close())
-
 
 _CV2_THREAD_LOCK = threading.Lock()
 _CV2_THREADS_LIMITED = False
 
 
+def _is_layout(function):
+    return (getattr(function, "__name__", "") == "layout_page"
+            and getattr(function, "__module__", "").endswith("layout.engine"))
+
 def _call(
-    function: Callable[..., Any], args: tuple, kwargs: dict, lane: str, capacity: int,
+    function: Callable[..., Any], args: tuple, kwargs: dict, lane: str, capacity: int, queued_at=None,
 ) -> Any:
     global _CV2_THREADS_LIMITED
     started = time.monotonic()
+    if _is_layout(function) and args:
+        args[0]._layout_queue_wait_ms = (started - (queued_at or started)) * 1000
     with _CPU_ACTIVE_LOCK:
         _CPU_ACTIVE[lane] += 1
         active = _CPU_ACTIVE[lane]

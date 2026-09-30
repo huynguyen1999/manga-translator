@@ -9,7 +9,8 @@ _REQUEST_MODEL = ContextVar("tokenharbor_request_model", default=None)
 
 class TokenHarborTranslator(DeepseekTranslator):
     FALLBACK_MODEL = "mimo-v2.6-flash:free"
-    MODEL_TIMEOUT_SECONDS = 60
+    MODEL_TIMEOUT_SECONDS = 300
+    _TIMEOUT = 300
 
     def __init__(self, check_openai_key=True, api_key=None, api_base=None, model=None, config_key=None):
         resolved_model = model or os.getenv("TOKEN_HARBOR_MODEL", "deepseek-v4.1-flash:free")
@@ -24,6 +25,7 @@ class TokenHarborTranslator(DeepseekTranslator):
             missing_key_msg="Please set TOKEN_HARBOR_API_KEY before using the Token Harbor translator.",
             fallback_to_openai_key=False,
         )
+        self._TIMEOUT = 300
 
     async def _request_translation(self, to_lang: str, prompt: str) -> str:
         return await super()._request_translation(to_lang, prompt, model=_REQUEST_MODEL.get())

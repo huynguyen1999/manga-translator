@@ -24,6 +24,7 @@ from .gemini_keys import GeminiRequestBudget, _CURRENT_RETRY_BUDGET
 from .custom_openai import CustomOpenAiTranslator
 from .openrouter import OpenRouterTranslator
 from .tokenharbor import TokenHarborTranslator
+from .dash import DashTranslator
 from .structured import translate_structured
 from .resource_lease import translation_resource_lease as _translation_resource_lease
 from ..config import Translator, TranslatorConfig, TranslatorChain
@@ -42,32 +43,30 @@ GPT_TRANSLATORS = {
     Translator.deepseek: DeepseekTranslator,
     Translator.groq: GroqTranslator,
     Translator.custom_openai: CustomOpenAiTranslator,
-    Translator.openrouter: OpenRouterTranslator, Translator.tokenharbor: TokenHarborTranslator,
+    Translator.openrouter: OpenRouterTranslator,
+    Translator.tokenharbor: TokenHarborTranslator,
+    Translator.dash: DashTranslator,
     Translator.gemini: GeminiTranslator,
 }
 
 
 TRANSLATORS = {
-    Translator.youdao: YoudaoTranslator,
-    Translator.baidu: BaiduTranslator,
-    Translator.deepl: DeeplTranslator,
-    Translator.caiyun: CaiyunTranslator,
-    Translator.none: NoneTranslator,
-    Translator.original: OriginalTranslator,
-    Translator.sakura: SakuraTranslator,
-    **GPT_TRANSLATORS,
-    **OFFLINE_TRANSLATORS,
+    Translator.youdao: YoudaoTranslator, Translator.baidu: BaiduTranslator,
+    Translator.deepl: DeeplTranslator, Translator.caiyun: CaiyunTranslator,
+    Translator.none: NoneTranslator, Translator.original: OriginalTranslator,
+    Translator.sakura: SakuraTranslator, **GPT_TRANSLATORS, **OFFLINE_TRANSLATORS,
 }
 translator_cache = {}
 _OFFLINE_TRANSLATOR_LOCK = threading.Lock()
 TRANSLATION_REQUEST_TIMEOUT_SECONDS = 60
 
 
-async def _wait_for_gpt_translation(operation, timeout=TRANSLATION_REQUEST_TIMEOUT_SECONDS):
+async def _wait_for_gpt_translation(operation, timeout=None):
+    effective_timeout = TRANSLATION_REQUEST_TIMEOUT_SECONDS if timeout is None else timeout
     try:
-        return await asyncio.wait_for(operation, timeout=timeout)
+        return await asyncio.wait_for(operation, timeout=effective_timeout)
     except asyncio.TimeoutError as exc:
-        raise TimeoutError(f"Translator request exceeded {timeout} seconds") from exc
+        raise TimeoutError(f"Translator request exceeded {effective_timeout} seconds") from exc
 
 def get_translator(key: Translator, *args, **kwargs) -> CommonTranslator:
     if key not in TRANSLATORS:
@@ -136,7 +135,7 @@ async def _dispatch_one(key, tgt_lang, queries, translator_config, use_mtpe, arg
             if translator_config:
                 translator.parse_args(translator_config)
             operation = _translate_with_context(key, translator, 'auto', tgt_lang, queries, use_mtpe, args)
-            translated = await (_wait_for_gpt_translation(operation, 125 if key == Translator.tokenharbor else TRANSLATION_REQUEST_TIMEOUT_SECONDS) if key in GPT_TRANSLATORS else operation)
+            translated = await (_wait_for_gpt_translation(operation, 605 if key == Translator.tokenharbor else TRANSLATION_REQUEST_TIMEOUT_SECONDS) if key in GPT_TRANSLATORS else operation)
             if args is not None:
                 if isinstance(translator, OfflineTranslator):
                     args['offline_model'] = getattr(translator, 'model_name', translator.__class__.__name__)

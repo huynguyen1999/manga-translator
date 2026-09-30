@@ -5,7 +5,7 @@
 - The default subagent model is `gpt-6-luna`, configured under `[agents]` in the user `config.toml`.
 - Use the named roles first: `researcher` and `browser_debugger` for bounded read-only investigation, `coder` for implementation and tests, and `reviewer` for read-only diff review.
 - Every delegation must pass an explicit named `agent_type` and use fresh context. With Multi-Agent V1, pass `fork_context=false`; with the current agent tool, pass `fork_turns="none"`. Prompts must be self-contained and bounded, with exact write scope and proof required. Keep concurrent write sets disjoint.
-- Installed Codex CLI 0.157.1 has no global `fork_turns` config setting; enforce fresh context at dispatch with `fork_turns="none"` and do not invent a TOML key.
+- Installed Codex CLI 0.159.0 has no global `fork_turns` config setting; enforce fresh context at dispatch with `fork_turns="none"` and do not invent a TOML key.
 - `browser_debugger` is read-only and uses Chrome DevTools MCP at `http://localhost:3000/mcp` with a 20-second startup timeout.
 - Pinned roles: `researcher`, `browser_debugger`, and `coder` use `gpt-6-luna`; `reviewer` remains on `gpt-5.6-terra`.
 - Dispatch only with an explicit named `agent_type` and fresh context; never use an unspecified, inherited, temporary, dynamic, or `executor_sol` worker. `executor_sol` is a legacy alias and must not be spawned.
@@ -14,6 +14,8 @@
 ## Repository memory
 
 - Read `repository-state/README.md` and `repository-state/CURRENT.md` before making substantial changes.
+- Treat `CURRENT.md` as the overview; open `CURRENT_DETAILS.md` only when the task needs subsystem detail.
+- Scope history reads to relevant entries: use `rg` on `BUGS.md` or `CHANGES.md`, then read matching entries. Read a full log only for a complete history audit.
 - Whenever a bug is found, record the symptom, root cause, fix, and prevention lesson in `repository-state/BUGS.md` so it is not repeated.
 - Whenever a feature is added or a large change is made, update `repository-state/CURRENT.md` and add a concise entry to `repository-state/CHANGES.md` in the same change, including the reason/rationale for why the change was made alongside what was changed.
 - Keep these notes factual and brief. Update existing entries instead of duplicating them.

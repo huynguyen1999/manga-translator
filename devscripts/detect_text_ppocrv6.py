@@ -30,6 +30,7 @@ import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_DIR = PROJECT_ROOT / "models" / "detection" / "ppocrv6"
+DEFAULT_REC_MODEL_DIR = PROJECT_ROOT / "models" / "recognition" / "ppocrv6"
 DEFAULT_SEG_MODEL_DIR = PROJECT_ROOT / "models" / "segmentation"
 DEFAULT_SEG_MODEL_PATH = DEFAULT_SEG_MODEL_DIR / "textseg.onnx"
 
@@ -47,6 +48,14 @@ MODEL_FILENAMES = {
     ("v0.1", "fp32"): "det/manga_det_v0.1.onnx",
     ("v0.1", "fp16"): "det/manga_det_v0.1_fp16.onnx",
 }
+
+REC_MODEL_FILENAMES = {
+    ("v0.2", "fp32"): "rec/manga_rec_v0.2.onnx",
+    ("v0.2", "fp16"): "rec/manga_rec_v0.2_fp16.onnx",
+    ("v0.1", "fp32"): "rec/manga_rec_v0.1.onnx",
+    ("v0.1", "fp16"): "rec/manga_rec_v0.1_fp16.onnx",
+}
+DICT_FILENAME = "ppocrv6_dict.txt"
 
 COLOR_SCHEMES: dict[str, dict[str, Any]] = {
     "cyan": {
@@ -175,6 +184,80 @@ def ensure_segmentation_model_file(model_path: Path | None = None) -> Path:
     print(f"[*] Fetching from {url} -> {target_path}")
     urllib.request.urlretrieve(url, target_path)
     print(f"[+] Successfully downloaded segmentation model ({target_path.stat().st_size / (1024 * 1024):.2f} MB)")
+    return target_path
+
+
+def ensure_recognition_model_file(model_path: Path | None = None, version: str = "v0.2", precision: str = "fp32") -> Path:
+    """Ensure the ONNX recognition model is downloaded and return its local path."""
+    if model_path is not None and model_path.is_file():
+        return model_path
+
+    key = (version, precision.lower())
+    if key not in REC_MODEL_FILENAMES:
+        key = ("v0.2", "fp32")
+
+    relative_filename = REC_MODEL_FILENAMES[key]
+    target_path = DEFAULT_REC_MODEL_DIR / Path(relative_filename).name
+
+    if target_path.is_file():
+        return target_path
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[*] PP-OCRv6_manga recognizer not found locally. Downloading {relative_filename}...")
+
+    try:
+        from huggingface_hub import hf_hub_download
+        downloaded = hf_hub_download(
+            repo_id=HF_REPO_ID,
+            filename=relative_filename,
+            local_dir=target_path.parent,
+        )
+        downloaded_path = Path(downloaded)
+        if downloaded_path != target_path and downloaded_path.is_file():
+            downloaded_path.rename(target_path)
+        print(f"[+] Downloaded recognizer model to {target_path}")
+        return target_path
+    except Exception as exc:
+        print(f"[*] huggingface_hub download not used ({exc}). Downloading via direct URL...", file=sys.stderr)
+
+    url = f"{HF_BASE_URL}/{relative_filename}"
+    print(f"[*] Fetching from {url} -> {target_path}")
+    urllib.request.urlretrieve(url, target_path)
+    print(f"[+] Successfully downloaded recognizer model ({target_path.stat().st_size / (1024 * 1024):.2f} MB)")
+    return target_path
+
+
+def ensure_dict_file(dict_path: Path | None = None) -> Path:
+    """Ensure the PP-OCRv6 dictionary file is downloaded and return its local path."""
+    if dict_path is not None and dict_path.is_file():
+        return dict_path
+
+    target_path = DEFAULT_REC_MODEL_DIR / DICT_FILENAME
+    if target_path.is_file():
+        return target_path
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[*] PP-OCRv6 dictionary not found locally. Downloading {DICT_FILENAME}...")
+
+    try:
+        from huggingface_hub import hf_hub_download
+        downloaded = hf_hub_download(
+            repo_id=HF_REPO_ID,
+            filename=DICT_FILENAME,
+            local_dir=target_path.parent,
+        )
+        downloaded_path = Path(downloaded)
+        if downloaded_path != target_path and downloaded_path.is_file():
+            downloaded_path.rename(target_path)
+        print(f"[+] Downloaded dictionary to {target_path}")
+        return target_path
+    except Exception as exc:
+        print(f"[*] huggingface_hub download not used ({exc}). Downloading via direct URL...", file=sys.stderr)
+
+    url = f"{HF_BASE_URL}/{DICT_FILENAME}"
+    print(f"[*] Fetching from {url} -> {target_path}")
+    urllib.request.urlretrieve(url, target_path)
+    print(f"[+] Successfully downloaded dictionary ({target_path.stat().st_size / 1024:.1f} KB)")
     return target_path
 
 
@@ -413,6 +496,81 @@ class PPOCRv6Detector:
             batch_detections.append(detections)
 
         return batch_detections, batch_masks
+
+
+class PPOCRv6Recognizer:
+    """PP-OCRv6_manga text recognition engine for Japanese and Chinese manga typography."""
+
+    def __init__(
+        self,
+        model_path: Path | None = None,
+        dict_path: Path | None = None,
+        version: str = "v0.2",
+        precision: str = "fp32",
+        device: str = "auto",
+    ):
+        self.model_path = ensure_recognition_model_file(model_path, version=version, precision=precision)
+        self.dict_path = ensure_dict_file(dict_path)
+        self.providers, self.device_desc = select_onnx_providers(device)
+        self.session = ort.InferenceSession(str(self.model_path), providers=self.providers)
+        self.input_name = self.session.get_inputs()[0].name
+        self.output_name = self.session.get_outputs()[0].name
+
+        with open(self.dict_path, encoding="utf-8") as f:
+            self.vocab = ["blank"] + [line.strip("\r\n") for line in f] + [" "]
+        print(f"[*] Loaded PP-OCRv6 Recognizer ({self.model_path.name}) with {len(self.vocab)} vocab entries on {self.device_desc}")
+
+    def recognize_crop(self, crop: np.ndarray) -> tuple[str, float]:
+        """Recognize a single cropped text region."""
+        if crop.size == 0 or crop.shape[0] < 3 or crop.shape[1] < 3:
+            return "", 0.0
+
+        # Rotate vertical text lines (manga reading flow) 90° CCW
+        if crop.shape[0] > crop.shape[1] * 1.15:
+            crop = cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        ch, cw = crop.shape[:2]
+        natural_w = int(round(48.0 * cw / max(1, ch)))
+        target_w = max(16, min(2400 if natural_w > 2000 else 640, natural_w))
+
+        c_inp = cv2.resize(crop, (target_w, 48)).astype(np.float32) / 255.0
+        c_inp = ((c_inp - 0.5) / 0.5).transpose((2, 0, 1))[np.newaxis, ...]
+
+        probs = self.session.run(None, {self.input_name: c_inp})[0][0]  # [T, V]
+        indices = np.argmax(probs, axis=-1)
+
+        char_list: list[str] = []
+        conf_list: list[float] = []
+        for i, idx in enumerate(indices):
+            if idx != 0 and (i == 0 or idx != indices[i - 1]):
+                if idx < len(self.vocab):
+                    char_list.append(self.vocab[idx])
+                    conf_list.append(float(probs[i, idx]))
+
+        text = "".join(char_list).strip()
+        score = float(np.mean(conf_list)) if conf_list else 0.0
+        return text, round(score, 3)
+
+    def recognize_detections(
+        self,
+        image_bgr: np.ndarray,
+        detections: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Run OCR on all detected bounding boxes in the image and attach recognized text."""
+        h, w = image_bgr.shape[:2]
+        for det in detections:
+            box = np.array(det.get("box") or det["polygon"], dtype=np.int32)
+            x1 = max(0, int(box[:, 0].min()))
+            y1 = max(0, int(box[:, 1].min()))
+            x2 = min(w, int(box[:, 0].max()))
+            y2 = min(h, int(box[:, 1].max()))
+
+            crop = image_bgr[y1:y2, x1:x2]
+            text, text_score = self.recognize_crop(crop)
+            det["text"] = text
+            det["rec_score"] = text_score
+
+        return detections
 
 
 def select_device_str(device: str = "auto") -> str:
@@ -1277,11 +1435,48 @@ def parse_arguments() -> argparse.Namespace:
         help="Suffix to append to output stroke overlay image filename.",
     )
 
+    # Text Recognition (OCR) Options
+    parser.add_argument(
+        "-r", "--rec", "--ocr", "--recognize",
+        dest="rec",
+        action="store_true",
+        help="Run PP-OCRv6 Japanese and Chinese text recognition (OCR) on detected text regions.",
+    )
+    parser.add_argument(
+        "--rec-version",
+        choices=["v0.2", "v0.1"],
+        default="v0.2",
+        help="PP-OCRv6 recognizer model version.",
+    )
+    parser.add_argument(
+        "--rec-precision",
+        choices=["fp32", "fp16"],
+        default="fp32",
+        help="Recognizer precision variant (FP32: 21.2 MB, FP16: 10.6 MB).",
+    )
+    parser.add_argument(
+        "--rec-model-path",
+        type=Path,
+        default=None,
+        help="Custom path to recognition ONNX model file.",
+    )
+    parser.add_argument(
+        "--rec-dict-path",
+        type=Path,
+        default=None,
+        help="Custom path to PP-OCRv6 dictionary file.",
+    )
+    parser.add_argument(
+        "--print-text",
+        action="store_true",
+        help="Print recognized OCR text lines directly to the terminal stdout.",
+    )
+
     # Extra output artifacts
     parser.add_argument(
         "--save-json", "--json",
         action="store_true",
-        help="Export structured detection JSON with coordinates and scores for each image.",
+        help="Export structured detection JSON with coordinates, scores, and recognized text for each image.",
     )
     parser.add_argument(
         "--save-heatmap",
@@ -1320,6 +1515,16 @@ def main():
     segmenter: MangaTextSegmenter | None = None
     if args.stroke_mask or args.stroke_overlay:
         segmenter = MangaTextSegmenter(device=args.device, method=args.stroke_method)
+
+    recognizer: PPOCRv6Recognizer | None = None
+    if args.rec:
+        recognizer = PPOCRv6Recognizer(
+            model_path=args.rec_model_path,
+            dict_path=args.rec_dict_path,
+            version=args.rec_version,
+            precision=args.rec_precision,
+            device=args.device,
+        )
 
     # 3. Setup output destination
     output_path = Path(args.output).expanduser()
@@ -1376,6 +1581,10 @@ def main():
         for img, img_path, detections, pred_map in zip(chunk_imgs, valid_paths, batch_detections, batch_masks):
             total_detections_count += len(detections)
             avg_score = float(np.mean([d["score"] for d in detections])) if detections else 0.0
+
+            # Run text recognition if requested
+            if recognizer is not None and detections:
+                recognizer.recognize_detections(img, detections)
 
             # Render overlay with polygon segmentation contours (or box if requested)
             overlay = render_overlay(
@@ -1452,8 +1661,19 @@ def main():
                     "num_detections": len(detections),
                     "detections": detections,
                 }
+                if recognizer is not None:
+                    meta["recognizer"] = f"PP-OCRv6_manga {args.rec_version} ({args.rec_precision})"
                 with open(json_dest, "w", encoding="utf-8") as jf:
                     json.dump(meta, jf, indent=2, ensure_ascii=False)
+
+            if (args.print_text or args.rec) and detections:
+                print(f"\n[OCR Text] {img_path.name} ({len(detections)} lines):")
+                for line_idx, det in enumerate(detections, start=1):
+                    txt = det.get("text", "")
+                    r_sc = det.get("rec_score", 0.0)
+                    if txt:
+                        print(f"  #{line_idx:02d} [score {r_sc:.2f}]: {txt}")
+                print()
 
             if args.save_crops and detections:
                 crop_dir = parent_dir / "crops" / img_path.stem

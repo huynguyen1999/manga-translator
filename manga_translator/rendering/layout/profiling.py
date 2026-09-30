@@ -1,20 +1,13 @@
 """Per-layout profiling and content tracing for the layout solver."""
-
 from __future__ import annotations
-
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
-
 import numpy as np
-
 from ...utils import resolve_render_content
 from .regions import prepare_regions as _ensure_region_identities
-
-
 def _render_text(region: Any) -> str:
     return str(resolve_render_content(region) or "")
-
 
 def _record_content_trace(regions: Optional[List[Any]], stage: str) -> None:
     _ensure_region_identities(regions)
@@ -54,10 +47,13 @@ def _record_content_trace(regions: Optional[List[Any]], stage: str) -> None:
             "has_free_text_zone": getattr(region, "_free_text_zone", None) is not None,
         })
 
-
 @dataclass
 class SolverProfileStats:
     """Fine-grained, layout-local timing and workload counters."""
+    attempted_font_sizes: List[int] = field(default_factory=list)
+    compositor_cache_hits: int = 0
+    compositor_cache_misses: int = 0
+    compositor_crops: Dict[Tuple[Any, ...], Any] = field(default_factory=dict, repr=False)
     fonts_tested: int = 0
     spacing_tested: int = 0
     y_origins_tested: int = 0
@@ -129,6 +125,7 @@ class SolverProfileStats:
     safe_zone_edge_counts: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]] = field(default_factory=dict, repr=False)
 
     def clear_ephemeral_caches(self) -> None:
+        self.compositor_crops.clear()
         self.row_slot_tables.clear()
         self.row_slot_max_widths.clear()
         self.placement_targets.clear()
@@ -136,8 +133,14 @@ class SolverProfileStats:
         self.safe_zone_edge_counts.clear()
 
     def to_dict(self) -> Dict[str, Any]:
+        from .search_budget import get_search_budget
+        budget = get_search_budget()
         return {
+            "search": budget.to_dict() if budget else {},
+            "attempted_font_sizes": list(self.attempted_font_sizes),
             "workload": {
+                "compositor_cache_hits": self.compositor_cache_hits,
+                "compositor_cache_misses": self.compositor_cache_misses,
                 "fonts_tested": self.fonts_tested,
                 "spacing_tested": self.spacing_tested,
                 "y_origins_tested": self.y_origins_tested,
@@ -204,9 +207,7 @@ class SolverProfileStats:
             }
         }
 
-
 _SOLVER_PROFILE: ContextVar[Optional[SolverProfileStats]] = ContextVar("solver_profile", default=None)
-
 
 def get_solver_profile() -> SolverProfileStats:
     profile = _SOLVER_PROFILE.get()
@@ -214,7 +215,6 @@ def get_solver_profile() -> SolverProfileStats:
         profile = SolverProfileStats()
         _SOLVER_PROFILE.set(profile)
     return profile
-
 
 def reset_solver_profile() -> SolverProfileStats:
     profile = SolverProfileStats()

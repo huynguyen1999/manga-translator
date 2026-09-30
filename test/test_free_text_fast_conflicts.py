@@ -42,6 +42,19 @@ def test_fast_vs_exhaustive_reruns_only_fast_region():
         assert _free_text_fast_conflict_regions(regions, plans, (40, 40)) == {id(fast)}
 
 
+def test_local_pool_reruns_only_when_every_validated_choice_conflicts():
+    local, exhaustive = _region_at(0, "free_text_local"), _region_at(0, "free_text")
+    alternative = _region_at(30, "free_text_local").candidate
+    regions = [local, exhaustive]
+    plans = {id(local): [local.candidate, alternative], id(exhaustive): [exhaustive.candidate]}
+    with patch("manga_translator.rendering.layout.solver._candidate_data", side_effect=_data):
+        assert _free_text_fast_conflict_regions(regions, plans, (40, 40)) == set()
+
+    alternative.x = 1
+    with patch("manga_translator.rendering.layout.solver._candidate_data", side_effect=_data):
+        assert _free_text_fast_conflict_regions(regions, plans, (40, 40)) == {id(local)}
+
+
 def test_exhaustive_conflict_keeps_existing_deeper_rerun():
     first, second = _region_at(0, "free_text"), _region_at(6, "free_text")
     regions = [first, second]

@@ -295,6 +295,111 @@ class TestSummaryScheduler(unittest.IsolatedAsyncioTestCase):
         job = load_summary(self.root, "ReadySeries")
         self.assertEqual(job["jobStatus"], "ready")
 
+    async def test_scheduler_picks_up_next_job_when_first_job_reaches_summarizing_stage(self):
+        self._create_page("page_1", "Series1", "1.png")
+        self._create_page("page_2", "Series2", "2.png")
+
+        update_summary_job(self.root, "Series1", "queued", provider="deepseek", model="deepseek-flash")
+        update_summary_job(self.root, "Series2", "queued", provider="gemini", model="gemini-3.1-flash-lite")
+
+        job1_reached_llm = asyncio.Event()
+        job1_can_finish = asyncio.Event()
+        job2_started = asyncio.Event()
+        scheduler_ref = None
+
+        async def fake_run_task(request, data, store, group_value, clean_title, worker=None, pause_event=None):
+            if clean_title == "Series1":
+                update_summary_job(self.root, clean_title, "generating", stage="summarizing", progress=85)
+                # Notify scheduler that Job 1 has entered the LLM / summarizing stage
+                scheduler_ref.release_extraction(group_value, clean_title)
+                job1_reached_llm.set()
+                # Wait until Job 2 has started before completing Job 1
+                await job1_can_finish.wait()
+                update_summary_job(self.root, clean_title, "ready", stage="complete", progress=100)
+            elif clean_title == "Series2":
+                job2_started.set()
+                update_summary_job(self.root, clean_title, "ready", stage="complete", progress=100)
+
+        scheduler = SummaryScheduler(
+            store_getter=lambda: None,
+            controller=self.controller,
+            run_task_fn=fake_run_task,
+            request_cls=MangaSummaryRequest,
+            result_root=self.root,
+            max_concurrent=1,
+            max_concurrent_total=8,
+        )
+        scheduler_ref = scheduler
+
+        await scheduler.start()
+
+        # Job 1 starts and reaches the summarizing stage
+        await asyncio.wait_for(job1_reached_llm.wait(), timeout=2.0)
+
+        # Because Job 1 released extraction, Job 2 must be picked up even while Job 1 is still generating synopsis
+        await asyncio.wait_for(job2_started.wait(), timeout=2.0)
+        self.assertTrue(job2_started.is_set())
+
+        # Allow Job 1 to finish
+        job1_can_finish.set()
+
+        for _ in range(50):
+            job1 = load_summary(self.root, "Series1")
+            job2 = load_summary(self.root, "Series2")
+            if job1.get("jobStatus") == "ready" and job2.get("jobStatus") == "ready":
+                break
+            await asyncio.sleep(0.05)
+
+        await scheduler.stop()
+
+        self.assertEqual(job1["jobStatus"], "ready")
+        self.assertEqual(job2["jobStatus"], "ready")
+
+    async def test_scheduler_picks_up_next_job_with_distinct_group_id_and_title(self):
+        job1_reached_llm = asyncio.Event()
+        job1_can_finish = asyncio.Event()
+        job2_started = asyncio.Event()
+        scheduler_ref = None
+
+        mock_store = AsyncMock()
+        mock_store.list_runnable_summary_jobs = AsyncMock(return_value=[
+            {"groupId": "uuid-1", "title": "Series One", "provider": "tokenharbor", "model": "qwen/qwen3.8-27b:free", "status": "queued"},
+            {"groupId": "uuid-2", "title": "Series Two", "provider": "dash", "model": "deepseek-v3", "status": "queued"},
+        ])
+
+        async def fake_run_task(request, data, store, group_value, clean_title, worker=None, pause_event=None):
+            if group_value == "uuid-1":
+                # First job enters the final LLM synopsis step and releases extraction
+                scheduler_ref.release_extraction(group_value, clean_title)
+                job1_reached_llm.set()
+                await job1_can_finish.wait()
+            elif group_value == "uuid-2":
+                job2_started.set()
+
+        scheduler = SummaryScheduler(
+            store_getter=lambda: mock_store,
+            controller=self.controller,
+            run_task_fn=fake_run_task,
+            request_cls=MangaSummaryRequest,
+            result_root=self.root,
+            max_concurrent=1,
+            max_concurrent_total=8,
+        )
+        scheduler_ref = scheduler
+
+        await scheduler.start()
+
+        # Job 1 starts and reaches LLM synopsis step
+        await asyncio.wait_for(job1_reached_llm.wait(), timeout=2.0)
+
+        # Job 2 should be picked up while Job 1 is still in LLM synopsis step
+        await asyncio.wait_for(job2_started.wait(), timeout=2.0)
+        self.assertTrue(job2_started.is_set())
+
+        # Cleanup
+        job1_can_finish.set()
+        await scheduler.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

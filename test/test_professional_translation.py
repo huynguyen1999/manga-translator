@@ -11,9 +11,33 @@ from manga_translator.professional_translation import (
     translate_professionally,
     _json_object,
 )
+from manga_translator.professional_prompts import (
+    build_analysis_consolidation_prompt,
+    build_analysis_prompt,
+    build_synopsis_system_prompt,
+    build_translation_prompt,
+)
 
 
 class ProfessionalTranslationTest(unittest.IsolatedAsyncioTestCase):
+    def test_non_graphic_summary_policy_does_not_sanitize_translations(self):
+        summary_prompts = (
+            build_analysis_prompt("source", [], False),
+            build_analysis_consolidation_prompt("Keep the supplied ranges.", []),
+            build_synopsis_system_prompt("Create a synopsis.", "ENG"),
+        )
+        for prompt in summary_prompts:
+            self.assertIn("NON-GRAPHIC METADATA POLICY", prompt)
+            self.assertIn("who initiated it", prompt)
+            self.assertIn("whether it was consensual or coercive", prompt)
+            self.assertIn("bodily-fluid descriptions", prompt)
+            self.assertIn("he makes a crude proposition", prompt)
+
+        translation_prompt = build_translation_prompt([], "guide", "")
+        self.assertNotIn("NON-GRAPHIC METADATA POLICY", translation_prompt)
+        self.assertIn("explicitness, profanity, power dynamics, and consent or coercion signals", translation_prompt)
+        self.assertIn("Do not add context, sanitize, moralize, summarize", translation_prompt)
+
     async def test_provider_request_holds_and_releases_network_lease(self):
         events = []
 

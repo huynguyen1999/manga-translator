@@ -75,8 +75,12 @@ async def execute_retry_stage(
             raise RuntimeError(f"Stage {stage_id} was not marked running before batched inference")
     else:
         stage["status"] = "running"
-    stage["startedAt"] = _now()
-    run.started[stage_id] = time.monotonic()
+        stage["startedAt"] = _now()
+        run.started[stage_id] = time.monotonic()
+    if stage_id not in run.started:
+        run.started[stage_id] = time.monotonic()
+    if not stage.get("startedAt"):
+        stage["startedAt"] = _now()
     run._memory_begin(stage_id)
     run.refresh()
 
@@ -153,12 +157,10 @@ async def execute_retry_stage(
             ctx.text_regions = await translator._run_textline_merge(config, ctx)
             bubble_data = run._document("bubble_detections.json")
             if bubble_data is not None:
-                from ..detection.bubble import deserialize_bubble_detections
+                from ..detection.bubble_state import restore_bubble_detections
                 from ..rendering.bubble_layout import group_regions_by_bubbles
 
-                ctx.bubble_detections = deserialize_bubble_detections(
-                    bubble_data, ctx.img_rgb.shape
-                )
+                restore_bubble_detections(ctx, bubble_data, ctx.img_rgb.shape)
                 ctx.text_regions = group_regions_by_bubbles(
                     ctx.text_regions,
                     ctx.bubble_detections,
@@ -217,10 +219,10 @@ async def execute_retry_stage(
                 raise RuntimeError("No text regions available for translation")
             bubble_data = run._document("bubble_detections.json")
             if bubble_data is not None and ctx.img_rgb is not None:
-                from ..detection.bubble import deserialize_bubble_detections
+                from ..detection.bubble_state import restore_bubble_detections
                 from ..rendering.bubble_layout import restore_bubble_assignments
 
-                ctx.bubble_detections = deserialize_bubble_detections(bubble_data, ctx.img_rgb.shape)
+                restore_bubble_detections(ctx, bubble_data, ctx.img_rgb.shape)
                 if ctx.bubble_detections:
                     restore_bubble_assignments(ctx.text_regions, ctx.bubble_detections)
             panel_data = run._document("panel_detections.json")
@@ -260,11 +262,9 @@ async def execute_retry_stage(
             if not getattr(ctx, "bubble_detections", None):
                 bubble_data = run._document("bubble_detections.json")
                 if bubble_data is not None:
-                    from ..detection.bubble import deserialize_bubble_detections
+                    from ..detection.bubble_state import restore_bubble_detections
 
-                    ctx.bubble_detections = deserialize_bubble_detections(
-                        bubble_data, ctx.img_rgb.shape
-                    )
+                    restore_bubble_detections(ctx, bubble_data, ctx.img_rgb.shape)
             bundle = await run_cpu_stage(
                 build_inpaint_masks,
                 image=ctx.img_rgb,
@@ -313,13 +313,12 @@ async def execute_retry_stage(
                 raise RuntimeError("No text regions available for layout")
             bubble_data = run._document("bubble_detections.json")
             if bubble_data is not None:
-                from ..detection.bubble import deserialize_bubble_detections
+                from ..detection.bubble_state import restore_bubble_detections
                 from ..rendering.bubble_layout import restore_bubble_assignments
 
-                ctx.bubble_detections = deserialize_bubble_detections(bubble_data, ctx.img_rgb.shape)
+                restore_bubble_detections(ctx, bubble_data, ctx.img_rgb.shape)
                 if ctx.bubble_detections:
                     restore_bubble_assignments(ctx.text_regions, ctx.bubble_detections)
-                ctx._bubble_detection_done = True
             else:
                 bubble_data = []
             transform = getattr(getattr(config, "render", None), "transform_text_case", None)
@@ -391,13 +390,12 @@ async def execute_retry_stage(
             if layout_data is not None:
                 bubble_data = run._document("bubble_detections.json")
                 if bubble_data is not None:
-                    from ..detection.bubble import deserialize_bubble_detections
+                    from ..detection.bubble_state import restore_bubble_detections
                     from ..rendering.bubble_layout import restore_bubble_assignments
 
-                    ctx.bubble_detections = deserialize_bubble_detections(bubble_data, ctx.img_rgb.shape)
+                    restore_bubble_detections(ctx, bubble_data, ctx.img_rgb.shape)
                     if ctx.bubble_detections:
                         restore_bubble_assignments(ctx.text_regions or [], ctx.bubble_detections)
-                    ctx._bubble_detection_done = True
                 else:
                     bubble_data = []
                 font_path = (

@@ -29,17 +29,19 @@ export const languageOptions = [
 
 export const summaryModelOptions = [
   { value: "deepseek-flash", label: "DeepSeek Flash" },
+  { value: "dash", label: "Dash LLM (DeepSeek)" },
   { value: "groq", label: "Groq" },
   { value: "gemini", label: "Google Gemini" },
+  { value: "openrouter", label: "OpenRouter (Free Models)" },
   { value: "tokenharbor", label: "Token Harbor (Free Models)" },
 ];
 
 export const storyAnalysisModelOptions = [
   { value: "", label: "Auto (Same as Translation Engine)" },
-  { value: "deepseek", label: "DeepSeek" }, { value: "gemini", label: "Google Gemini" },
-  { value: "openai", label: "OpenAI GPT" }, { value: "claude", label: "Claude" },
-  { value: "groq", label: "Groq" }, { value: "openrouter", label: "OpenRouter" },
-  { value: "tokenharbor", label: "Token Harbor" },
+  { value: "deepseek", label: "DeepSeek" }, { value: "dash", label: "Dash LLM (DeepSeek)" },
+  { value: "gemini", label: "Google Gemini" }, { value: "openai", label: "OpenAI GPT" },
+  { value: "claude", label: "Claude" }, { value: "groq", label: "Groq" },
+  { value: "openrouter", label: "OpenRouter" }, { value: "tokenharbor", label: "Token Harbor" },
   { value: "sakura", label: "Sakura" }, { value: "custom_openai", label: "Custom OpenAI (Local/Ollama)" },
 ];
 
@@ -53,7 +55,7 @@ export const textDetectorOptions = [
 
 export const ocrOptions = [
   { value: "32px", label: "32px" }, { value: "48px", label: "48px (recommended)" },
-  { value: "48px_ctc", label: "48px CTC" }, { value: "mocr", label: "Manga OCR" },
+  { value: "48px_ctc", label: "48px CTC" }, { value: "mocr", label: "Manga OCR" }, { value: "ppocrv6", label: "PP-OCRv6 Small Manga" },
 ];
 
 export const inpainterOptions = [
@@ -84,14 +86,10 @@ export const upscaleRatioOptions = [
 ];
 
 export const fontOptions = [
-  { value: "wildwords", label: "Wild Words (Default Manga Lettering)" },
-  { value: "anime_ace", label: "Anime Ace" },
-  { value: "anime_ace_3", label: "Anime Ace 3" },
-  { value: "comic_shanns", label: "Comic Shanns" },
-  { value: "arial_unicode", label: "Arial Unicode (CJK Multilingual)" },
-  { value: "noto_sans", label: "Noto Sans CJK" },
-  { value: "msgothic", label: "MS Gothic (Japanese)" },
-  { value: "msyh", label: "MS YaHei (Chinese)" },
+  { value: "wildwords", label: "Wild Words (Default Manga Lettering)" }, { value: "anime_ace", label: "Anime Ace" },
+  { value: "anime_ace_3", label: "Anime Ace 3" }, { value: "comic_shanns", label: "Comic Shanns" },
+  { value: "arial_unicode", label: "Arial Unicode (CJK Multilingual)" }, { value: "noto_sans", label: "Noto Sans CJK" },
+  { value: "msgothic", label: "MS Gothic (Japanese)" }, { value: "msyh", label: "MS YaHei (Chinese)" },
 ];
 
 export const imageMimeTypes = ["image/png", "image/jpeg", "image/bmp", "image/webp"];
