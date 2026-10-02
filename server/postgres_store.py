@@ -409,8 +409,8 @@ class PostgresStore:
     async def page_detail(self, record_id: str) -> dict[str, Any] | None:
         return await self._manga_repository.page_detail(record_id)
 
-    async def group_pages(self, title: str) -> list[dict[str, Any]]:
-        return await self._manga_repository.group_pages(title)
+    async def group_pages(self, title: str, *, folders: list[str] | None = None) -> list[dict[str, Any]]:
+        return await self._manga_repository.group_pages(title, folders=folders)
 
     async def export_pages(
         self, title: str, folders: list[str] | None = None, *, original: bool = False

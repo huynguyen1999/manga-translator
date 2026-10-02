@@ -1,0 +1,13 @@
+{
+  "environment": {"platform": "macOS local workstation", "python": "3.13.15", "database": "filesystem-backed", "http": "FastAPI TestClient in-process; no network transfer"},
+  "workload": {"source_fixture": "test/fixtures/bubbles/two_columns.png", "source_dimensions": [270, 465], "uploaded_dimensions": [1280, 2204], "uploaded_format": "PNG", "uploaded_bytes_per_page": 538852, "pages_per_job": [1, 10], "runs_per_size_per_path": 3, "image_generation": "fixture resized once with Pillow LANCZOS; identical image bytes repeated under distinct page names"},
+  "measurements": [
+    {"pages": 1, "run": 1, "legacy_http_to_gallery_ms": 150.13, "queued_http_to_durable_accept_ms": 3.8, "queued_accept_to_indexed_ms": 151.0, "queued_http_plus_processing_ms": 154.8},
+    {"pages": 1, "run": 2, "legacy_http_to_gallery_ms": 138.14, "queued_http_to_durable_accept_ms": 3.61, "queued_accept_to_indexed_ms": 153.35, "queued_http_plus_processing_ms": 156.96},
+    {"pages": 1, "run": 3, "legacy_http_to_gallery_ms": 140.64, "queued_http_to_durable_accept_ms": 4.37, "queued_accept_to_indexed_ms": 159.1, "queued_http_plus_processing_ms": 163.47},
+    {"pages": 10, "run": 1, "legacy_http_to_gallery_ms": 1530.23, "queued_http_to_durable_accept_ms": 14.36, "queued_accept_to_indexed_ms": 1456.18, "queued_http_plus_processing_ms": 1470.55},
+    {"pages": 10, "run": 2, "legacy_http_to_gallery_ms": 1403.43, "queued_http_to_durable_accept_ms": 13.57, "queued_accept_to_indexed_ms": 1435.08, "queued_http_plus_processing_ms": 1448.64},
+    {"pages": 10, "run": 3, "legacy_http_to_gallery_ms": 1398.83, "queued_http_to_durable_accept_ms": 14.65, "queued_accept_to_indexed_ms": 1427.75, "queued_http_plus_processing_ms": 1442.4}
+  ],
+  "medians_ms": {"1": {"legacy_http_to_gallery_ms": 140.64, "queued_http_to_durable_accept_ms": 3.8, "queued_accept_to_indexed_ms": 153.35, "queued_http_plus_processing_ms": 156.96}, "10": {"legacy_http_to_gallery_ms": 1403.43, "queued_http_to_durable_accept_ms": 14.36, "queued_accept_to_indexed_ms": 1435.08, "queued_http_plus_processing_ms": 1448.64}}
+}

@@ -9,7 +9,27 @@ from typing import Any, BinaryIO
 
 from fastapi import HTTPException, UploadFile
 from PIL import Image, ImageFile, ImageOps
-from server.original_import_writer import write_original_import
+from server.original_import_writer import write_original_import as _write_original_import_impl
+
+
+def write_original_import(
+    title: str,
+    pages: Iterable[tuple[str, str, bytes, bytes, str]],
+    group_id: str | None = None,
+    *,
+    result_root: Path,
+    logger,
+    save_jpeg: Callable[..., Any],
+) -> dict:
+    """Keep the legacy writer signature while delegating its implementation."""
+    return _write_original_import_impl(
+        title,
+        pages,
+        group_id,
+        result_root=result_root,
+        logger=logger,
+        save_jpeg=save_jpeg,
+    )
 
 
 def validate_original_upload(

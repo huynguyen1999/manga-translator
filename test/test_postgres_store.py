@@ -220,8 +220,10 @@ class PostgresStoreGroupsTest(unittest.IsolatedAsyncioTestCase):
             "group_title": "Current title",
         }]))
         with patch.object(database, "resolve_group_id", new_callable=AsyncMock, return_value="current-group"):
-            page = (await database.group_pages("current-group"))[0]
+            page = (await database.group_pages("current-group", folders=["page-folder"]))[0]
 
+        self.assertIn("p.folder=ANY($2::text[])", database.pool.fetch.await_args.args[0])
+        self.assertEqual(database.pool.fetch.await_args.args[2], ["page-folder"])
         self.assertEqual(page["groupId"], "current-group")
         self.assertEqual(page["mangaTitle"], "Current title")
         self.assertEqual(page["meta"]["mangaGroupId"], "current-group")

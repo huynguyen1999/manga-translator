@@ -301,7 +301,7 @@ class MangaRepository:
             record_id,
         )
         return self._store._page_item(row) if row else None
-    async def group_pages(self, title: str) -> list[dict[str, Any]]:
+    async def group_pages(self, title: str, *, folders: list[str] | None = None) -> list[dict[str, Any]]:
         if self.pool is None:
             raise RuntimeError("PostgreSQL store is not started")
         group_id = await self.resolve_group_id(title)
@@ -312,8 +312,10 @@ class MangaRepository:
                FROM pages p
                JOIN manga_groups g ON g.id=p.manga_group_id
                WHERE p.active AND p.manga_group_id=$1
+                 AND ($2::text[] IS NULL OR p.folder=ANY($2::text[]))
                ORDER BY p.page_order, p.original_sort_key, p.folder""",
             group_id,
+            folders,
         )
         pages = []
         for row in rows:

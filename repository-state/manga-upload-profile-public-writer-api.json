@@ -1,0 +1,17 @@
+{
+  "environment": {"python": "3.13.15", "database": "filesystem-backed", "http": "FastAPI TestClient in-process; no network transfer", "platform": "macOS local workstation"},
+  "workload": {"fixture": "test/fixtures/bubbles/two_columns.png (270x465) resized once to 1280x2204 LANCZOS", "uploaded_format": "PNG", "bytes_per_page": 538852, "pages_per_import": [1, 10], "runs_per_writer_and_size": 5, "writer_difference": "base commit 01bb894 encodes normalized pixels separately into input.jpg and final.jpg; candidate encodes input.jpg once and copies identical JPEG bytes to final.jpg"},
+  "measurements": [
+    {"pages": 1, "run": 1, "baseline_double_encode_http_to_gallery_ms": 170.9, "candidate_encode_once_http_to_gallery_ms": 141.66, "order": ["baseline", "candidate"]},
+    {"pages": 1, "run": 2, "baseline_double_encode_http_to_gallery_ms": 164.79, "candidate_encode_once_http_to_gallery_ms": 144.47, "order": ["candidate", "baseline"]},
+    {"pages": 1, "run": 3, "baseline_double_encode_http_to_gallery_ms": 159.68, "candidate_encode_once_http_to_gallery_ms": 138.9, "order": ["baseline", "candidate"]},
+    {"pages": 1, "run": 4, "baseline_double_encode_http_to_gallery_ms": 158.09, "candidate_encode_once_http_to_gallery_ms": 140.76, "order": ["candidate", "baseline"]},
+    {"pages": 1, "run": 5, "baseline_double_encode_http_to_gallery_ms": 157.79, "candidate_encode_once_http_to_gallery_ms": 139.66, "order": ["baseline", "candidate"]},
+    {"pages": 10, "run": 1, "baseline_double_encode_http_to_gallery_ms": 1539.45, "candidate_encode_once_http_to_gallery_ms": 1380.4, "order": ["baseline", "candidate"]},
+    {"pages": 10, "run": 2, "baseline_double_encode_http_to_gallery_ms": 1552.05, "candidate_encode_once_http_to_gallery_ms": 1377.04, "order": ["candidate", "baseline"]},
+    {"pages": 10, "run": 3, "baseline_double_encode_http_to_gallery_ms": 1562.64, "candidate_encode_once_http_to_gallery_ms": 1392.45, "order": ["baseline", "candidate"]},
+    {"pages": 10, "run": 4, "baseline_double_encode_http_to_gallery_ms": 1557.37, "candidate_encode_once_http_to_gallery_ms": 1393.82, "order": ["candidate", "baseline"]},
+    {"pages": 10, "run": 5, "baseline_double_encode_http_to_gallery_ms": 1555.62, "candidate_encode_once_http_to_gallery_ms": 1391.93, "order": ["baseline", "candidate"]}
+  ],
+  "medians_ms": {"1": {"baseline_double_encode_http_to_gallery_ms": 159.68, "candidate_encode_once_http_to_gallery_ms": 140.76}, "10": {"baseline_double_encode_http_to_gallery_ms": 1555.62, "candidate_encode_once_http_to_gallery_ms": 1391.93}}
+}

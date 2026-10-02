@@ -68,7 +68,7 @@ async def run_manga_import_queue(queue):
                     continue
                 try:
                     async def update_progress(processed: int, total: int | None = None, phase: str | None = None):
-                        current = await queue.store.get(job["id"])
+                        current = await queue.store.get(job["id"], include_items=False)
                         current["processedPages"] = processed
                         if total is not None:
                             current["totalPages"] = total
@@ -80,12 +80,13 @@ async def run_manga_import_queue(queue):
                     result = await queue.processor(
                         job, queue.store.stage_path(job["id"]), update_progress
                     )
-                    current = await queue.store.get(job["id"])
+                    current = await queue.store.get(job["id"], include_items=False)
                     total = int(result.get("totalPages", current.get("totalPages") or 0))
                     current.update(
                         status="completed", completedAt=_now_ms(), processedPages=total,
                         totalPages=total, progress=100, error=None,
-                        group=result.get("group"), items=result.get("items", []),
+                        group=result.get("group"),
+                        items=result.get("items", []),
                         groupId=(result.get("group") or {}).get("id"),
                         totalImages=result.get("totalImages"),
                     )
@@ -101,7 +102,7 @@ async def run_manga_import_queue(queue):
                         )
                 except Exception as error:
                     queue.logger.exception("Manga import job failed: id=%s", job["id"])
-                    current = await queue.store.get(job["id"])
+                    current = await queue.store.get(job["id"], include_items=False)
                     detail = getattr(error, "detail", None)
                     current.update(status="failed", error=str(detail or error), completedAt=None)
                     await queue.store.update(current)

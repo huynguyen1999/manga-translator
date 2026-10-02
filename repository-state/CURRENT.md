@@ -11,7 +11,7 @@ Manga Image Translator is a Python translation and image-rendering pipeline with
 - OCR grouping, free-text coalescing, layout ownership, hard placement constraints, and final raster validation are contractual. Update [LAYOUT_AND_TEXT_MERGE_RULES.md](LAYOUT_AND_TEXT_MERGE_RULES.md) and characterization tests together when changing them.
 - Layout performance limits and validated measurements are in [LAYOUT_PERFORMANCE.md](LAYOUT_PERFORMANCE.md). Do not change placement quality rules as part of performance-only work.
 - `server.main` and existing translation/rendering modules retain compatibility surfaces for extracted implementations.
-- Original manga uploads stage files under `BATCH_ROOT/manga-import-jobs` and use a separate durable FIFO queue in PostgreSQL or filesystem mode. One import runs at a time; completion follows gallery indexing. Failed imports keep staged files for retry, while translation and summary schedulers remain independent.
+- Original manga uploads stage files under `BATCH_ROOT/manga-import-jobs` and use a separate durable FIFO queue in PostgreSQL or filesystem mode. One import runs at a time; completion follows gallery indexing. Failed imports keep staged files for retry, completed page details include all pages from that job and stay separate from compact job records, and translation and summary schedulers remain independent.
 
 ## Working memory
 

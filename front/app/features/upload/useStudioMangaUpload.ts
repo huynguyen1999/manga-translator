@@ -12,6 +12,7 @@ import {
   dismissMangaImportJobRequest,
   fetchMangaImportJobs,
   importOriginalManga,
+  type MangaImportJobWatcher,
   retryMangaImportJobRequest,
   upsertMangaImportJob,
   watchMangaImportJobs,
@@ -68,6 +69,7 @@ export const useStudioMangaUpload = ({
 }: StudioMangaUploadOptions) => {
   const jobsRef = useRef(new Map<string, MangaImportJobStatus>());
   const refreshRequestRef = useRef<Promise<MangaImportJob[]> | null>(null);
+  const jobWatcherRef = useRef<MangaImportJobWatcher | null>(null);
 
   const refreshMangaImportJobs = useCallback((): Promise<MangaImportJob[]> => {
     if (refreshRequestRef.current) return refreshRequestRef.current;
@@ -94,15 +96,21 @@ export const useStudioMangaUpload = ({
   }, [loadMangaSummaries, setMangaImportJobs, setStudioMangaUploadWarning]);
 
   useEffect(() => {
-    const refresh = () => {
-      void refreshMangaImportJobs().catch((error) => console.warn("Failed to load manga imports:", error));
+    const refresh = () => refreshMangaImportJobs().catch((error) => {
+      console.warn("Failed to load manga imports:", error);
+      throw error;
+    });
+    const watcher = watchMangaImportJobs(refresh, window, document);
+    jobWatcherRef.current = watcher;
+    return () => {
+      watcher.stop();
+      if (jobWatcherRef.current === watcher) jobWatcherRef.current = null;
     };
-    return watchMangaImportJobs(refresh, window, document);
   }, [refreshMangaImportJobs]);
 
   const retryMangaImportJob = useCallback(async (id: string) => {
     await retryMangaImportJobRequest(id);
-    await refreshMangaImportJobs();
+    await (jobWatcherRef.current?.refresh() ?? refreshMangaImportJobs());
   }, [refreshMangaImportJobs]);
 
   const dismissMangaImportJob = useCallback(async (id: string) => {
@@ -186,7 +194,9 @@ export const useStudioMangaUpload = ({
         );
         upsertMangaImportJob(setMangaImportJobs, job);
         setTranslationBatches((prev) => prev.filter((candidate) => candidate.id !== uploadBatch.id));
-        void refreshMangaImportJobs().catch((error) => console.warn("Failed to refresh manga imports:", error));
+        void (jobWatcherRef.current?.refresh() ?? refreshMangaImportJobs()).catch((error) =>
+          console.warn("Failed to refresh manga imports:", error)
+        );
       } catch (error) {
         if (errorStatus(error) === 409) {
           setStudioMangaUploadWarning(

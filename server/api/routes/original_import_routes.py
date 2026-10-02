@@ -190,6 +190,24 @@ def create_manga_import_job_processor(
     warm_preview_variants: Callable[[list[str]], Any],
     logger: Any,
 ) -> Callable[..., Any]:
+    def public_page_detail(page: dict[str, Any]) -> dict[str, Any]:
+        metadata = page.get("meta")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        values = {
+            "id": page.get("id"),
+            "folder": page.get("folder"),
+            "originalName": page.get("originalName") or page.get("name"),
+            "pageOrder": page.get("pageOrder") or metadata.get("pageOrder"),
+            "sourcePath": page.get("sourcePath") or metadata.get("sourcePath"),
+            "groupId": page.get("groupId") or metadata.get("groupId") or metadata.get("mangaGroupId"),
+            "mangaTitle": page.get("mangaTitle") or metadata.get("mangaTitle"),
+            "sourceType": page.get("sourceType") or metadata.get("sourceType"),
+        }
+        return {
+            key: value for key, value in values.items()
+            if isinstance(value, (str, int, float, bool))
+        }
+
     async def process_manga_import_job(job: dict[str, Any], staged_dir: Path, update_progress):
         async with _original_import_lock:
             clean_title = job["title"]
@@ -250,7 +268,9 @@ def create_manga_import_job_processor(
                     groups_payload = await store.list_groups(limit=1, manga_id=target_group_id)
                     if not groups_payload["groups"]:
                         groups_payload = await store.list_groups(limit=1, search=clean_title)
-                    pages_payload = await store.list_results(manga=clean_title, limit=500)
+                    items = await store.group_pages(
+                        target_group_id, folders=[record["folder"] for record in records]
+                    )
                 else:
                     result_root = get_result_root()
                     imported_folders = {record["folder"] for record in records}
@@ -263,11 +283,13 @@ def create_manga_import_job_processor(
                         scan_manga_groups, result_root, 1, 0, None, clean_title, "alpha-asc"
                     )
                     pages_payload = await asyncio.to_thread(
-                        scan_results, result_root, "alpha", clean_title, None, 500, 0, None
+                        scan_results, result_root, "alpha", clean_title, None, None, 0, None
                     )
+                    items = [item for item in pages_payload["items"] if item["folder"] in imported_folders]
                     invalidate_meta_cache()
                 if not groups_payload["groups"]:
                     raise RuntimeError("Imported manga group was not found after saving")
+                items = [public_page_detail(item) for item in items]
 
                 async def warm_previews():
                     try:
@@ -280,7 +302,7 @@ def create_manga_import_job_processor(
                 asyncio.create_task(warm_previews())
                 return {
                     "group": groups_payload["groups"][0],
-                    "items": pages_payload["items"],
+                    "items": items,
                     "totalImages": groups_payload["totalImages"],
                     "totalPages": len(records),
                 }

@@ -11,8 +11,20 @@ from fastapi import APIRouter, HTTPException, Request
 from server.manga_import_jobs import (
     MangaImportJobConflict,
     MangaImportJobNotFound,
-    public_job,
 )
+
+
+def public_job(job: dict[str, Any], *, include_items: bool = False) -> dict[str, Any]:
+    total = job.get("totalPages")
+    processed = int(job.get("processedPages", 0))
+    keys = (
+        "id", "title", "status", "createdAt", "acceptedAt", "updatedAt", "startedAt", "completedAt",
+        "processedPages", "totalPages", "progress", "error", "group", "totalImages", "attempt", "phase", "groupId",
+    ) + (("items",) if include_items else ())
+    return {key: job[key] for key in keys if key in job} | {
+        "progress": job.get("progress", round(100 * processed / total) if total else 0),
+        "fileCount": len(job.get("files", [])),
+    }
 
 
 def create_manga_import_job_router(
@@ -156,7 +168,7 @@ def create_manga_import_job_router(
         if queue is None:
             raise HTTPException(503, detail="Manga import queue is not available")
         try:
-            return {"job": public_job(await queue.store.get(job_id))}
+            return {"job": public_job(await queue.store.get(job_id), include_items=True)}
         except MangaImportJobNotFound as error:
             raise HTTPException(404, detail="Manga import job not found") from error
 

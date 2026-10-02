@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from io import BytesIO
+import json
 import logging
 import inspect
 import multiprocessing
@@ -18,12 +19,17 @@ from fastapi import FastAPI, HTTPException
 from PIL import Image
 from starlette.testclient import TestClient
 
+from server.batch_scheduler import BatchScheduler
 from server.api.routes.manga_import_jobs import create_manga_import_job_router
 from server.api.routes.result_import import (
     create_manga_import_job_processor,
     create_result_import_router,
 )
-from server.manga_import_jobs import MangaImportJobQueue, MangaImportJobStore
+from server.manga_import_jobs import (
+    MangaImportJobNotFound,
+    MangaImportJobQueue,
+    MangaImportJobStore,
+)
 from server.original_import_lock import _original_import_lock
 from server.original_import import (
     is_archive_upload,
@@ -32,6 +38,8 @@ from server.original_import import (
     validate_original_upload,
     write_original_import,
 )
+from server.original_import_writer import write_original_import as write_job_original_import
+from server.summary_scheduler import SummaryScheduler
 
 
 def _upload(name: str, content: bytes):
@@ -104,7 +112,7 @@ class MangaImportJobQueueTests(unittest.IsolatedAsyncioTestCase):
         async def processor(_job, staged_dir, _progress):
             self.assertEqual((staged_dir / "000000.upload").read_bytes(), b"page-bytes")
             resumed.set()
-            return {"totalPages": 1, "items": [], "group": {"title": "Recovered"}}
+            return {"totalPages": 1, "items": [{"id": "page-1"}], "group": {"title": "Recovered"}}
 
         queue = MangaImportJobQueue(restarted_store, processor, logging.getLogger(__name__))
         await queue.start()
@@ -113,7 +121,65 @@ class MangaImportJobQueueTests(unittest.IsolatedAsyncioTestCase):
         await queue.stop()
 
         self.assertEqual(completed["attempt"], 2)
+        self.assertEqual(completed["items"], [{"id": "page-1"}])
+        self.assertNotIn("items", (await restarted_store.list())[0])
         self.assertFalse(restarted_store.stage_path(job["id"]).exists())
+
+    async def test_ambiguous_database_create_error_keeps_staged_payload(self):
+        class AmbiguousCreateStore(MangaImportJobStore):
+            async def create(store, job):
+                store.pending_job = job
+                raise RuntimeError("database acknowledgement lost")
+
+            async def get(store, job_id, *, include_items=True):
+                store.get_calls += 1
+                raise MangaImportJobNotFound(job_id)
+
+            async def list(store):
+                return [store.pending_job] if store.committed else []
+
+        store = AmbiguousCreateStore(self.root / "ambiguous-jobs", database=object())
+        store.get_calls = 0
+        store.committed = False
+        queue = MangaImportJobQueue(store, None, logging.getLogger(__name__))
+        with self.assertRaisesRegex(RuntimeError, "acknowledgement lost"):
+            await queue.accept(_job("Ambiguous"), [_upload("01.png", b"page-bytes")])
+
+        job_id = store.pending_job["id"]
+        stage = store.stage_path(job_id)
+        self.assertEqual(store.get_calls, 0)
+        self.assertTrue(stage.is_dir())
+        self.assertEqual((stage / "000000.upload").read_bytes(), b"page-bytes")
+
+        # Simulate the insert committing after the client received an error.
+        await asyncio.to_thread(store._write_record, store.pending_job)
+        store.committed = True
+        await store.cleanup_staging()
+        self.assertTrue(stage.is_dir())
+
+    async def test_definite_database_create_failure_cleans_unreferenced_staging(self):
+        class RejectedCreateStore(MangaImportJobStore):
+            async def create(_store, _job):
+                raise RuntimeError("database rejected insert")
+
+            async def get(_store, job_id, *, include_items=True):
+                _store.get_calls += 1
+                raise MangaImportJobNotFound(job_id)
+
+            async def list(_store):
+                return []
+
+        store = RejectedCreateStore(self.root / "rejected-jobs", database=object())
+        store.get_calls = 0
+        queue = MangaImportJobQueue(store, None, logging.getLogger(__name__))
+        with self.assertRaisesRegex(RuntimeError, "rejected insert"):
+            await queue.accept(_job("Rejected"), [_upload("01.png", b"page-bytes")])
+
+        self.assertEqual(store.get_calls, 0)
+        staged = list(store.staging_root.glob("*"))
+        self.assertEqual(len(staged), 1)
+        await store.cleanup_staging()
+        self.assertEqual(list(store.staging_root.glob("*")), [])
 
     async def test_fifo_and_single_active_worker(self):
         queue_store = self.store
@@ -197,18 +263,95 @@ class MangaImportJobQueueTests(unittest.IsolatedAsyncioTestCase):
             await release.wait()
             return {"totalPages": 1, "items": []}
 
-        async def independent_task(done):
-            done.set()
+        class BatchStore:
+            claimed = False
+
+            async def reconcile(self, _result_root):
+                pass
+
+            async def list_runnable_batches(self):
+                if self.claimed:
+                    return []
+                return [{"id": "translation-batch", "status": "waiting", "items": [{"id": "page-1", "status": "queued"}]}]
+
+            async def list_batches(self):
+                return await self.list_runnable_batches()
+
+        class Executors:
+            def free_executors(self):
+                return 1
+
+            async def find_executor(self):
+                return object()
+
+            async def free_executor(self, _instance):
+                pass
+
+        batch_store = BatchStore()
+        batch_scheduler = BatchScheduler(batch_store, Executors(), self.root)
+
+        async def claim_translation(_batch_id):
+            if batch_store.claimed:
+                return None
+            batch_store.claimed = True
+            return {"id": "page-1"}
+
+        async def run_translation(_batch_id, _page_id, _executor):
+            translation_completed.set()
+
+        batch_scheduler._claim_item = claim_translation
+        batch_scheduler._process_item = run_translation
+
+        class SummaryStore:
+            claimed = False
+
+            async def reconcile_summary_jobs(self):
+                pass
+
+            async def list_runnable_summary_jobs(self):
+                if self.claimed:
+                    return []
+                self.claimed = True
+                return [{"groupId": "summary-series", "title": "Summary series"}]
+
+        class SummaryController:
+            def is_paused(self, _key):
+                return False
+
+            def get_pause_event(self, _key):
+                return asyncio.Event()
+
+            def register_task(self, *_args):
+                pass
+
+        async def run_summary(*_args, **_kwargs):
+            summary_completed.set()
+
+        summary_store = SummaryStore()
+        summary_scheduler = SummaryScheduler(
+            lambda: summary_store,
+            SummaryController(),
+            run_summary,
+            lambda **values: SimpleNamespace(**values),
+            self.root,
+        )
 
         queue = MangaImportJobQueue(self.store, processor, logging.getLogger(__name__))
         await queue.start()
-        await asyncio.wait_for(importing.wait(), 2)
-        await asyncio.gather(independent_task(translation_completed), independent_task(summary_completed))
-        self.assertTrue(translation_completed.is_set())
-        self.assertTrue(summary_completed.is_set())
-        release.set()
-        await _wait_for_status(self.store, job["id"], "completed")
-        await queue.stop()
+        try:
+            await asyncio.wait_for(importing.wait(), 2)
+            await batch_scheduler.start()
+            await summary_scheduler.start()
+            await asyncio.wait_for(
+                asyncio.gather(translation_completed.wait(), summary_completed.wait()), 2
+            )
+            self.assertTrue(translation_completed.is_set())
+            self.assertTrue(summary_completed.is_set())
+            release.set()
+            await _wait_for_status(self.store, job["id"], "completed")
+        finally:
+            release.set()
+            await asyncio.gather(queue.stop(), batch_scheduler.stop(), summary_scheduler.stop())
 
     async def test_worker_lease_protects_recovery_and_follower_polls_for_jobs(self):
         first = await MangaImportJobQueue(
@@ -307,6 +450,10 @@ class MangaImportJobQueueTests(unittest.IsolatedAsyncioTestCase):
 class IdempotentOriginalImportTests(unittest.TestCase):
     def test_legacy_import_router_factory_contract(self):
         self.assertEqual(
+            tuple(inspect.signature(write_original_import).parameters),
+            ("title", "pages", "group_id", "result_root", "logger", "save_jpeg"),
+        )
+        self.assertEqual(
             tuple(inspect.signature(create_result_import_router).parameters),
             (
                 "get_store", "get_result_root", "get_max_batch_items",
@@ -331,7 +478,7 @@ class IdempotentOriginalImportTests(unittest.TestCase):
                 image.save(path, format="JPEG")
 
             def run():
-                return write_original_import(
+                return write_job_original_import(
                     "Resumable",
                     [("01.png", "01.png", content, content, ".png")],
                     "manga-resumable",
@@ -400,7 +547,7 @@ class IdempotentOriginalImportTests(unittest.TestCase):
                 )
 
             def writer(title, source_pages, group_id, *, import_job_id):
-                return write_original_import(
+                return write_job_original_import(
                     title,
                     source_pages,
                     group_id,
@@ -423,9 +570,14 @@ class IdempotentOriginalImportTests(unittest.TestCase):
                 return {"groups": groups, "totalImages": len(matching)}
 
             def scan_results(_root, _sort, manga, _detail, limit, _offset, _review):
-                matching = pages(manga)[:limit]
-                return {"items": [{"id": page["folder"], "originalName": page["meta"]["originalName"]}
-                                   for page in matching]}
+                matching = [{
+                    "id": f"old-{index}", "folder": f"old-{index}", "originalName": f"old-{index}.png"
+                } for index in range(500)]
+                matching.extend({
+                    "id": page["folder"], "folder": page["folder"],
+                    "originalName": page["meta"]["originalName"],
+                } for page in pages(manga))
+                return {"items": matching[:limit] if limit is not None else matching}
 
             import_dependencies = (
                 lambda: None,
@@ -449,9 +601,21 @@ class IdempotentOriginalImportTests(unittest.TestCase):
             self.assertEqual(len(exports), 1)
             self.assertEqual(exports[0].__name__, "import_original_manga")
             self.assertIn("/api/results/import", {route.path for route in router.routes})
-            processor_dependencies = (*import_dependencies[:10], pages, *import_dependencies[10:])
             process = create_manga_import_job_processor(
-                *processor_dependencies[:2], *processor_dependencies[5:]
+                import_dependencies[0],
+                import_dependencies[1],
+                import_dependencies[5],
+                import_dependencies[6],
+                import_dependencies[7],
+                import_dependencies[8],
+                import_dependencies[9],
+                pages,
+                import_dependencies[10],
+                import_dependencies[11],
+                import_dependencies[12],
+                import_dependencies[13],
+                import_dependencies[14],
+                import_dependencies[15],
             )
 
             async def run():
@@ -479,6 +643,8 @@ class IdempotentOriginalImportTests(unittest.TestCase):
                 result = await locked_import
                 await process(job, staged, no_progress)
                 self.assertEqual(result["totalPages"], 1)
+                self.assertEqual(len(result["items"]), 1)
+                self.assertEqual(result["items"][0]["originalName"], "01.png")
                 self.assertEqual(len(pages("Duplicate Guard")), 1)
 
                 other = dict(job, id="b" * 32)
@@ -497,6 +663,111 @@ class IdempotentOriginalImportTests(unittest.TestCase):
             ):
                 asyncio.run(run())
 
+    def test_processor_returns_all_501_pages_with_json_safe_details(self):
+        with tempfile.TemporaryDirectory(prefix="manga-import-many-pages-") as directory:
+            root = Path(directory)
+            result_root = root / "results"
+            result_root.mkdir()
+            records = [
+                {"folder": f"page-{index:03d}", "metadata": {"pageOrder": index + 1}}
+                for index in range(501)
+            ]
+            imported_items = [
+                {
+                    "id": record["folder"],
+                    "folder": record["folder"],
+                    "path": result_root / record["folder"],
+                    "name": f"{index:03d}.png",
+                    "pageOrder": index + 1,
+                    "groupId": "large-series",
+                    "mangaTitle": "Large Series",
+                    "sourceType": "original",
+                    "meta": {"sourcePath": f"volume/{index:03d}.png"},
+                    "textRegions": [{"text": "large payload excluded"}],
+                }
+                for index, record in enumerate(records)
+            ]
+
+            class Store:
+                async def resolve_group_id(_store, _value, create=False):
+                    return "large-series"
+
+                async def group_pages(_store, _title, *, folders=None):
+                    if folders is None:
+                        return []
+                    by_folder = {item["folder"]: item for item in imported_items}
+                    return [by_folder[folder] for folder in folders]
+
+                async def save_documents(_store, *_args):
+                    pass
+
+                async def sync_result_folder(_store, *_args, **_kwargs):
+                    pass
+
+                async def list_groups(_store, **_kwargs):
+                    return {"groups": [{"id": "large-series", "title": "Large Series"}], "totalImages": 501}
+
+            async def run(mode):
+                store = Store() if mode == "postgres" else None
+
+                def scan_results(_root, _sort, _manga, _detail, limit, _offset, _review):
+                    self.assertIsNone(limit)
+                    old_items = [
+                        {"id": f"older-{index}", "folder": f"older-{index}"}
+                        for index in range(500)
+                    ]
+                    return {"items": old_items + imported_items}
+
+                dependencies = (
+                    lambda: store,
+                    lambda: result_root,
+                    lambda _title: False,
+                    lambda _title: "large-series",
+                    lambda *_args, **_kwargs: {"records": records},
+                    lambda *_args: (),
+                    lambda *_args: [],
+                    lambda *_args: [],
+                    lambda *_args: None,
+                    lambda *_args: {"groups": [{"id": "large-series", "title": "Large Series"}], "totalImages": 501},
+                    scan_results,
+                    lambda: None,
+                    lambda _folders: None,
+                    logging.getLogger(__name__),
+                )
+                process = create_manga_import_job_processor(*dependencies)
+                staged = root / mode
+                staged.mkdir(exist_ok=True)
+                job = {
+                    "id": "c" * 32,
+                    "title": "Large Series",
+                    "mangaGroupId": "large-series" if store else None,
+                    "isNewGroup": False,
+                    "files": [],
+                }
+
+                async def no_progress(*_args, **_kwargs):
+                    pass
+
+                result = await process(job, staged, no_progress)
+                await asyncio.sleep(0.05)
+                self.assertEqual(result["totalPages"], 501)
+                self.assertEqual(len(result["items"]), 501)
+                self.assertEqual(result["items"][0]["sourcePath"], "volume/000.png")
+                self.assertNotIn("path", result["items"][0])
+                self.assertNotIn("textRegions", result["items"][0])
+                json.dumps(result["items"])
+
+            with patch(
+                "server.api.routes.original_import_routes._original_import_lock",
+                asyncio.Lock(),
+            ):
+                asyncio.run(run("filesystem"))
+            with patch(
+                "server.api.routes.original_import_routes._original_import_lock",
+                asyncio.Lock(),
+            ):
+                asyncio.run(run("postgres"))
+
 
 class MangaImportJobApiTests(unittest.TestCase):
     def test_multipart_acceptance_status_retry_and_dismissal(self):
@@ -512,10 +783,13 @@ class MangaImportJobApiTests(unittest.TestCase):
                     await asyncio.to_thread(release.wait)
                     raise RuntimeError("retry available")
                 return {
-                    "totalPages": 1,
+                    "totalPages": 501,
                     "group": {"id": "manga-api", "title": job["title"]},
-                    "items": [{"id": "page-1", "originalName": "01.png"}],
-                    "totalImages": 1,
+                    "items": [
+                        {"id": f"page-{index}", "originalName": f"{index:03d}.png"}
+                        for index in range(501)
+                    ],
+                    "totalImages": 501,
                 }
 
             queue = MangaImportJobQueue(store, processor, logging.getLogger(__name__))
@@ -583,10 +857,12 @@ class MangaImportJobApiTests(unittest.TestCase):
                 completed = _poll_job(client, accepted["id"], "completed")
                 self.assertEqual(completed["groupId"], "manga-api")
                 self.assertEqual(completed["group"]["title"], "Queued Series")
-                self.assertEqual(completed["items"][0]["id"], "page-1")
-                self.assertEqual(completed["processedPages"], 1)
+                self.assertEqual(completed["processedPages"], 501)
+                self.assertEqual(len(completed["items"]), 501)
+                self.assertEqual(completed["items"][0]["id"], "page-0")
                 listed = client.get("/api/manga-import-jobs").json()["jobs"]
                 self.assertEqual(listed[0]["id"], accepted["id"])
+                self.assertNotIn("items", listed[0])
 
                 dismissed = client.delete(f"/api/manga-import-jobs/{accepted['id']}")
                 self.assertEqual(dismissed.status_code, 200)

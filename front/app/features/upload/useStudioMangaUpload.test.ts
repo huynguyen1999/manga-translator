@@ -160,20 +160,22 @@ try {
     const hydrated = await fetchMangaImportJobs(async () => response({ jobs: [job(status)] }));
     assert.equal(hydrated[0].status, status);
   }
-  let visibilityState = "hidden";
+  let visibilityState = "visible";
   const browserListeners = new Map<string, () => void>();
   const documentListeners = new Map<string, () => void>();
-  let intervalCallback: (() => void) | undefined;
+  const intervals = new Map<number, () => void>();
+  let nextInterval = 7;
   let intervalCleared = false;
   const browserWindow = {
     addEventListener: (name: string, callback: () => void) => browserListeners.set(name, callback),
     removeEventListener: (name: string) => browserListeners.delete(name),
     setInterval: (callback: () => void, duration: number) => {
       assert.equal(duration, 2000);
-      intervalCallback = callback;
-      return 7;
+      const timer = nextInterval++;
+      intervals.set(timer, callback);
+      return timer;
     },
-    clearInterval: (timer: number) => { intervalCleared = timer === 7; },
+    clearInterval: (timer: number) => { intervalCleared = intervals.delete(timer) || intervalCleared; },
   } as unknown as Window;
   const browserDocument = {
     get visibilityState() { return visibilityState; },
@@ -181,16 +183,31 @@ try {
     removeEventListener: (name: string) => documentListeners.delete(name),
   } as unknown as Document;
   let pollCount = 0;
-  const stopWatching = watchMangaImportJobs(() => { pollCount += 1; }, browserWindow, browserDocument);
-  intervalCallback?.();
+  let pollStatus: MangaImportJob["status"] = "processing";
+  const watcher = watchMangaImportJobs(async () => {
+    pollCount += 1;
+    return [job(pollStatus)];
+  }, browserWindow, browserDocument);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(intervals.size, 1, "active jobs keep the status poll running");
+  pollStatus = "completed";
+  [...intervals.values()][0]?.();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(intervals.size, 0, "idle history stops polling");
+  assert.equal(pollCount, 2);
   browserListeners.get("focus")?.();
   browserListeners.get("online")?.();
   documentListeners.get("visibilitychange")?.();
-  assert.equal(pollCount, 4, "polling and reconnect events rehydrate jobs; hidden tabs skip visibility refresh");
-  visibilityState = "visible";
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(pollCount, 5, "focus, reconnect, and visibility events refresh status");
+  pollStatus = "processing";
+  await watcher.refresh();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(intervals.size, 1);
+  visibilityState = "hidden";
   documentListeners.get("visibilitychange")?.();
-  assert.equal(pollCount, 5);
-  stopWatching();
+  assert.equal(intervals.size, 0, "hidden tabs stop polling active jobs");
+  watcher.stop();
   assert.equal(intervalCleared, true);
   assert.equal(browserListeners.size + documentListeners.size, 0);
   const backendJob = (await fetchMangaImportJobs(async () => response({ jobs: [{

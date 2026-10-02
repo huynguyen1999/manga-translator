@@ -22,25 +22,57 @@ type Fetcher = typeof fetch;
 type PollWindow = Pick<Window, "addEventListener" | "removeEventListener" | "setInterval" | "clearInterval">;
 type PollDocument = Pick<Document, "visibilityState" | "addEventListener" | "removeEventListener">;
 
+export interface MangaImportJobWatcher {
+  refresh: () => Promise<MangaImportJob[]>;
+  stop: () => void;
+}
+
 export const watchMangaImportJobs = (
-  refresh: () => void,
+  refresh: () => Promise<MangaImportJob[]>,
   browserWindow: PollWindow,
   browserDocument: PollDocument,
-): (() => void) => {
-  const onVisibilityChange = () => {
-    if (browserDocument.visibilityState === "visible") refresh();
-  };
-  refresh();
-  const timer = browserWindow.setInterval(refresh, 2000);
-  browserDocument.addEventListener("visibilitychange", onVisibilityChange);
-  browserWindow.addEventListener("focus", refresh);
-  browserWindow.addEventListener("online", refresh);
-  return () => {
+): MangaImportJobWatcher => {
+  let timer: number | null = null;
+  let stopped = false;
+  const stopPolling = () => {
+    if (timer === null) return;
     browserWindow.clearInterval(timer);
-    browserDocument.removeEventListener("visibilitychange", onVisibilityChange);
-    browserWindow.removeEventListener("focus", refresh);
-    browserWindow.removeEventListener("online", refresh);
+    timer = null;
   };
+  const schedulePolling = () => {
+    if (stopped || timer !== null || browserDocument.visibilityState !== "visible") return;
+    timer = browserWindow.setInterval(refreshAndSchedule, 2000);
+  };
+  const refreshAndSchedule = (): Promise<MangaImportJob[]> => {
+    stopPolling();
+    if (stopped || browserDocument.visibilityState !== "visible") return refresh();
+    const request = refresh();
+    void request.then((jobs) => {
+      if (jobs.some((job) => job.status === "queued" || job.status === "processing")) {
+        schedulePolling();
+      }
+    }).catch(schedulePolling);
+    return request;
+  };
+  const onVisibilityChange = () => {
+    if (browserDocument.visibilityState === "visible") void refreshAndSchedule().catch(() => {});
+    else stopPolling();
+  };
+  if (browserDocument.visibilityState === "visible") void refreshAndSchedule().catch(() => {});
+  browserDocument.addEventListener("visibilitychange", onVisibilityChange);
+  const onReconnect = () => {
+    if (browserDocument.visibilityState === "visible") void refreshAndSchedule().catch(() => {});
+  };
+  browserWindow.addEventListener("focus", onReconnect);
+  browserWindow.addEventListener("online", onReconnect);
+  const stop = () => {
+    stopped = true;
+    stopPolling();
+    browserDocument.removeEventListener("visibilitychange", onVisibilityChange);
+    browserWindow.removeEventListener("focus", onReconnect);
+    browserWindow.removeEventListener("online", onReconnect);
+  };
+  return { refresh: refreshAndSchedule, stop };
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>

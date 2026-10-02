@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from server.postgres_common import _json_dump, _json_load
+from server.manga_import_job_records import list_records, read_record, write_record
 
 try:
     import fcntl
@@ -87,6 +88,7 @@ class MangaImportJobStore:
         self.staging_root = self.root / "staged"
         self.incoming_root = self.root / "incoming"
         self.records_root = self.root / "records"
+        self.details_root = self.records_root / "details"
         self.database = database
         self._lock = asyncio.Lock()
 
@@ -106,6 +108,13 @@ class MangaImportJobStore:
             raise ValueError("Invalid manga import job ID")
         return self.records_root / f"{job_id}.json"
 
+    def _details_path(self, job_id: str) -> Path:
+        self._record_path(job_id)
+        return self.details_root / f"{job_id}.json"
+
+    def _write_record(self, job: dict[str, Any]) -> None:
+        write_record(self._record_path(job["id"]), self._details_path(job["id"]), job, self._write_json)
+
     @staticmethod
     def _write_json(path: Path, value: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,10 +127,12 @@ class MangaImportJobStore:
     async def create(self, job: dict[str, Any]) -> None:
         if self.database is not None:
             inserted = await self._pool.fetchrow(
-                """INSERT INTO manga_import_jobs(id,title,status,client_upload_id,accepted_at,updated_at,payload)
-                   VALUES($1,$2,$3,$4,clock_timestamp(),clock_timestamp(),$5::jsonb)
+                """INSERT INTO manga_import_jobs(id,title,status,client_upload_id,accepted_at,updated_at,payload,result_items)
+                   VALUES($1,$2,$3,$4,clock_timestamp(),clock_timestamp(),$5::jsonb,$6::jsonb)
                    ON CONFLICT DO NOTHING RETURNING id""",
-                job["id"], job["title"], job["status"], job.get("clientUploadId"), _json_dump(job),
+                job["id"], job["title"], job["status"], job.get("clientUploadId"),
+                _json_dump({key: value for key, value in job.items() if key != "items"}),
+                _json_dump(job.get("items", [])),
             )
             if inserted is None:
                 raise MangaImportJobConflict(job.get("clientUploadId") or job["id"])
@@ -144,7 +155,7 @@ class MangaImportJobStore:
                 )
                 job["createdAt"] = job["acceptedAt"]
                 job["updatedAt"] = job["acceptedAt"]
-                await asyncio.to_thread(self._write_json, path, job)
+                await asyncio.to_thread(self._write_record, job)
             finally:
                 await asyncio.to_thread(_unlock_file, lock_fd)
 
@@ -183,11 +194,12 @@ class MangaImportJobStore:
             None,
         )
 
-    async def get(self, job_id: str) -> dict[str, Any]:
+    async def get(self, job_id: str, *, include_items: bool = True) -> dict[str, Any]:
         self._record_path(job_id)
         if self.database is not None:
+            items = ",result_items" if include_items else ""
             row = await self._pool.fetchrow(
-                "SELECT payload,status,accepted_at,updated_at FROM manga_import_jobs WHERE id=$1",
+                f"SELECT payload{items},status,accepted_at,updated_at FROM manga_import_jobs WHERE id=$1",
                 job_id,
             )
             if row is None:
@@ -195,13 +207,20 @@ class MangaImportJobStore:
             job = _json_load(row["payload"], {})
             job.update(status=row["status"], acceptedAt=int(row["accepted_at"].timestamp() * 1000),
                        updatedAt=int(row["updated_at"].timestamp() * 1000))
+            if include_items:
+                job["items"] = _json_load(row["result_items"], [])
+            else:
+                job.pop("items", None)
             return job
         try:
-            return await asyncio.to_thread(
-                lambda: json.loads(self._record_path(job_id).read_text(encoding="utf-8"))
+            job = await asyncio.to_thread(
+                read_record, self._record_path(job_id), self._details_path(job_id)
             )
         except FileNotFoundError as error:
             raise MangaImportJobNotFound(job_id) from error
+        if not include_items:
+            job.pop("items", None)
+        return job
 
     async def list(self) -> list[dict[str, Any]]:
         if self.database is not None:
@@ -217,27 +236,18 @@ class MangaImportJobStore:
                 jobs.append(job)
             return jobs
 
-        def read_records() -> list[dict[str, Any]]:
-            if not self.records_root.exists():
-                return []
-            jobs = []
-            for path in self.records_root.glob("*.json"):
-                try:
-                    job = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-                if isinstance(job, dict):
-                    jobs.append(job)
-            return sorted(jobs, key=lambda job: (job.get("acceptedAt", 0), job.get("id", "")), reverse=True)
-
-        return await asyncio.to_thread(read_records)
+        return await asyncio.to_thread(
+            list_records, self.records_root, self.details_root, self._write_json
+        )
 
     async def update(self, job: dict[str, Any]) -> dict[str, Any]:
         job = {**job, "updatedAt": _now_ms()}
         if self.database is not None:
             result = await self._pool.execute(
-                "UPDATE manga_import_jobs SET title=$2,status=$3,client_upload_id=$4,accepted_at=CASE WHEN status='failed' AND $3='queued' THEN clock_timestamp() ELSE accepted_at END,accepted_order=CASE WHEN status='failed' AND $3='queued' THEN nextval(pg_get_serial_sequence('manga_import_jobs','accepted_order')) ELSE accepted_order END,updated_at=clock_timestamp(),payload=$5::jsonb WHERE id=$1",
-                job["id"], job["title"], job["status"], job.get("clientUploadId"), _json_dump(job),
+                "UPDATE manga_import_jobs SET title=$2,status=$3,client_upload_id=$4,accepted_at=CASE WHEN status='failed' AND $3='queued' THEN clock_timestamp() ELSE accepted_at END,accepted_order=CASE WHEN status='failed' AND $3='queued' THEN nextval(pg_get_serial_sequence('manga_import_jobs','accepted_order')) ELSE accepted_order END,updated_at=clock_timestamp(),payload=$5::jsonb,result_items=CASE WHEN $6 THEN $7::jsonb ELSE result_items END WHERE id=$1",
+                job["id"], job["title"], job["status"], job.get("clientUploadId"),
+                _json_dump({key: value for key, value in job.items() if key != "items"}),
+                "items" in job, _json_dump(job.get("items", [])),
             )
             if result != "UPDATE 1":
                 raise MangaImportJobNotFound(job["id"])
@@ -246,13 +256,13 @@ class MangaImportJobStore:
             path = self._record_path(job["id"])
             if not path.exists():
                 raise MangaImportJobNotFound(job["id"])
-            previous = await self.get(job["id"])
+            previous = await self.get(job["id"], include_items=False)
             if previous.get("status") == "failed" and job.get("status") == "queued":
                 jobs = await self.list()
                 job["acceptedAt"] = max(
                     _now_ms(), max((item.get("acceptedAt", 0) for item in jobs), default=0) + 1
                 )
-            await asyncio.to_thread(self._write_json, path, job)
+            await asyncio.to_thread(self._write_record, job)
         return job
 
     async def claim_next(self) -> dict[str, Any] | None:
@@ -288,7 +298,7 @@ class MangaImportJobStore:
             job.update(status="processing", startedAt=_now_ms(), error=None)
             job["attempt"] = int(job.get("attempt", 0)) + 1
             job["updatedAt"] = _now_ms()
-            await asyncio.to_thread(self._write_json, self._record_path(job["id"]), job)
+            await asyncio.to_thread(self._write_record, job)
             return job
 
     async def recover_processing(self) -> None:
@@ -306,7 +316,7 @@ class MangaImportJobStore:
                 job_id,
             )
             if result != "DELETE 1":
-                job = await self.get(job_id)
+                job = await self.get(job_id, include_items=False)
                 raise MangaImportJobConflict(f"Cannot dismiss a {job['status']} job")
             return
         async with self._lock:
@@ -314,6 +324,7 @@ class MangaImportJobStore:
             if job.get("status") not in {"failed", "completed"}:
                 raise MangaImportJobConflict(f"Cannot dismiss a {job['status']} job")
             await asyncio.to_thread(self._record_path(job_id).unlink)
+            await asyncio.to_thread(self._details_path(job_id).unlink, missing_ok=True)
 
     async def cleanup_staging(self) -> None:
         lock_fd = await self._acquire_staging_lock()
@@ -413,6 +424,7 @@ class MangaImportJobQueue:
 
         staging_lock = None
         created = False
+        create_started = False
         try:
             staged = await asyncio.to_thread(copy_uploads)
             staging_lock = await self.store._acquire_staging_lock()
@@ -438,9 +450,10 @@ class MangaImportJobQueue:
                 "error": None,
                 "attempt": 0,
             }
+            create_started = self.store.database is not None
             await self.store.create(accepted)
             created = True
-        except Exception:
+        except Exception as error:
             if staging_lock is None:
                 staging_lock = await self.store._acquire_staging_lock()
             if upload_lock is not None:
@@ -448,7 +461,10 @@ class MangaImportJobQueue:
                 upload_lock = None
             if not created:
                 shutil.rmtree(temporary, ignore_errors=True)
-                shutil.rmtree(self.store.stage_path(job_id), ignore_errors=True)
+                if not create_started or isinstance(error, MangaImportJobConflict):
+                    shutil.rmtree(self.store.stage_path(job_id), ignore_errors=True)
+                # Otherwise preserve staging: an insert may commit after its
+                # acknowledgement is lost. Startup reconciliation is safe later.
             raise
         finally:
             if staging_lock is not None:
@@ -459,7 +475,7 @@ class MangaImportJobQueue:
         return accepted
 
     async def retry(self, job_id: str) -> dict[str, Any]:
-        job = await self.store.get(job_id)
+        job = await self.store.get(job_id, include_items=False)
         if job.get("status") != "failed":
             raise MangaImportJobConflict(f"Cannot retry a {job.get('status')} job")
         if not self.store.stage_path(job_id).is_dir():
@@ -480,21 +496,3 @@ class MangaImportJobQueue:
         from server.manga_import_job_lifecycle import run_manga_import_queue
 
         await run_manga_import_queue(self)
-
-
-def public_job(job: dict[str, Any]) -> dict[str, Any]:
-    total = job.get("totalPages")
-    processed = int(job.get("processedPages", 0))
-    return {
-        key: job.get(key)
-        for key in (
-            "id", "title", "status", "createdAt", "acceptedAt", "updatedAt",
-            "startedAt", "completedAt", "processedPages", "totalPages", "progress",
-            "error", "group", "items", "totalImages", "attempt", "phase",
-            "groupId",
-        )
-        if key in job
-    } | {
-        "progress": job.get("progress", round(100 * processed / total) if total else 0),
-        "fileCount": len(job.get("files", [])),
-    }

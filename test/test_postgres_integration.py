@@ -1,16 +1,77 @@
 import os
 import asyncio
 import json
+import logging
+import shutil
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 from PIL import Image
 
 from server.postgres_store import PostgresBatchStore, PostgresStore
+from server.manga_import_jobs import MangaImportJobQueue, MangaImportJobStore
 
 
 class PostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_manga_import_jobs_are_durable_fifo_and_recover_processing(self):
+        database_url = os.getenv("TEST_DATABASE_URL")
+        if not database_url:
+            self.skipTest("Set TEST_DATABASE_URL to run PostgreSQL integration tests")
+        with tempfile.TemporaryDirectory() as root:
+            store = PostgresStore(database_url, Path(root) / "results")
+            await store.start(check_schema=False)
+            job_store = MangaImportJobStore(Path(root) / "jobs", store)
+            queue = MangaImportJobQueue(job_store, None, logging.getLogger(__name__))
+            job_ids = []
+            try:
+                await store.apply_migrations()
+
+                async def accept(title, filename, content):
+                    job = await queue.accept(
+                        {
+                            "title": title,
+                            "files": [{"sourcePath": filename}],
+                            "fileCount": 1,
+                            "totalBytes": len(content),
+                        },
+                        [SimpleNamespace(filename=filename, file=BytesIO(content))],
+                    )
+                    job_ids.append(job["id"])
+                    return job
+
+                first = await accept("Queue restart first", "01.png", b"first page")
+                second = await accept("Queue restart second", "02.png", b"second page")
+                self.assertEqual(
+                    (job_store.stage_path(first["id"]) / "000000.upload").read_bytes(),
+                    b"first page",
+                )
+                self.assertEqual((await job_store.claim_next())["id"], first["id"])
+                self.assertIsNone(await job_store.claim_next())
+
+                restarted_store = MangaImportJobStore(Path(root) / "jobs", store)
+                await restarted_store.recover_processing()
+                recovered = await restarted_store.claim_next()
+                self.assertEqual(recovered["id"], first["id"])
+                self.assertEqual(recovered["attempt"], 2)
+                page_details = [{"id": f"page-{index}"} for index in range(501)]
+                recovered.update(status="completed", items=page_details)
+                await restarted_store.update(recovered)
+                listed = {job["id"]: job for job in await restarted_store.list()}
+                self.assertNotIn("items", listed[first["id"]])
+                self.assertEqual((await restarted_store.get(first["id"]))["items"], page_details)
+                self.assertEqual((await restarted_store.claim_next())["id"], second["id"])
+            finally:
+                if store.pool is not None and job_ids:
+                    await store.pool.execute(
+                        "DELETE FROM manga_import_jobs WHERE id=ANY($1::text[])", job_ids
+                    )
+                for job_id in job_ids:
+                    shutil.rmtree(job_store.stage_path(job_id), ignore_errors=True)
+                await store.close()
+
     async def test_concurrent_page_deletes_in_one_group_do_not_deadlock(self):
         database_url = os.getenv("TEST_DATABASE_URL")
         if not database_url:
@@ -157,7 +218,7 @@ class PostgresIntegrationTest(unittest.IsolatedAsyncioTestCase):
         store = PostgresStore(database_url, Path(tempfile.mkdtemp()) / "results")
         await store.start(check_schema=False)
         try:
-            self.assertEqual(await store.apply_migrations(), "015_batch_item_stage_state")
+            self.assertEqual(await store.apply_migrations(), "021_manga_import_job_details")
             stage_constraint = await store.pool.fetchval(
                 """SELECT pg_get_constraintdef(oid) FROM pg_constraint
                    WHERE conname='page_stage_state_stage_check'"""

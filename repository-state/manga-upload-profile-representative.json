@@ -1,0 +1,481 @@
+{
+  "environment": {
+    "platform": "macOS-15.7.9-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "python": "3.13.15",
+    "pillow": "12.3.0",
+    "database": "filesystem-backed",
+    "http": "FastAPI TestClient in-process; no network transfer"
+  },
+  "workload": {
+    "source": "distinct input.jpg pages from the local results/results corpus",
+    "unique_local_page_count": 37,
+    "pages_per_import": [
+      1,
+      10
+    ],
+    "runs_per_writer_and_size": 5,
+    "pages": [
+      {
+        "sha256": "2660a4e901b5c9f99578ab5ca9057a735ddfe844dfa257972ffd1c0f1d6915ac",
+        "size": 476594,
+        "dimensions": [
+          1280,
+          1811
+        ]
+      },
+      {
+        "sha256": "7968df9a872a3dfcce2be675c6a78ab33d42811e4bcbfa13744ded2b4087f50f",
+        "size": 314153,
+        "dimensions": [
+          1280,
+          1811
+        ]
+      },
+      {
+        "sha256": "5da7335846f20c4dc8dcde657305063ebf4ad0667bea59014b3f16b5c4121274",
+        "size": 442046,
+        "dimensions": [
+          1280,
+          1811
+        ]
+      },
+      {
+        "sha256": "468c480f812c835f3302aa0ffef6f954ee880c750ba4c095bb182ad22a4c4968",
+        "size": 412894,
+        "dimensions": [
+          1280,
+          1811
+        ]
+      },
+      {
+        "sha256": "e785b22720dc4b19712edf4d78c4d87723f346510e83d9870fed18fc9519cd6b",
+        "size": 453506,
+        "dimensions": [
+          1280,
+          1810
+        ]
+      },
+      {
+        "sha256": "57bfb01d5fa95c4c5c37398360a893fc5ed0a8f9f02c0bb0b3f4fd0d21f2b120",
+        "size": 481435,
+        "dimensions": [
+          1280,
+          1810
+        ]
+      },
+      {
+        "sha256": "f68eb97054a468890431227cb79e0cf4091d86cff54253e32f6dcc887a2cecdd",
+        "size": 372792,
+        "dimensions": [
+          1280,
+          1810
+        ]
+      },
+      {
+        "sha256": "d25cd734d628697aecbfe1ede8fa02fada6f76a3f2a0c72135555b4822fc46ff",
+        "size": 610349,
+        "dimensions": [
+          1280,
+          1810
+        ]
+      },
+      {
+        "sha256": "eedd5c8ed79ecf4bc558c23833c7cc905f2fedd6900558f1caea3dd67bdebc92",
+        "size": 540713,
+        "dimensions": [
+          1280,
+          1810
+        ]
+      },
+      {
+        "sha256": "2761b39822ff35b92506124a904fc07a5a980b1174fa0f600b38273aa692ffdc",
+        "size": 500826,
+        "dimensions": [
+          1280,
+          1810
+        ]
+      }
+    ],
+    "uploaded_format": "JPEG",
+    "comparison": "base 01bb894 writer encodes input.jpg and final.jpg separately; current writer encodes input.jpg once and copies it to final.jpg",
+    "route": "/api/results/import",
+    "phase_notes": "validation is timed inside writer iteration; page_write_exclusive_ms subtracts validation from writer inclusive time. Preview warmup is disabled in the harness. Request timing includes in-process multipart parsing but excludes network transfer."
+  },
+  "measurements": [
+    {
+      "validation_normalization_ms": 84.00258282199502,
+      "writer_inclusive_ms": 150.4810838960111,
+      "page_order_ms": 0.30099996365606785,
+      "metadata_write_ms": 0.6673329044133425,
+      "group_scan_ms": 0.3311671316623688,
+      "page_list_ms": 0.32241595908999443,
+      "request_to_gallery_ms": 155.22075002081692,
+      "page_write_exclusive_ms": 66.4785010740161,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 476594,
+      "indexed_pages": 1,
+      "pages": 1,
+      "run": 1,
+      "writer": "baseline_double_encode"
+    },
+    {
+      "validation_normalization_ms": 74.99574986286461,
+      "writer_inclusive_ms": 117.34345811419189,
+      "page_order_ms": 0.17625000327825546,
+      "metadata_write_ms": 0.5741249769926071,
+      "group_scan_ms": 0.31308410689234734,
+      "page_list_ms": 0.2662499900907278,
+      "request_to_gallery_ms": 120.83679088391364,
+      "page_write_exclusive_ms": 42.347708251327276,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 476594,
+      "indexed_pages": 1,
+      "pages": 1,
+      "run": 1,
+      "writer": "candidate_encode_once"
+    },
+    {
+      "validation_normalization_ms": 73.3707919716835,
+      "writer_inclusive_ms": 116.86474992893636,
+      "page_order_ms": 0.16437494195997715,
+      "metadata_write_ms": 0.31875004060566425,
+      "group_scan_ms": 0.3047499340027571,
+      "page_list_ms": 0.24800002574920654,
+      "request_to_gallery_ms": 119.97508397325873,
+      "page_write_exclusive_ms": 43.49395795725286,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 476594,
+      "indexed_pages": 1,
+      "pages": 1,
+      "run": 2,
+      "writer": "candidate_encode_once"
+    },
+    {
+      "validation_normalization_ms": 76.4325421769172,
+      "writer_inclusive_ms": 137.4062499962747,
+      "page_order_ms": 0.17004180699586868,
+      "metadata_write_ms": 0.3195831086486578,
+      "group_scan_ms": 0.3060419112443924,
+      "page_list_ms": 0.20950008183717728,
+      "request_to_gallery_ms": 140.53600002080202,
+      "page_write_exclusive_ms": 60.973707819357514,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 476594,
+      "indexed_pages": 1,
+      "pages": 1,
+      "run": 2,
+      "writer": "baseline_double_encode"
+    },
+    {
+      "validation_normalization_ms": 72.45750003494322,
+      "writer_inclusive_ms": 132.7833749819547,
+      "page_order_ms": 0.20204205065965652,
+      "metadata_write_ms": 0.34816679544746876,
+      "group_scan_ms": 0.28583407402038574,
+      "page_list_ms": 0.23433309979736805,
+      "request_to_gallery_ms": 135.96229208633304,
+      "page_write_exclusive_ms": 60.32587494701147,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 476594,
+      "indexed_pages": 1,
+      "pages": 1,
+      "run": 3,
+      "writer": "baseline_double_encode"
+    },
+    {
+      "validation_normalization_ms": 72.94066692702472,
+      "writer_inclusive_ms": 116.98133288882673,
+      "page_order_ms": 0.17416710034012794,
+      "metadata_write_ms": 0.3171670250594616,
+      "group_scan_ms": 0.2960828132927418,
+      "page_list_ms": 0.2344590611755848,
+      "request_to_gallery_ms": 120.36649999208748,
+      "page_write_exclusive_ms": 44.040665961802006,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 476594,
+      "indexed_pages": 1,
+      "pages": 1,
+      "run": 3,
+      "writer": "candidate_encode_once"
+    },
+    {
+      "validation_normalization_ms": 72.13175017386675,
+      "writer_inclusive_ms": 114.46987488307059,
+      "page_order_ms": 0.17133401706814766,
+      "metadata_write_ms": 0.3164589870721102,
+      "group_scan_ms": 0.31987507827579975,
+      "page_list_ms": 0.23450003936886787,
+      "request_to_gallery_ms": 117.64562479220331,
+      "page_write_exclusive_ms": 42.33812470920384,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 476594,
+      "indexed_pages": 1,
+      "pages": 1,
+      "run": 4,
+      "writer": "candidate_encode_once"
+    },
+    {
+      "validation_normalization_ms": 73.18175002001226,
+      "writer_inclusive_ms": 136.53783313930035,
+      "page_order_ms": 0.1631658524274826,
+      "metadata_write_ms": 0.31670788303017616,
+      "group_scan_ms": 0.30287494882941246,
+      "page_list_ms": 0.21070893853902817,
+      "request_to_gallery_ms": 139.60762484930456,
+      "page_write_exclusive_ms": 63.35608311928809,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 476594,
+      "indexed_pages": 1,
+      "pages": 1,
+      "run": 4,
+      "writer": "baseline_double_encode"
+    },
+    {
+      "validation_normalization_ms": 75.65008290112019,
+      "writer_inclusive_ms": 135.01000008545816,
+      "page_order_ms": 0.1877499744296074,
+      "metadata_write_ms": 0.3589589614421129,
+      "group_scan_ms": 0.34487503580749035,
+      "page_list_ms": 0.2518331166356802,
+      "request_to_gallery_ms": 138.1833329796791,
+      "page_write_exclusive_ms": 59.359917184337974,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 476594,
+      "indexed_pages": 1,
+      "pages": 1,
+      "run": 5,
+      "writer": "baseline_double_encode"
+    },
+    {
+      "validation_normalization_ms": 72.10487499833107,
+      "writer_inclusive_ms": 113.92608401365578,
+      "page_order_ms": 0.1663749571889639,
+      "metadata_write_ms": 0.316249905154109,
+      "group_scan_ms": 0.28887507505714893,
+      "page_list_ms": 0.216333894059062,
+      "request_to_gallery_ms": 117.33174999244511,
+      "page_write_exclusive_ms": 41.82120901532471,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 476594,
+      "indexed_pages": 1,
+      "pages": 1,
+      "run": 5,
+      "writer": "candidate_encode_once"
+    },
+    {
+      "validation_normalization_ms": 742.6830441690981,
+      "writer_inclusive_ms": 1337.260541971773,
+      "page_order_ms": 0.7434580475091934,
+      "metadata_write_ms": 2.3611243814229965,
+      "group_scan_ms": 1.4709171373397112,
+      "page_list_ms": 1.6039579641073942,
+      "request_to_gallery_ms": 1347.3345830570906,
+      "page_write_exclusive_ms": 594.5774978026748,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 4605308,
+      "indexed_pages": 10,
+      "pages": 10,
+      "run": 1,
+      "writer": "baseline_double_encode"
+    },
+    {
+      "validation_normalization_ms": 737.2742926236242,
+      "writer_inclusive_ms": 1145.7788329571486,
+      "page_order_ms": 0.7662498392164707,
+      "metadata_write_ms": 2.2130415309220552,
+      "group_scan_ms": 1.821707934141159,
+      "page_list_ms": 1.6823329497128725,
+      "request_to_gallery_ms": 1156.2671249266714,
+      "page_write_exclusive_ms": 408.50454033352435,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 4605308,
+      "indexed_pages": 10,
+      "pages": 10,
+      "run": 1,
+      "writer": "candidate_encode_once"
+    },
+    {
+      "validation_normalization_ms": 726.2288350611925,
+      "writer_inclusive_ms": 1125.868083909154,
+      "page_order_ms": 0.7005420047789812,
+      "metadata_write_ms": 2.2202511318027973,
+      "group_scan_ms": 1.4461670070886612,
+      "page_list_ms": 1.6107091214507818,
+      "request_to_gallery_ms": 1135.5629588942975,
+      "page_write_exclusive_ms": 399.6392488479614,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 4605308,
+      "indexed_pages": 10,
+      "pages": 10,
+      "run": 2,
+      "writer": "candidate_encode_once"
+    },
+    {
+      "validation_normalization_ms": 724.1610020864755,
+      "writer_inclusive_ms": 1288.1960000377148,
+      "page_order_ms": 0.7520830258727074,
+      "metadata_write_ms": 2.242250367999077,
+      "group_scan_ms": 1.4875410124659538,
+      "page_list_ms": 1.5740839298814535,
+      "request_to_gallery_ms": 1297.9280829895288,
+      "page_write_exclusive_ms": 564.0349979512393,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 4605308,
+      "indexed_pages": 10,
+      "pages": 10,
+      "run": 2,
+      "writer": "baseline_double_encode"
+    },
+    {
+      "validation_normalization_ms": 724.4085411075503,
+      "writer_inclusive_ms": 1297.963917022571,
+      "page_order_ms": 0.7571249734610319,
+      "metadata_write_ms": 2.187167527154088,
+      "group_scan_ms": 1.4942497946321964,
+      "page_list_ms": 1.5603341162204742,
+      "request_to_gallery_ms": 1307.8265830408782,
+      "page_write_exclusive_ms": 573.5553759150207,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 4605308,
+      "indexed_pages": 10,
+      "pages": 10,
+      "run": 3,
+      "writer": "baseline_double_encode"
+    },
+    {
+      "validation_normalization_ms": 722.5822084583342,
+      "writer_inclusive_ms": 1122.6326250471175,
+      "page_order_ms": 0.752416905015707,
+      "metadata_write_ms": 2.2707104217261076,
+      "group_scan_ms": 1.5283329412341118,
+      "page_list_ms": 1.626000041142106,
+      "request_to_gallery_ms": 1132.720584049821,
+      "page_write_exclusive_ms": 400.05041658878326,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 4605308,
+      "indexed_pages": 10,
+      "pages": 10,
+      "run": 3,
+      "writer": "candidate_encode_once"
+    },
+    {
+      "validation_normalization_ms": 718.4395820368081,
+      "writer_inclusive_ms": 1114.0138329938054,
+      "page_order_ms": 0.7304579485207796,
+      "metadata_write_ms": 2.5437907315790653,
+      "group_scan_ms": 1.4068749733269215,
+      "page_list_ms": 1.5527911018580198,
+      "request_to_gallery_ms": 1124.081915942952,
+      "page_write_exclusive_ms": 395.5742509569973,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 4605308,
+      "indexed_pages": 10,
+      "pages": 10,
+      "run": 4,
+      "writer": "candidate_encode_once"
+    },
+    {
+      "validation_normalization_ms": 730.1430418156087,
+      "writer_inclusive_ms": 1310.429124860093,
+      "page_order_ms": 0.6974160205572844,
+      "metadata_write_ms": 2.478252863511443,
+      "group_scan_ms": 1.4284169301390648,
+      "page_list_ms": 1.5839580446481705,
+      "request_to_gallery_ms": 1320.3376249875873,
+      "page_write_exclusive_ms": 580.2860830444843,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 4605308,
+      "indexed_pages": 10,
+      "pages": 10,
+      "run": 4,
+      "writer": "baseline_double_encode"
+    },
+    {
+      "validation_normalization_ms": 726.6371645964682,
+      "writer_inclusive_ms": 1296.0222919937223,
+      "page_order_ms": 0.7164590060710907,
+      "metadata_write_ms": 2.2469586692750454,
+      "group_scan_ms": 1.4581249561160803,
+      "page_list_ms": 1.5749579761177301,
+      "request_to_gallery_ms": 1305.8977499604225,
+      "page_write_exclusive_ms": 569.3851273972541,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 4605308,
+      "indexed_pages": 10,
+      "pages": 10,
+      "run": 5,
+      "writer": "baseline_double_encode"
+    },
+    {
+      "validation_normalization_ms": 717.882873956114,
+      "writer_inclusive_ms": 1112.5439158640802,
+      "page_order_ms": 0.728874932974577,
+      "metadata_write_ms": 2.201876137405634,
+      "group_scan_ms": 1.4350409619510174,
+      "page_list_ms": 1.590833067893982,
+      "request_to_gallery_ms": 1122.4258341826499,
+      "page_write_exclusive_ms": 394.66104190796614,
+      "preview_warmup_ms": 0.0,
+      "upload_bytes": 4605308,
+      "indexed_pages": 10,
+      "pages": 10,
+      "run": 5,
+      "writer": "candidate_encode_once"
+    }
+  ],
+  "medians_ms": {
+    "1": {
+      "baseline_double_encode": {
+        "request_to_gallery_ms": 139.608,
+        "validation_normalization_ms": 75.65,
+        "writer_inclusive_ms": 136.538,
+        "page_write_exclusive_ms": 60.974,
+        "page_order_ms": 0.188,
+        "metadata_write_ms": 0.348,
+        "group_scan_ms": 0.306,
+        "page_list_ms": 0.234
+      },
+      "candidate_encode_once": {
+        "request_to_gallery_ms": 119.975,
+        "validation_normalization_ms": 72.941,
+        "writer_inclusive_ms": 116.865,
+        "page_write_exclusive_ms": 42.348,
+        "page_order_ms": 0.171,
+        "metadata_write_ms": 0.317,
+        "group_scan_ms": 0.305,
+        "page_list_ms": 0.235
+      }
+    },
+    "10": {
+      "baseline_double_encode": {
+        "request_to_gallery_ms": 1307.827,
+        "validation_normalization_ms": 726.637,
+        "writer_inclusive_ms": 1297.964,
+        "page_write_exclusive_ms": 573.555,
+        "page_order_ms": 0.743,
+        "metadata_write_ms": 2.247,
+        "group_scan_ms": 1.471,
+        "page_list_ms": 1.575
+      },
+      "candidate_encode_once": {
+        "request_to_gallery_ms": 1132.721,
+        "validation_normalization_ms": 722.582,
+        "writer_inclusive_ms": 1122.633,
+        "page_write_exclusive_ms": 399.639,
+        "page_order_ms": 0.73,
+        "metadata_write_ms": 2.22,
+        "group_scan_ms": 1.446,
+        "page_list_ms": 1.611
+      }
+    }
+  },
+  "verification": {
+    "input_jpeg_matches_final_jpeg": true,
+    "baseline_and_candidate_encoded_outputs_match": true,
+    "request_sample_ranges_do_not_overlap": {
+      "1": true,
+      "10": true
+    }
+  }
+}

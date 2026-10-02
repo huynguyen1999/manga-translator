@@ -9,6 +9,34 @@ Record bugs when they are discovered, not only after they are fixed. Use the sma
 - Fix: Gate worker recovery and processing on a cross-process lease, and log successful-job staging cleanup errors without changing completed state.
 - Prevention: Serialize durable worker ownership across processes, and keep cleanup after a committed state transition outside that transition's failure path.
 
+## 2026-10-02 — Queued manga imports lost the file-backed results scanner
+
+- Symptom: The queued processor factory could not start or finish file-backed imports after dependency wiring was made explicit.
+- Root cause: Replacing tuple slicing with named positional arguments skipped the `scan_results` dependency.
+- Fix: Wire all processor dependencies explicitly and cover file-backed completion plus completed-job detail responses.
+- Prevention: When replacing positional dependency slices, map every argument against the factory signature and run the full route path.
+
+## 2026-10-02 — Ambiguous database acceptance could lose staged upload bytes
+
+- Symptom: A database insert could commit while its acknowledgement failed, leaving a queued job without its staged files.
+- Root cause: Acceptance treated an immediate follow-up read that returned no row as proof the insert could not still commit.
+- Fix: Preserve staged files after ambiguous PostgreSQL create errors; startup reconciliation removes them only after the prior server request has stopped.
+- Prevention: Never delete recovery data based on an immediate read after an uncertain write; reconcile after the writer can no longer commit.
+
+## 2026-10-02 — PostgreSQL manga import completion could fail to serialize page details
+
+- Symptom: Indexing could finish, then the job failed while saving its completed page details because PostgreSQL group pages include a `Path` and other gallery-only data.
+- Root cause: The queue persisted the repository's internal page objects directly as JSON.
+- Fix: Store a small JSON-safe page summary with identifiers, source path, ordering, group, and source type.
+- Prevention: Convert repository objects into the API result shape before persisting queue results.
+
+## 2026-10-02 — Completed manga import details were capped at 500 pages
+
+- Symptom: A queued import into a large existing group could return older gallery pages instead of all pages from that import.
+- Root cause: Completion reused gallery list endpoints capped at 500 records.
+- Fix: Select PostgreSQL pages by the imported folders and filter filesystem results to the imported folders, including imports larger than the gallery page limit.
+- Prevention: When exposing job results, scope page details to the job and avoid bounded group listings.
+
 ## 2026-10-01 — Timing overview showed inverted start/end times and batched GPU stages reported only serialization time
 
 - Symptom: Timing overview in the page detail modal showed an "Ended at" timestamp earlier than "Started at" (e.g., Started at 01:33:09, Ended at 01:33:00) with a positive total duration, and GPU-batched stages in the per-stage breakdown recorded only sequential disk writing time instead of the full batch processing time.

@@ -1,15 +1,22 @@
 from io import BytesIO
 from types import SimpleNamespace
 import asyncio
+import inspect
 import unittest
 import zipfile
 
 from PIL import Image
 
-from server.main import _iter_original_upload_pages
+from server.main import _iter_original_upload_pages, _write_original_import
 
 
 class OriginalImportTests(unittest.TestCase):
+    def test_main_writer_signature_remains_compatible(self):
+        self.assertEqual(
+            tuple(inspect.signature(_write_original_import).parameters),
+            ("title", "pages", "group_id"),
+        )
+
     @staticmethod
     def png_bytes(color):
         image = Image.new("RGBA", (2, 2), color=color)

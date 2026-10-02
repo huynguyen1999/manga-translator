@@ -545,11 +545,11 @@ def _iter_original_upload_pages(
 def _write_original_import(
     title: str,
     pages: Iterable[tuple[str, str, bytes, bytes, str]],
-    group_id: Optional[str] = None, *, import_job_id: str | None = None,
+    group_id: Optional[str] = None,
 ) -> dict:
     return _write_original_import_impl(
         title, pages, group_id, result_root=RESULT_ROOT, logger=logger,
-        save_jpeg=save_jpeg, import_job_id=import_job_id,
+        save_jpeg=save_jpeg,
     )
 
 
