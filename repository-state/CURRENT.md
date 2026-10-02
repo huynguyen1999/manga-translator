@@ -1,6 +1,6 @@
 # Current state
 
-Last reviewed: 2026-10-01
+Last reviewed: 2026-10-02
 
 Manga Image Translator is a Python translation and image-rendering pipeline with a React Router web studio. Detailed feature and extraction notes from the previous snapshot are in [CURRENT_DETAILS.md](CURRENT_DETAILS.md); consult that file only when the relevant subsystem needs them.
 
@@ -11,6 +11,7 @@ Manga Image Translator is a Python translation and image-rendering pipeline with
 - OCR grouping, free-text coalescing, layout ownership, hard placement constraints, and final raster validation are contractual. Update [LAYOUT_AND_TEXT_MERGE_RULES.md](LAYOUT_AND_TEXT_MERGE_RULES.md) and characterization tests together when changing them.
 - Layout performance limits and validated measurements are in [LAYOUT_PERFORMANCE.md](LAYOUT_PERFORMANCE.md). Do not change placement quality rules as part of performance-only work.
 - `server.main` and existing translation/rendering modules retain compatibility surfaces for extracted implementations.
+- Original manga uploads stage files under `BATCH_ROOT/manga-import-jobs` and use a separate durable FIFO queue in PostgreSQL or filesystem mode. One import runs at a time; completion follows gallery indexing. Failed imports keep staged files for retry, while translation and summary schedulers remain independent.
 
 ## Working memory
 
@@ -42,4 +43,3 @@ Native glyph bitmap copying and batched bubble row-slot extraction are implement
 ## Asynchronous Batch Input Prefetching
 
 `prefetch_input_stream` (`manga_translator.pipeline.batch.prefetch`) provides asynchronous CPU decoding and normalization of batch images via `asyncio.to_thread` with a bounded queue (`max_prefetch=2`). In `translate_batch` (`manga_translator.pipeline.batch.workflow`), each image immediately advances to GPU detection and page preparation upon completing the CPU input stage, while subsequent batch images are concurrently read and decoded on CPU in the background.
-

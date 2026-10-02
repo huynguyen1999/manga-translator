@@ -1817,3 +1817,9 @@ Record new features and large changes here. Keep implementation detail in code, 
 
 - Reason: remove Python bitmap indexing and repeated row interval preparation without changing solver decisions. Supported grayscale buffers use an owned native copy; unsupported layouts retain the binding path. Bubble intervals use signed batched transitions with preserved geometry and ordering.
 - Glyph-only and combined candidates each match 36 fresh-process page/diagnostic replays exactly. Lifetime/fallback and row geometry checks pass. Performance validation remains pending; solver semantics, public interfaces, search policy, layout decisions, API/schema and pipeline order are unchanged.
+
+## 2026-10-02 — Queue and recover original manga imports
+
+- Reason: original uploads waited for the full import request, and multiple uploads looked active at once.
+- Added durable staged Manga Import Jobs with one FIFO importer, queued/processing/completed/failed states, retry and dismissal. Studio polls server state and keeps transfer progress separate; translation and summary schedulers remain independent. The legacy synchronous import endpoints remain available.
+- The file-backed profile used repeated 1280px page fixtures on macOS arm64, Python 3.13.15, and Pillow 12.3.0. Encoding `input.jpg` and copying the same bytes to `final.jpg` measured 528.87 ms versus 680.84 ms for ten pages across five runs, with matching output SHA256. HTTP/PostgreSQL end-to-end timings were unavailable; no general upload-speed claim is made.
