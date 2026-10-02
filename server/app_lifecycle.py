@@ -8,7 +8,6 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-
 def create_lifespan(runtime):
     """Create the server lifespan while resolving dependencies from the runtime module."""
 
@@ -110,7 +109,8 @@ def create_lifespan(runtime):
             )
             await runtime.search_service.start()
         try:
-            yield
+            async with runtime.running_manga_import_jobs(runtime):
+                yield
         finally:
             if runtime.search_service is not None:
                 await runtime.search_service.close()

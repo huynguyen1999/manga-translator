@@ -2,10 +2,6 @@
 
 import io
 import json
-import os
-import secrets
-import shutil
-import tempfile
 import zipfile
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
@@ -13,6 +9,7 @@ from typing import Any, BinaryIO
 
 from fastapi import HTTPException, UploadFile
 from PIL import Image, ImageFile, ImageOps
+from server.original_import_writer import write_original_import
 
 
 def validate_original_upload(
@@ -149,66 +146,6 @@ def iter_original_upload_pages(
 
     if page_count == 0:
         raise HTTPException(400, detail="At least one image is required")
-
-
-def write_original_import(
-    title: str,
-    pages: Iterable[tuple[str, str, bytes, bytes, str]],
-    group_id: str | None = None,
-    *,
-    result_root: Path,
-    logger,
-    save_jpeg: Callable[..., Any],
-) -> dict:
-    from datetime import datetime, timezone
-
-    staging = Path(tempfile.mkdtemp(prefix=".original-import-", dir=result_root))
-    moved: list[Path] = []
-    records: list[dict[str, Any]] = []
-    finished_at = datetime.now(timezone.utc).isoformat()
-    try:
-        for original_name, source_path, content, normalized, suffix in pages:
-            folder_name = f"original-{secrets.token_hex(12)}"
-            folder = staging / folder_name
-            folder.mkdir()
-            with Image.open(io.BytesIO(normalized)) as normalized_image:
-                save_jpeg(normalized_image, folder / "input.jpg")
-                save_jpeg(normalized_image, folder / "final.jpg")
-            metadata = {
-                "id": folder_name,
-                "originalName": original_name,
-                "mangaTitle": title,
-                "sourceType": "original",
-                "finishedAt": finished_at,
-                "sourcePath": source_path,
-                "settings": {"translator": "none"},
-            }
-            if group_id:
-                metadata["mangaGroupId"] = group_id
-                metadata["groupId"] = group_id
-            records.append({
-                "folder": folder_name,
-                "metadata": metadata,
-            })
-            (folder / "meta.json").write_text(
-                json.dumps(metadata, ensure_ascii=False), encoding="utf-8"
-            )
-            if len(records) == 1 or len(records) % 25 == 0:
-                logger.info("Original manga import staging: title=%r pages=%d", title, len(records))
-
-        logger.info("Original manga import staged: title=%r pages=%d", title, len(records))
-        for folder in staging.iterdir():
-            destination = result_root / folder.name
-            os.replace(folder, destination)
-            moved.append(destination)
-        staging.rmdir()
-    except Exception:
-        for destination in moved:
-            shutil.rmtree(destination, ignore_errors=True)
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
-
-    return {"records": records}
 
 
 def warm_preview_variants(

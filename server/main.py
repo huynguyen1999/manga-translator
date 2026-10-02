@@ -100,6 +100,7 @@ from server.api.schemas.manga import DeletePagesRequest
 from server.api.schemas.pipeline import PipelineRerunRequest, RerenderRequest
 from server.batch_scheduler import BatchScheduler, stage_resource_limits
 from server.app_lifecycle import create_lifespan
+from server.manga_import_job_lifecycle import running_manga_import_jobs
 from server.summary_scheduler import SummaryScheduler
 from server.summary_jobs import SummaryJobController
 from server.summary_task import run_summary_task as _run_summary_task_impl
@@ -544,10 +545,11 @@ def _iter_original_upload_pages(
 def _write_original_import(
     title: str,
     pages: Iterable[tuple[str, str, bytes, bytes, str]],
-    group_id: Optional[str] = None,
+    group_id: Optional[str] = None, *, import_job_id: str | None = None,
 ) -> dict:
     return _write_original_import_impl(
-        title, pages, group_id, result_root=RESULT_ROOT, logger=logger, save_jpeg=save_jpeg
+        title, pages, group_id, result_root=RESULT_ROOT, logger=logger,
+        save_jpeg=save_jpeg, import_job_id=import_job_id,
     )
 
 

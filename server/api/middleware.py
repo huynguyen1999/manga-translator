@@ -1,18 +1,14 @@
 """HTTP middleware shared by the server API."""
 
-import asyncio
 import secrets
 import time
 
 from fastapi import Request
 
 from server.logger import correlation_id_ctx, get_logger
+from server.original_import_lock import _original_import_lock
 
 logger = get_logger("server")
-
-# ponytail: one process-local gate is enough for the local server; use upload sessions if concurrent imports matter.
-_original_import_lock = asyncio.Lock()
-
 
 async def serialize_original_manga_imports(request: Request, call_next):
     if request.url.path in {"/results/import", "/api/results/import"}:

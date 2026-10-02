@@ -19,7 +19,7 @@ from server.api.routes.pipeline_reruns import create_pipeline_rerun_router
 from server.api.routes.presets import create_preset_router
 from server.api.routes.reading_progress import create_reading_progress_router
 from server.api.routes.result_files import create_result_files_router
-from server.api.routes.result_import import create_result_import_router
+from server.api.manga_import_app import register_manga_import_routes
 from server.api.routes.result_pages import create_result_pages_router
 from server.api.routes.series import create_series_router
 from server.api.routes.summaries import create_summary_control_router, create_summary_read_router
@@ -147,26 +147,7 @@ def create_app(runtime) -> FastAPI:
     _bind(runtime, progress_exports, ("get_reading_progress", "save_reading_progress"))
     app.include_router(runtime._reading_progress_router)
 
-    runtime._result_import_router, import_exports = create_result_import_router(
-        lambda: runtime._postgres(),
-        lambda: runtime.RESULT_ROOT,
-        lambda: runtime.MAX_BATCH_ITEMS,
-        lambda: runtime.MAX_BATCH_ITEM_BYTES,
-        lambda: runtime.MAX_MANGA_TITLE_LENGTH,
-        lambda title: bool(runtime.group_pages(runtime.RESULT_ROOT, title)),
-        lambda title: runtime._manga_id(title),
-        lambda *args, **kwargs: runtime._write_original_import(*args, **kwargs),
-        lambda *args, **kwargs: runtime._iter_original_upload_pages(*args, **kwargs),
-        lambda root, title, imported: runtime._compact_file_backed_group(root, title, imported),
-        lambda root, folder, metadata: runtime._write_file_backed_meta(root / folder, metadata),
-        lambda *args, **kwargs: runtime._scan_manga_groups(*args, **kwargs),
-        lambda *args, **kwargs: runtime._scan_results(*args, **kwargs),
-        lambda: runtime._invalidate_meta_cache(),
-        lambda folders: runtime._warm_preview_variants(folders),
-        runtime.logger,
-    )
-    _bind(runtime, import_exports, ("import_original_manga",))
-    app.include_router(runtime._result_import_router)
+    register_manga_import_routes(app, runtime)
 
     runtime._summary_read_router, summary_read_exports = create_summary_read_router(
         runtime._postgres,
