@@ -10,7 +10,11 @@ import {
   mangaImportJobSection,
   type JobEntry,
 } from "@/components/JobsDrawer";
-import type { MangaImportJob, SummaryJob, TranslationBatch } from "@/types";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { MangaImportJobRow } from "./MangaImportJobRow";
+import type { MangaImportJob } from "@/features/upload/mangaImportJobs";
+import type { SummaryJob, TranslationBatch } from "@/types";
 
 const insideViewer = {} as EventTarget;
 const insideDrawer = {} as EventTarget;
@@ -161,5 +165,22 @@ const completedOrder = sortJobEntries(
   "completed",
 );
 assert.deepEqual(completedOrder.map((e) => e.value.id), ["summary-comp", "batch-comp"]);
+
+const stagedFilesFallback = renderToStaticMarkup(React.createElement(MangaImportJobRow, {
+  job: {
+    id: "import-files",
+    title: "Archive Upload",
+    status: "queued",
+    createdAt: "2026-09-29T10:00:00.000Z",
+    fileCount: 12,
+  },
+  onRetry: () => {},
+  onDismiss: () => {},
+  onOpen: () => {},
+  isActionPending: () => false,
+  runAction: () => {},
+}));
+assert.match(stagedFilesFallback, /12 staged files/);
+assert.doesNotMatch(stagedFilesFallback, /12 pages/);
 
 console.log("JobsDrawer Escape, section grouping, and stable ordering tests passed successfully!");

@@ -2,6 +2,13 @@
 
 Record bugs when they are discovered, not only after they are fixed. Use the smallest useful entry:
 
+## 2026-10-02 — Manga import workers could overlap and cleanup could undo completion
+
+- Symptom: Multiple server processes could claim the same file-backed import, and a staging cleanup error could mark an already indexed import failed.
+- Root cause: Worker ownership and startup recovery were process-local, while staging cleanup shared the import failure handler.
+- Fix: Gate worker recovery and processing on a cross-process lease, and log successful-job staging cleanup errors without changing completed state.
+- Prevention: Serialize durable worker ownership across processes, and keep cleanup after a committed state transition outside that transition's failure path.
+
 ## 2026-10-01 — Timing overview showed inverted start/end times and batched GPU stages reported only serialization time
 
 - Symptom: Timing overview in the page detail modal showed an "Ended at" timestamp earlier than "Started at" (e.g., Started at 01:33:09, Ended at 01:33:00) with a positive total duration, and GPU-batched stages in the per-stage breakdown recorded only sequential disk writing time instead of the full batch processing time.

@@ -48,7 +48,7 @@ export const ItemRow: React.FC<{
   item: QueuedImage;
   now: number;
   batchSettings?: Partial<TranslationSettings>;
-  batchMangaTitle?: string; canMutateItems: boolean;
+  batchMangaTitle?: string; canMutateItems?: boolean;
   onRetryItem: (itemId: string, keepFailedPagesForEditing?: boolean) => void | Promise<void>;
   onRemoveItem: (itemId: string) => void | Promise<void>;
   removeActionKey: string;
@@ -80,7 +80,7 @@ export const ItemRow: React.FC<{
   item,
   now,
   batchSettings,
-  batchMangaTitle, canMutateItems,
+  batchMangaTitle, canMutateItems = true,
   onRetryItem,
   onRemoveItem,
   removeActionKey,

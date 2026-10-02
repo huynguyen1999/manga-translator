@@ -30,7 +30,7 @@ export const MangaImportJobRow: React.FC<{
   const failed = job.status === "failed";
   const statusLabel = finished ? "Completed" : failed ? "Failed" : job.status === "queued" ? "Queued" : "Processing";
   const progress = job.progress ?? (job.totalPages ? Math.round(100 * (job.processedPages || 0) / job.totalPages) : undefined);
-  const pageCount = job.totalPages ?? job.fileCount;
+  const pageCount = job.totalPages;
 
   return (
     <article className="job-card relative overflow-hidden rounded-xl border border-zinc-200 bg-zinc-50/70 dark:border-zinc-700 dark:bg-zinc-800/70">
@@ -78,7 +78,7 @@ export const MangaImportJobRow: React.FC<{
           />
         </div>
         <div className="mt-1 flex items-start justify-between gap-2 text-[11px] tabular-nums text-zinc-600 dark:text-zinc-400">
-          <span>{job.processedPages !== undefined && job.totalPages !== undefined ? `${job.processedPages} of ${job.totalPages} pages` : pageCount !== undefined ? `${pageCount} pages` : "Original manga import"}</span>
+          <span>{job.processedPages !== undefined && pageCount != null ? `${job.processedPages} of ${pageCount} pages` : pageCount != null ? `${pageCount} pages` : job.fileCount !== undefined ? `${job.fileCount} staged files` : "Original manga import"}</span>
           {progress !== undefined && !finished && <span className="shrink-0">{progress}%</span>}
           {job.error && <span className="text-rose-700 dark:text-rose-300" role="status">{job.error}</span>}
         </div>

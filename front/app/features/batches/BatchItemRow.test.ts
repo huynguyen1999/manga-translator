@@ -4,9 +4,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { QueuedImage } from "@/types";
 import { ItemRow } from "./BatchItemRow";
 
-const renderRow = (item: QueuedImage) => renderToStaticMarkup(React.createElement(ItemRow, {
+const renderRow = (item: QueuedImage, canMutateItems?: boolean) => renderToStaticMarkup(React.createElement(ItemRow, {
   item,
   now: 0,
+  canMutateItems,
   onRetryItem: () => {},
   onRemoveItem: () => {},
   removeActionKey: `remove:${item.id}`,
@@ -41,5 +42,13 @@ assert.match(failed, /Provider unavailable/);
 assert.match(failed, />Retry</);
 assert.match(failed, />Pass &amp; edit</);
 assert.match(failed, /aria-label="Remove failed page failed\.png"/);
+
+const uploadFailed = renderRow(makeItem("upload-failed", "error", { error: "Import failed" }), false);
+assert.match(uploadFailed, />Retry</);
+assert.doesNotMatch(uploadFailed, />Pass &amp; edit</);
+assert.doesNotMatch(uploadFailed, /aria-label="Remove failed page upload-failed\.png"/);
+
+const immutableQueued = renderRow(makeItem("upload-queued", "queued"), false);
+assert.doesNotMatch(immutableQueued, /aria-label="Skip upload-queued\.png"/);
 
 console.log("batch item row contracts passed");

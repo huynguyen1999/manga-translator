@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 from io import BytesIO
 import logging
+import inspect
+import multiprocessing
 from pathlib import Path
 import tempfile
 import threading
 import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
@@ -16,7 +19,10 @@ from PIL import Image
 from starlette.testclient import TestClient
 
 from server.api.routes.manga_import_jobs import create_manga_import_job_router
-from server.api.routes.result_import import create_result_import_router
+from server.api.routes.result_import import (
+    create_manga_import_job_processor,
+    create_result_import_router,
+)
 from server.manga_import_jobs import MangaImportJobQueue, MangaImportJobStore
 from server.original_import_lock import _original_import_lock
 from server.original_import import (
@@ -41,6 +47,25 @@ def _job(title: str, name: str = "01.png"):
         "fileCount": 1,
         "totalBytes": 3,
     }
+
+
+def _create_job_with_client_id(root: str, barrier, results, job_id: str) -> None:
+    async def create():
+        store = MangaImportJobStore(root)
+        barrier.wait(timeout=10)
+        try:
+            await store.create({
+                "id": job_id,
+                "title": "Same upload",
+                "status": "queued",
+                "clientUploadId": "shared-client-id",
+            })
+        except Exception as error:
+            results.put(type(error).__name__)
+        else:
+            results.put("created")
+
+    asyncio.run(create())
 
 
 async def _wait_for_status(store: MangaImportJobStore, job_id: str, status: str):
@@ -185,8 +210,114 @@ class MangaImportJobQueueTests(unittest.IsolatedAsyncioTestCase):
         await _wait_for_status(self.store, job["id"], "completed")
         await queue.stop()
 
+    async def test_worker_lease_protects_recovery_and_follower_polls_for_jobs(self):
+        first = await MangaImportJobQueue(
+            self.store, None, logging.getLogger(__name__)
+        ).accept(_job("Recovered first"), [_upload("01.png", b"one")])
+        await self.store.claim_next()
+
+        follower_store = MangaImportJobStore(self.root / "jobs")
+        owner_started = asyncio.Event()
+        release_owner = asyncio.Event()
+        owner_jobs = []
+        follower_jobs = []
+
+        async def owner_processor(job, _staged_dir, _progress):
+            owner_jobs.append(job["id"])
+            if job["id"] == first["id"]:
+                owner_started.set()
+                await release_owner.wait()
+            return {"totalPages": 1, "items": []}
+
+        async def follower_processor(job, _staged_dir, _progress):
+            follower_jobs.append(job["id"])
+            return {"totalPages": 1, "items": []}
+
+        owner = MangaImportJobQueue(self.store, owner_processor, logging.getLogger(__name__))
+        follower = MangaImportJobQueue(
+            follower_store, follower_processor, logging.getLogger(__name__)
+        )
+        await owner.start()
+        await asyncio.wait_for(owner_started.wait(), 2)
+        await follower.start()
+
+        still_processing = await follower_store.get(first["id"])
+        self.assertEqual(still_processing["status"], "processing")
+        self.assertEqual(still_processing["attempt"], 2)
+
+        second = await follower.accept(
+            _job("Accepted by follower"), [_upload("02.png", b"two")]
+        )
+        release_owner.set()
+        await _wait_for_status(self.store, first["id"], "completed")
+        await _wait_for_status(self.store, second["id"], "completed")
+        self.assertEqual(owner_jobs, [first["id"], second["id"]])
+        self.assertEqual(follower_jobs, [])
+
+        await owner.stop()
+        third = await follower.accept(
+            _job("Follower acquired lease"), [_upload("03.png", b"three")]
+        )
+        await _wait_for_status(follower_store, third["id"], "completed")
+        await follower.stop()
+        self.assertEqual(follower_jobs, [third["id"]])
+
+    async def test_completed_job_survives_staging_cleanup_error(self):
+        logger = Mock()
+
+        async def processor(_job, _staged_dir, _progress):
+            return {"totalPages": 1, "items": []}
+
+        queue = MangaImportJobQueue(self.store, processor, logger)
+        job = await queue.accept(_job("Cleanup error"), [_upload("01.png", b"page")])
+        with patch("server.manga_import_jobs.shutil.rmtree", side_effect=OSError("disk busy")):
+            await queue.start()
+            completed = await _wait_for_status(self.store, job["id"], "completed")
+            await queue.stop()
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertTrue(self.store.stage_path(job["id"]).is_dir())
+        logger.exception.assert_called_once()
+
+    async def test_client_upload_id_is_atomic_across_processes(self):
+        context = multiprocessing.get_context("spawn")
+        barrier = context.Barrier(3)
+        results = context.Queue()
+        processes = [
+            context.Process(
+                target=_create_job_with_client_id,
+                args=(str(self.root / "shared-jobs"), barrier, results, job_id),
+            )
+            for job_id in ("a" * 32, "b" * 32)
+        ]
+        for process in processes:
+            process.start()
+        barrier.wait(timeout=10)
+        for process in processes:
+            process.join(timeout=15)
+        self.assertTrue(all(process.exitcode == 0 for process in processes))
+        self.assertCountEqual(
+            [results.get(timeout=2), results.get(timeout=2)],
+            ["created", "MangaImportJobConflict"],
+        )
+        records = await MangaImportJobStore(self.root / "shared-jobs").list()
+        self.assertEqual(len(records), 1)
+
 
 class IdempotentOriginalImportTests(unittest.TestCase):
+    def test_legacy_import_router_factory_contract(self):
+        self.assertEqual(
+            tuple(inspect.signature(create_result_import_router).parameters),
+            (
+                "get_store", "get_result_root", "get_max_batch_items",
+                "get_max_batch_item_bytes", "get_max_title_length",
+                "has_file_backed_group", "manga_id", "write_original_import",
+                "iter_original_upload_pages", "compact_file_backed_group",
+                "write_file_backed_meta", "scan_manga_groups", "scan_results", "invalidate_meta_cache",
+                "warm_preview_variants", "logger",
+            ),
+        )
+
     def test_reprocessing_same_job_reuses_page_folders(self):
         image_bytes = BytesIO()
         Image.new("RGB", (2, 2), color="red").save(image_bytes, format="PNG")
@@ -296,7 +427,7 @@ class IdempotentOriginalImportTests(unittest.TestCase):
                 return {"items": [{"id": page["folder"], "originalName": page["meta"]["originalName"]}
                                    for page in matching]}
 
-            router, exports = create_result_import_router(
+            import_dependencies = (
                 lambda: None,
                 lambda: result_root,
                 lambda: 10,
@@ -307,7 +438,6 @@ class IdempotentOriginalImportTests(unittest.TestCase):
                 writer,
                 upload_pages,
                 lambda _root, title, excluded: [page for page in pages(title) if page["folder"] not in excluded],
-                pages,
                 write_meta,
                 scan_groups,
                 scan_results,
@@ -315,7 +445,14 @@ class IdempotentOriginalImportTests(unittest.TestCase):
                 lambda _folders: None,
                 logger,
             )
-            process = exports[1]
+            router, exports = create_result_import_router(*import_dependencies)
+            self.assertEqual(len(exports), 1)
+            self.assertEqual(exports[0].__name__, "import_original_manga")
+            self.assertIn("/api/results/import", {route.path for route in router.routes})
+            processor_dependencies = (*import_dependencies[:10], pages, *import_dependencies[10:])
+            process = create_manga_import_job_processor(
+                *processor_dependencies[:2], *processor_dependencies[5:]
+            )
 
             async def run():
                 async def no_progress(*_args, **_kwargs):
@@ -352,7 +489,13 @@ class IdempotentOriginalImportTests(unittest.TestCase):
                     await process(other, other_staged, no_progress)
                 self.assertEqual(raised.exception.status_code, 409)
 
-            asyncio.run(run())
+            # This synchronous test opens a new loop after the middleware test bound
+            # the module lock to its isolated loop.
+            with patch(
+                "server.api.routes.original_import_routes._original_import_lock",
+                asyncio.Lock(),
+            ):
+                asyncio.run(run())
 
 
 class MangaImportJobApiTests(unittest.TestCase):

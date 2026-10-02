@@ -20,7 +20,6 @@ def create_result_import_router(
     write_original_import: Callable[..., Any],
     iter_original_upload_pages: Callable[..., Any],
     compact_file_backed_group: Callable[..., Any],
-    file_backed_group_pages: Callable[..., Any],
     write_file_backed_meta: Callable[..., Any],
     scan_manga_groups: Callable[..., Any],
     scan_results: Callable[..., Any],
@@ -172,104 +171,120 @@ def create_result_import_router(
         finally:
             await asyncio.gather(*(upload.close() for upload in files if hasattr(upload, "close")), return_exceptions=True)
 
+    return router, (import_original_manga,)
+
+
+def create_manga_import_job_processor(
+    get_store: Callable[[], Any],
+    get_result_root: Callable[[], Path],
+    has_file_backed_group: Callable[[str], bool],
+    manga_id: Callable[[str], str],
+    write_original_import: Callable[..., Any],
+    iter_original_upload_pages: Callable[..., Any],
+    compact_file_backed_group: Callable[..., Any],
+    file_backed_group_pages: Callable[..., Any],
+    write_file_backed_meta: Callable[..., Any],
+    scan_manga_groups: Callable[..., Any],
+    scan_results: Callable[..., Any],
+    invalidate_meta_cache: Callable[[], None],
+    warm_preview_variants: Callable[[list[str]], Any],
+    logger: Any,
+) -> Callable[..., Any]:
     async def process_manga_import_job(job: dict[str, Any], staged_dir: Path, update_progress):
         async with _original_import_lock:
-            return await _process_manga_import_job(job, staged_dir, update_progress)
-
-    async def _process_manga_import_job(job: dict[str, Any], staged_dir: Path, update_progress):
-        clean_title = job["title"]
-        store = get_store()
-        clean_group_id = job.get("mangaGroupId")
-        is_new_group = job.get("isNewGroup")
-        group_id = None
-        if clean_group_id and store is not None:
-            group_id = await store.resolve_group_id(clean_group_id, create=False)
-            if group_id is None:
+            clean_title = job["title"]
+            store = get_store()
+            clean_group_id = job.get("mangaGroupId")
+            is_new_group = job.get("isNewGroup")
+            group_id = None
+            if clean_group_id and store is not None:
+                group_id = await store.resolve_group_id(clean_group_id, create=False)
+                if group_id is None:
+                    group_id = await store.resolve_group_id(clean_title, create=False)
+            if store is not None and group_id is None:
                 group_id = await store.resolve_group_id(clean_title, create=False)
-        if store is not None and group_id is None:
-            group_id = await store.resolve_group_id(clean_title, create=False)
 
-        existing_pages = await asyncio.to_thread(
-            file_backed_group_pages, get_result_root(), clean_title
-        )
-        if store is not None:
-            existing_pages.extend(await store.group_pages(group_id or clean_title))
-        is_resumption = any(
-            page.get("meta", {}).get("importJobId") == job["id"]
-            for page in existing_pages
-        )
-        if is_new_group is True or (clean_group_id is None and is_new_group is None):
-            duplicate = (
-                (await store.group_exists(clean_title)) or has_file_backed_group(clean_title)
-                if store is not None
-                else has_file_backed_group(clean_title)
+            existing_pages = await asyncio.to_thread(
+                file_backed_group_pages, get_result_root(), clean_title
             )
-            if duplicate and not is_resumption:
-                raise HTTPException(409, detail="A manga with this title already exists")
-
-        if store is not None and group_id is None:
-            group_id = await store.resolve_group_id(clean_group_id or clean_title, create=True)
-        target_group_id = group_id or clean_group_id or manga_id(clean_title)
-
-        uploads = []
-        try:
-            for index, file in enumerate(job["files"]):
-                staged_file = (staged_dir / f"{index:06d}.upload").open("rb")
-                uploads.append(SimpleNamespace(filename=file["filename"], file=staged_file))
-            source_paths = [file.get("sourcePath", "") for file in job["files"]]
-            await update_progress(0, phase="importing")
-            imported = await asyncio.to_thread(
-                write_original_import,
-                clean_title,
-                iter_original_upload_pages(uploads, source_paths),
-                target_group_id,
-                import_job_id=job["id"],
-            )
-            records = imported["records"]
-            await update_progress(0, total=len(records), phase="indexing")
             if store is not None:
-                for index, record in enumerate(records, 1):
-                    await store.save_documents(record["folder"], {"meta.json": record["metadata"]})
-                    await store.sync_result_folder(record["folder"], generate_variants=False)
-                    await update_progress(index, total=len(records), phase="indexing")
-                groups_payload = await store.list_groups(limit=1, manga_id=target_group_id)
-                if not groups_payload["groups"]:
-                    groups_payload = await store.list_groups(limit=1, search=clean_title)
-                pages_payload = await store.list_results(manga=clean_title, limit=500)
-            else:
-                result_root = get_result_root()
-                imported_folders = {record["folder"] for record in records}
-                existing = compact_file_backed_group(result_root, clean_title, imported_folders)
-                for index, record in enumerate(records, len(existing) + 1):
-                    record["metadata"]["pageOrder"] = index
-                    write_file_backed_meta(result_root, record["folder"], record["metadata"])
-                    await update_progress(index - len(existing), total=len(records), phase="indexing")
-                groups_payload = await asyncio.to_thread(
-                    scan_manga_groups, result_root, 1, 0, None, clean_title, "alpha-asc"
+                existing_pages.extend(await store.group_pages(group_id or clean_title))
+            is_resumption = any(
+                page.get("meta", {}).get("importJobId") == job["id"]
+                for page in existing_pages
+            )
+            if is_new_group is True or (clean_group_id is None and is_new_group is None):
+                duplicate = (
+                    (await store.group_exists(clean_title)) or has_file_backed_group(clean_title)
+                    if store is not None
+                    else has_file_backed_group(clean_title)
                 )
-                pages_payload = await asyncio.to_thread(
-                    scan_results, result_root, "alpha", clean_title, None, 500, 0, None
-                )
-                invalidate_meta_cache()
-            if not groups_payload["groups"]:
-                raise RuntimeError("Imported manga group was not found after saving")
+                if duplicate and not is_resumption:
+                    raise HTTPException(409, detail="A manga with this title already exists")
 
-            async def warm_previews():
-                try:
-                    await asyncio.to_thread(
-                        warm_preview_variants, [record["folder"] for record in records]
+            if store is not None and group_id is None:
+                group_id = await store.resolve_group_id(clean_group_id or clean_title, create=True)
+            target_group_id = group_id or clean_group_id or manga_id(clean_title)
+
+            uploads = []
+            try:
+                for index, file in enumerate(job["files"]):
+                    staged_file = (staged_dir / f"{index:06d}.upload").open("rb")
+                    uploads.append(SimpleNamespace(filename=file["filename"], file=staged_file))
+                source_paths = [file.get("sourcePath", "") for file in job["files"]]
+                await update_progress(0, phase="importing")
+                imported = await asyncio.to_thread(
+                    write_original_import,
+                    clean_title,
+                    iter_original_upload_pages(uploads, source_paths),
+                    target_group_id,
+                    import_job_id=job["id"],
+                )
+                records = imported["records"]
+                await update_progress(0, total=len(records), phase="indexing")
+                if store is not None:
+                    for index, record in enumerate(records, 1):
+                        await store.save_documents(record["folder"], {"meta.json": record["metadata"]})
+                        await store.sync_result_folder(record["folder"], generate_variants=False)
+                        await update_progress(index, total=len(records), phase="indexing")
+                    groups_payload = await store.list_groups(limit=1, manga_id=target_group_id)
+                    if not groups_payload["groups"]:
+                        groups_payload = await store.list_groups(limit=1, search=clean_title)
+                    pages_payload = await store.list_results(manga=clean_title, limit=500)
+                else:
+                    result_root = get_result_root()
+                    imported_folders = {record["folder"] for record in records}
+                    existing = compact_file_backed_group(result_root, clean_title, imported_folders)
+                    for index, record in enumerate(records, len(existing) + 1):
+                        record["metadata"]["pageOrder"] = index
+                        write_file_backed_meta(result_root, record["folder"], record["metadata"])
+                        await update_progress(index - len(existing), total=len(records), phase="indexing")
+                    groups_payload = await asyncio.to_thread(
+                        scan_manga_groups, result_root, 1, 0, None, clean_title, "alpha-asc"
                     )
-                except Exception:
-                    logger.exception("Manga import preview warmup failed: id=%s", job["id"])
+                    pages_payload = await asyncio.to_thread(
+                        scan_results, result_root, "alpha", clean_title, None, 500, 0, None
+                    )
+                    invalidate_meta_cache()
+                if not groups_payload["groups"]:
+                    raise RuntimeError("Imported manga group was not found after saving")
 
-            asyncio.create_task(warm_previews())
-            return {
-                "group": groups_payload["groups"][0],
-                "items": pages_payload["items"],
-                "totalImages": groups_payload["totalImages"],
-                "totalPages": len(records),
-            }
-        finally:
-            await asyncio.gather(*(asyncio.to_thread(upload.file.close) for upload in uploads))
+                async def warm_previews():
+                    try:
+                        await asyncio.to_thread(
+                            warm_preview_variants, [record["folder"] for record in records]
+                        )
+                    except Exception:
+                        logger.exception("Manga import preview warmup failed: id=%s", job["id"])
 
-    return router, (import_original_manga, process_manga_import_job)
+                asyncio.create_task(warm_previews())
+                return {
+                    "group": groups_payload["groups"][0],
+                    "items": pages_payload["items"],
+                    "totalImages": groups_payload["totalImages"],
+                    "totalPages": len(records),
+                }
+            finally:
+                await asyncio.gather(*(asyncio.to_thread(upload.file.close) for upload in uploads))
+
+    return process_manga_import_job

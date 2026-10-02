@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import re
@@ -15,11 +16,59 @@ from typing import Any, Callable
 
 from server.postgres_common import _json_dump, _json_load
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+    import msvcrt
+
 _SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
+_WORKER_POLL_SECONDS = 0.25
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _lock_file(path: Path, *, blocking: bool) -> int | None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        if fcntl is not None:
+            flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+            try:
+                fcntl.flock(fd, flags)
+            except BlockingIOError:
+                os.close(fd)
+                return None
+        else:  # pragma: no cover - Windows
+            os.lseek(fd, 0, os.SEEK_SET)
+            while True:
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as error:
+                    if error.errno not in {errno.EACCES, errno.EDEADLK} and getattr(error, "winerror", None) != 33:
+                        raise
+                    if not blocking:
+                        os.close(fd)
+                        return None
+                    time.sleep(0.05)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _unlock_file(fd: int) -> None:
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        else:  # pragma: no cover - Windows
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(fd)
 
 
 class MangaImportJobNotFound(Exception):
@@ -36,6 +85,7 @@ class MangaImportJobStore:
     def __init__(self, root: str | Path, database: Any = None):
         self.root = Path(root).resolve()
         self.staging_root = self.root / "staged"
+        self.incoming_root = self.root / "incoming"
         self.records_root = self.root / "records"
         self.database = database
         self._lock = asyncio.Lock()
@@ -77,20 +127,44 @@ class MangaImportJobStore:
                 raise MangaImportJobConflict(job.get("clientUploadId") or job["id"])
             return
         async with self._lock:
-            path = self._record_path(job["id"])
-            if path.exists():
-                raise MangaImportJobConflict(job["id"])
-            existing = await self.list()
-            if job.get("clientUploadId") and any(
-                item.get("clientUploadId") == job["clientUploadId"] for item in existing
-            ):
-                raise MangaImportJobConflict(job["clientUploadId"])
-            job["acceptedAt"] = max(
-                _now_ms(), max((item.get("acceptedAt", 0) for item in existing), default=0) + 1
+            lock_fd = await asyncio.to_thread(
+                _lock_file, self.root / ".client-upload-id.lock", blocking=True
             )
-            job["createdAt"] = job["acceptedAt"]
-            job["updatedAt"] = job["acceptedAt"]
-            await asyncio.to_thread(self._write_json, path, job)
+            try:
+                path = self._record_path(job["id"])
+                if path.exists():
+                    raise MangaImportJobConflict(job["id"])
+                existing = await self.list()
+                if job.get("clientUploadId") and any(
+                    item.get("clientUploadId") == job["clientUploadId"] for item in existing
+                ):
+                    raise MangaImportJobConflict(job["clientUploadId"])
+                job["acceptedAt"] = max(
+                    _now_ms(), max((item.get("acceptedAt", 0) for item in existing), default=0) + 1
+                )
+                job["createdAt"] = job["acceptedAt"]
+                job["updatedAt"] = job["acceptedAt"]
+                await asyncio.to_thread(self._write_json, path, job)
+            finally:
+                await asyncio.to_thread(_unlock_file, lock_fd)
+
+    async def acquire_worker_lease(self):
+        from server.manga_import_job_lifecycle import acquire_worker_lease
+
+        return await acquire_worker_lease(self)
+
+    async def release_worker_lease(self, lease) -> None:
+        from server.manga_import_job_lifecycle import release_worker_lease
+
+        await release_worker_lease(self, lease)
+
+    async def _acquire_staging_lock(self) -> int:
+        return await asyncio.to_thread(
+            _lock_file, self.root / ".staging.lock", blocking=True
+        )
+
+    async def _release_staging_lock(self, lock_fd: int) -> None:
+        await asyncio.to_thread(_unlock_file, lock_fd)
 
     async def get_by_client_upload_id(self, client_upload_id: str) -> dict[str, Any] | None:
         if self.database is not None:
@@ -242,17 +316,30 @@ class MangaImportJobStore:
             await asyncio.to_thread(self._record_path(job_id).unlink)
 
     async def cleanup_staging(self) -> None:
-        jobs = await self.list()
-        retained = {job["id"] for job in jobs if job.get("status") == "failed"}
-        retained.update(job["id"] for job in jobs if job.get("status") in {"queued", "processing"})
+        lock_fd = await self._acquire_staging_lock()
+        try:
+            jobs = await self.list()
+            retained = {job["id"] for job in jobs if job.get("status") == "failed"}
+            retained.update(job["id"] for job in jobs if job.get("status") in {"queued", "processing"})
 
-        def cleanup() -> None:
-            self.staging_root.mkdir(parents=True, exist_ok=True)
-            for path in self.staging_root.iterdir():
-                if path.name not in retained:
+            def cleanup() -> None:
+                self.staging_root.mkdir(parents=True, exist_ok=True)
+                self.incoming_root.mkdir(parents=True, exist_ok=True)
+                for path in self.staging_root.iterdir():
+                    if path.name not in retained:
+                        shutil.rmtree(path, ignore_errors=True)
+                for path in self.incoming_root.iterdir():
+                    if not path.is_dir():
+                        continue
+                    upload_lock = _lock_file(path / ".upload.lock", blocking=False)
+                    if upload_lock is None:
+                        continue
+                    _unlock_file(upload_lock)
                     shutil.rmtree(path, ignore_errors=True)
 
-        await asyncio.to_thread(cleanup)
+            await asyncio.to_thread(cleanup)
+        finally:
+            await self._release_staging_lock(lock_fd)
 
 
 class MangaImportJobQueue:
@@ -275,8 +362,6 @@ class MangaImportJobQueue:
         if self._task is not None:
             return
         self._stopping = False
-        await self.store.recover_processing()
-        await self.store.cleanup_staging()
         self._task = asyncio.create_task(self._run(), name="manga-import-jobs")
         self._wake.set()
 
@@ -290,10 +375,27 @@ class MangaImportJobQueue:
     def wake(self) -> None:
         self._wake.set()
 
+    async def _wait_for_work_or_lease(self) -> None:
+        if self._stopping:
+            return
+        self._wake.clear()
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout=_WORKER_POLL_SECONDS)
+        except TimeoutError:
+            pass
+
     async def accept(self, job: dict[str, Any], uploads: list[Any]) -> dict[str, Any]:
         job_id = uuid.uuid4().hex
         self.store.stage_path(job_id).parent.mkdir(parents=True, exist_ok=True)
-        temporary = Path(tempfile.mkdtemp(prefix=f".{job_id}-", dir=self.store.staging_root))
+        staging_lock = await self.store._acquire_staging_lock()
+        try:
+            self.store.incoming_root.mkdir(parents=True, exist_ok=True)
+            temporary = Path(
+                tempfile.mkdtemp(prefix=f"{job_id}-", dir=self.store.incoming_root)
+            )
+            upload_lock = _lock_file(temporary / ".upload.lock", blocking=True)
+        finally:
+            await self.store._release_staging_lock(staging_lock)
 
         def copy_uploads() -> list[dict[str, str]]:
             staged = []
@@ -309,9 +411,15 @@ class MangaImportJobQueue:
                 staged.append({"filename": name, "sourcePath": metadata["sourcePath"]})
             return staged
 
+        staging_lock = None
+        created = False
         try:
             staged = await asyncio.to_thread(copy_uploads)
+            staging_lock = await self.store._acquire_staging_lock()
             final_path = self.store.stage_path(job_id)
+            await asyncio.to_thread(_unlock_file, upload_lock)
+            upload_lock = None
+            (temporary / ".upload.lock").unlink()
             await asyncio.to_thread(os.replace, temporary, final_path)
             now = _now_ms()
             accepted = {
@@ -331,11 +439,22 @@ class MangaImportJobQueue:
                 "attempt": 0,
             }
             await self.store.create(accepted)
+            created = True
         except Exception:
-            shutil.rmtree(temporary, ignore_errors=True)
-            if "job_id" in locals():
+            if staging_lock is None:
+                staging_lock = await self.store._acquire_staging_lock()
+            if upload_lock is not None:
+                await asyncio.to_thread(_unlock_file, upload_lock)
+                upload_lock = None
+            if not created:
+                shutil.rmtree(temporary, ignore_errors=True)
                 shutil.rmtree(self.store.stage_path(job_id), ignore_errors=True)
             raise
+        finally:
+            if staging_lock is not None:
+                await self.store._release_staging_lock(staging_lock)
+            if upload_lock is not None:
+                await asyncio.to_thread(_unlock_file, upload_lock)
         self.wake()
         return accepted
 
@@ -358,45 +477,9 @@ class MangaImportJobQueue:
         await asyncio.to_thread(shutil.rmtree, self.store.stage_path(job_id), True)
 
     async def _run(self) -> None:
-        while not self._stopping:
-            self._wake.clear()
-            job = await self.store.claim_next()
-            if job is None:
-                if self._stopping:
-                    return
-                await self._wake.wait()
-                continue
-            try:
-                async def update_progress(processed: int, total: int | None = None, phase: str | None = None):
-                    current = await self.store.get(job["id"])
-                    current["processedPages"] = processed
-                    if total is not None:
-                        current["totalPages"] = total
-                        current["progress"] = round(100 * processed / total) if total else 0
-                    if phase:
-                        current["phase"] = phase
-                    await self.store.update(current)
+        from server.manga_import_job_lifecycle import run_manga_import_queue
 
-                result = await self.processor(
-                    job, self.store.stage_path(job["id"]), update_progress
-                )
-                current = await self.store.get(job["id"])
-                total = int(result.get("totalPages", current.get("totalPages") or 0))
-                current.update(
-                    status="completed", completedAt=_now_ms(), processedPages=total,
-                    totalPages=total, progress=100, error=None,
-                    group=result.get("group"), items=result.get("items", []),
-                    groupId=(result.get("group") or {}).get("id"),
-                    totalImages=result.get("totalImages"),
-                )
-                await self.store.update(current)
-                await asyncio.to_thread(shutil.rmtree, self.store.stage_path(job["id"]), True)
-            except Exception as error:
-                self.logger.exception("Manga import job failed: id=%s", job["id"])
-                current = await self.store.get(job["id"])
-                detail = getattr(error, "detail", None)
-                current.update(status="failed", error=str(detail or error), completedAt=None)
-                await self.store.update(current)
+        await run_manga_import_queue(self)
 
 
 def public_job(job: dict[str, Any]) -> dict[str, Any]:
