@@ -9,6 +9,7 @@ import {
   type SummaryJob,
   type StudioFile,
 } from "@/types";
+import type { MangaImportJob } from "@/features/upload/mangaImportJobs";
 import { JobsDrawer } from "@/components/JobsDrawer";
 import { ResultGallery } from "@/components/ResultGallery";
 import { Header } from "@/components/Header";
@@ -25,12 +26,8 @@ import {
 import { apiUrl } from "@/utils/api";
 import { PipelineRerunDialog } from "@/components/PipelineRerunDialog";
 
-import {
-  subscribeSummaryJobs,
-} from "@/utils/summaryJobs";
-import {
-  type SelectionAnchor,
-} from "@/utils/selectionUtils";
+import { subscribeSummaryJobs } from "@/utils/summaryJobs";
+import type { SelectionAnchor } from "@/utils/selectionUtils";
 import { useBatchActions } from "@/features/batches/useBatchActions";
 import { loadBatchDetails } from "@/features/batches/loadBatchDetails";
 import { useServerBatchEvents } from "@/features/batches/useServerBatchEvents";
@@ -85,7 +82,7 @@ export const App: React.FC = () => {
   const [files, setFiles] = useState<StudioFile[]>([]);
 
   // New state for improved UI features
-  const [translationBatches, setTranslationBatches] = useState<TranslationBatch[]>([]);
+  const [translationBatches, setTranslationBatches] = useState<TranslationBatch[]>([]); const [mangaImportJobs, setMangaImportJobs] = useState<MangaImportJob[]>([]);
   const batchDetailRequestsRef = useRef(new Map<string, Promise<void>>());
   const studioUploadRequestsRef = useRef(new Map<string, Promise<void>>());
   const batchMutationVersionRef = useRef(0);
@@ -390,14 +387,14 @@ export const App: React.FC = () => {
     handleStudioMangaUpload,
     handleStudioMangaUploadConfirm,
     closeStudioMangaUploadModal,
-    resumeStudioMangaUpload,
+    resumeStudioMangaUpload, retryMangaImportJob, dismissMangaImportJob,
   } = useStudioMangaUpload({
     pendingStudioMangaFiles,
     setPendingStudioMangaFiles,
     setStudioMangaUploadError,
     setStudioMangaUploadWarning,
     setIsStudioMangaUploadModalOpen,
-    setTranslationBatches,
+    setTranslationBatches, setMangaImportJobs,
     isConfirmingStudioUploadRef,
     studioUploadRequestsRef,
     getCurrentSettings,
@@ -829,11 +826,11 @@ export const App: React.FC = () => {
         <JobsDrawer
           open={isJobsOpen}
           onClose={handleCloseJobs}
-          batches={translationBatches}
+          batches={translationBatches} mangaImportJobs={mangaImportJobs}
           summaryJobs={summaryJobs}
           onLoadBatchDetails={loadTranslationBatchDetails}
           onPause={pauseTranslation} onResume={resumeTranslation}
-          onDismissBatch={dismissTranslationBatch} onRemoveBatch={removeTranslationBatch}
+          onDismissBatch={dismissTranslationBatch} onRemoveBatch={removeTranslationBatch} onRetryMangaImportJob={retryMangaImportJob} onDismissMangaImportJob={dismissMangaImportJob}
           onRetryItem={retryTranslationItem} onRemoveItem={removeTranslationItem}
           onTranslatorChange={updateTranslationBatchTranslator}
           onManualReviewChange={updateTranslationBatchManualReview}

@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type {
   MangaGroupSelection,
@@ -7,7 +7,15 @@ import type {
   TranslationSettings,
 } from "@/types";
 import { imageMimeTypes } from "@/config";
-import { apiUrl } from "@/utils/api";
+import type { MangaImportJob, MangaImportJobStatus } from "./mangaImportJobs";
+import {
+  dismissMangaImportJobRequest,
+  fetchMangaImportJobs,
+  importOriginalManga,
+  retryMangaImportJobRequest,
+  upsertMangaImportJob,
+  watchMangaImportJobs,
+} from "./mangaImportJobs";
 import {
   loadTranslationBatchFromIDB,
   removeTranslationBatchFromIDB,
@@ -15,19 +23,13 @@ import {
 } from "@/utils/fileStorage";
 import { isArchiveFile } from "@/utils/zipUtils";
 
-type ImportedMangaItem = {
-  id?: string;
-  groupId?: string | null;
-  folder?: string;
-  originalName?: string;
-  pageOrder?: number | null;
-  sourcePath?: string | null;
-};
-
-type ImportedMangaResponse = {
-  group?: unknown;
-  items?: ImportedMangaItem[];
-};
+export {
+  dismissMangaImportJobRequest,
+  fetchMangaImportJobs,
+  importOriginalManga,
+  retryMangaImportJobRequest,
+  watchMangaImportJobs,
+} from "./mangaImportJobs";
 
 type StudioMangaUploadOptions = {
   pendingStudioMangaFiles: StudioFile[];
@@ -36,6 +38,7 @@ type StudioMangaUploadOptions = {
   setStudioMangaUploadWarning: Dispatch<SetStateAction<string | null>>;
   setIsStudioMangaUploadModalOpen: Dispatch<SetStateAction<boolean>>;
   setTranslationBatches: Dispatch<SetStateAction<TranslationBatch[]>>;
+  setMangaImportJobs: Dispatch<SetStateAction<MangaImportJob[]>>;
   isConfirmingStudioUploadRef: { current: boolean };
   studioUploadRequestsRef: { current: Map<string, Promise<void>> };
   getCurrentSettings: () => TranslationSettings;
@@ -43,62 +46,11 @@ type StudioMangaUploadOptions = {
   clearForm: () => void;
 };
 
-export const importOriginalManga = async (
-  files: StudioFile[],
-  mangaTitle: string,
-  onProgress?: (progress: number) => void,
-  groupId?: string | null,
-  isNewGroup?: boolean,
-): Promise<ImportedMangaResponse> => {
-  const cleanTitle = mangaTitle.trim();
-  const form = new FormData();
-  form.append("mangaTitle", cleanTitle);
-  if (groupId) {
-    form.append("groupId", groupId);
-    form.append("mangaGroupId", groupId);
-  }
-  if (isNewGroup !== undefined) {
-    form.append("isNewGroup", isNewGroup ? "true" : "false");
-  }
-  form.append(
-    "pageMetadata",
-    JSON.stringify(files.map((entry) => ({
-      originalName: entry.file.name,
-      sourcePath: entry.sourcePath,
-    }))),
-  );
-  files.forEach((entry) => form.append("files", entry.file, entry.file.name));
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
 
-  const data = await new Promise<ImportedMangaResponse>((resolve, reject) => {
-    const request = new XMLHttpRequest();
-    request.open("POST", apiUrl("/api/results/import"));
-    request.upload.onprogress = (event) => {
-      if (event.lengthComputable && event.total > 0) {
-        onProgress?.(Math.min(100, Math.round((event.loaded / event.total) * 100)));
-      }
-    };
-    request.onerror = () => reject(new Error("Could not reach the import server"));
-    request.onabort = () => reject(new Error("Manga import was cancelled"));
-    request.onload = () => {
-      let payload: ImportedMangaResponse & { detail?: string };
-      try {
-        payload = JSON.parse(request.responseText) as ImportedMangaResponse & { detail?: string };
-      } catch {
-        payload = {} as ImportedMangaResponse;
-      }
-      if (request.status < 200 || request.status >= 300) {
-        const error = new Error(payload.detail || `Import failed (${request.status})`) as Error & { status?: number };
-        error.status = request.status;
-        reject(error);
-        return;
-      }
-      resolve(payload);
-    };
-    request.send(form);
-  });
-  if (!data.group) throw new Error("Import completed without a manga group");
-  return data;
-};
+const errorStatus = (error: unknown): number | undefined =>
+  isRecord(error) && typeof error.status === "number" ? error.status : undefined;
 
 export const useStudioMangaUpload = ({
   pendingStudioMangaFiles,
@@ -107,13 +59,56 @@ export const useStudioMangaUpload = ({
   setStudioMangaUploadWarning,
   setIsStudioMangaUploadModalOpen,
   setTranslationBatches,
+  setMangaImportJobs,
   isConfirmingStudioUploadRef,
   studioUploadRequestsRef,
   getCurrentSettings,
   loadMangaSummaries,
   clearForm,
 }: StudioMangaUploadOptions) => {
-  const importOriginalMangaRequest = useCallback(importOriginalManga, []);
+  const jobsRef = useRef(new Map<string, MangaImportJobStatus>());
+  const refreshRequestRef = useRef<Promise<MangaImportJob[]> | null>(null);
+
+  const refreshMangaImportJobs = useCallback((): Promise<MangaImportJob[]> => {
+    if (refreshRequestRef.current) return refreshRequestRef.current;
+    const request = fetchMangaImportJobs().then((jobs) => {
+      const previous = jobsRef.current;
+      jobsRef.current = new Map(jobs.map((job) => [job.id, job.status]));
+      setMangaImportJobs(jobs);
+      if (jobs.some((job) => job.status === "completed" && previous.get(job.id) !== "completed")) {
+        void loadMangaSummaries().catch((error) =>
+          console.warn("Manga imported, but the gallery could not be refreshed:", error)
+        );
+      }
+      if (jobs.some((job) => job.status === "failed" && /duplicate|already exists/i.test(job.error || ""))) {
+        setStudioMangaUploadWarning(
+          "A manga with this title already exists. The existing manga was kept; no new upload was created.",
+        );
+      }
+      return jobs;
+    }).finally(() => {
+      if (refreshRequestRef.current === request) refreshRequestRef.current = null;
+    });
+    refreshRequestRef.current = request;
+    return request;
+  }, [loadMangaSummaries, setMangaImportJobs, setStudioMangaUploadWarning]);
+
+  useEffect(() => {
+    const refresh = () => {
+      void refreshMangaImportJobs().catch((error) => console.warn("Failed to load manga imports:", error));
+    };
+    return watchMangaImportJobs(refresh, window, document);
+  }, [refreshMangaImportJobs]);
+
+  const retryMangaImportJob = useCallback(async (id: string) => {
+    await retryMangaImportJobRequest(id);
+    await refreshMangaImportJobs();
+  }, [refreshMangaImportJobs]);
+
+  const dismissMangaImportJob = useCallback(async (id: string) => {
+    await dismissMangaImportJobRequest(id);
+    setMangaImportJobs((jobs) => jobs.filter((job) => job.id !== id));
+  }, [setMangaImportJobs]);
 
   const createStudioUploadBatch = (
     filesToUpload: StudioFile[],
@@ -159,18 +154,9 @@ export const useStudioMangaUpload = ({
       ...uploadBatch,
       status: "error" as const,
       error: errorMessage,
-      items: uploadBatch.items.map((item) => ({
-        ...item,
-        status: "error" as const,
-        error: errorMessage,
-      })),
+      items: uploadBatch.items.map((item) => ({ ...item, status: "error" as const, error: errorMessage })),
     };
-    setTranslationBatches((prev) => prev.map((batch) =>
-      batch.id === uploadBatch.id ? failedBatch : batch
-    ));
-    await removeTranslationBatchFromIDB(uploadBatch.id).catch((removeError) =>
-      console.warn(`Failed to remove failed manga upload ${uploadBatch.id}:`, removeError)
-    );
+    setTranslationBatches((prev) => prev.map((batch) => batch.id === uploadBatch.id ? failedBatch : batch));
   };
 
   const resumeStudioMangaUpload = (uploadBatch: TranslationBatch): Promise<void> => {
@@ -179,60 +165,48 @@ export const useStudioMangaUpload = ({
 
     const performUpload = async (batch: TranslationBatch) => {
       try {
-        let data: ImportedMangaResponse;
-        try {
-          data = await importOriginalMangaRequest(
-            batch.items.map((item, index) => ({
-              id: item.id,
-              file: item.file,
-              sourcePath: item.sourcePath || item.file.name,
-              addedAt: item.addedAt.getTime(),
-              dropOrder: index,
-            })),
-            batch.mangaTitle,
-            (uploadProgress) => setTranslationBatches((prev) => prev.map((batchItem) =>
-              batchItem.id === uploadBatch.id ? { ...batchItem, uploadProgress } : batchItem
-            )),
-            batch.mangaGroupId || batch.items[0]?.mangaGroupId || null,
-            batch.isNewGroup,
-          );
-        } catch (error) {
-          if ((error as Error & { status?: number }).status !== 409) throw error;
+        const job = await importOriginalManga(
+          batch.items.map((item, index) => ({
+            id: item.id,
+            file: item.file,
+            sourcePath: item.sourcePath || item.file.name,
+            addedAt: item.addedAt.getTime(),
+            dropOrder: index,
+          })),
+          batch.mangaTitle,
+          (uploadProgress) => setTranslationBatches((prev) => prev.map((candidate) =>
+            candidate.id === uploadBatch.id ? { ...candidate, uploadProgress } : candidate
+          )),
+          batch.mangaGroupId || batch.items[0]?.mangaGroupId || null,
+          batch.isNewGroup,
+          batch.id,
+        );
+        await removeTranslationBatchFromIDB(uploadBatch.id).catch((error) =>
+          console.warn(`Accepted manga upload ${uploadBatch.id}, but could not remove its local draft:`, error)
+        );
+        upsertMangaImportJob(setMangaImportJobs, job);
+        setTranslationBatches((prev) => prev.filter((candidate) => candidate.id !== uploadBatch.id));
+        void refreshMangaImportJobs().catch((error) => console.warn("Failed to refresh manga imports:", error));
+      } catch (error) {
+        if (errorStatus(error) === 409) {
           setStudioMangaUploadWarning(
             "A manga with this title already exists. The existing manga was kept; no new upload was created.",
           );
-          const response = await fetch(
-            apiUrl(`/api/results/list?groupId=${encodeURIComponent(batch.items[0]?.mangaGroupId || batch.mangaTitle)}&limit=500`),
-          );
-          if (!response.ok) throw error;
-          data = (await response.json()) as ImportedMangaResponse;
-          if (!Array.isArray(data.items) || data.items.length === 0) throw error;
+          await removeTranslationBatchFromIDB(uploadBatch.id).catch(() => {});
+          setTranslationBatches((prev) => prev.filter((candidate) => candidate.id !== uploadBatch.id));
+          void loadMangaSummaries().catch((refreshError) => console.warn("Failed to refresh manga gallery:", refreshError));
+          return;
         }
-        if (!data.items?.some((item) => item.folder)) {
-          throw new Error("Import completed without any manga pages");
-        }
-        await removeTranslationBatchFromIDB(uploadBatch.id);
-        setTranslationBatches((prev) => prev.filter((batchItem) => batchItem.id !== uploadBatch.id));
-        void loadMangaSummaries().catch((error) =>
-          console.warn("Manga imported, but the gallery could not be refreshed:", error)
-        );
-      } catch (error) {
         await failStudioMangaUpload(uploadBatch, error);
-        console.warn(`Failed to resume manga upload ${uploadBatch.id}:`, error);
+        console.warn(`Failed to upload manga ${uploadBatch.id}:`, error);
       }
     };
 
     const request = (async () => {
       const runUpload = async () => {
-        const persisted = await loadTranslationBatchFromIDB(uploadBatch.id);
-        if (!persisted) {
-          setTranslationBatches((prev) => prev.filter((batch) => batch.id !== uploadBatch.id));
-          await loadMangaSummaries();
-          return;
-        }
-        await performUpload(persisted);
+        const persisted = await loadTranslationBatchFromIDB(uploadBatch.id).catch(() => null);
+        await performUpload(persisted?.items.some((item) => item.file.size > 0) ? persisted : uploadBatch);
       };
-
       if (typeof navigator !== "undefined" && navigator.locks?.request) {
         await navigator.locks.request(`manga-original-upload:${uploadBatch.id}`, runUpload);
       } else {
@@ -249,9 +223,7 @@ export const useStudioMangaUpload = ({
 
   const handleStudioMangaUpload = (files: StudioFile[]) => {
     const supported = (file: File) =>
-      isArchiveFile(file) ||
-      imageMimeTypes.includes(file.type) ||
-      /\.(png|jpe?g|bmp|webp|tiff?|gif|avif|jfif|tga)$/i.test(file.name);
+      isArchiveFile(file) || imageMimeTypes.includes(file.type) || /\.(png|jpe?g|bmp|webp|tiff?|gif|avif|jfif|tga)$/i.test(file.name);
     if (files.some((entry) => !supported(entry.file))) {
       setStudioMangaUploadError("Use PNG, JPEG, BMP, WEBP, TIFF, GIF, or AVIF images, or CBZ / ZIP archives.");
       return;
@@ -276,28 +248,24 @@ export const useStudioMangaUpload = ({
     if (pendingStudioMangaFiles.length === 0) return;
 
     isConfirmingStudioUploadRef.current = true;
-    const filesToUpload = [...pendingStudioMangaFiles];
+    const uploadBatch = createStudioUploadBatch([...pendingStudioMangaFiles], cleanTitle, groupId, isNewGroup);
     setIsStudioMangaUploadModalOpen(false);
     setPendingStudioMangaFiles([]);
     setStudioMangaUploadError(null);
     clearForm();
-
-    const uploadBatch = createStudioUploadBatch(filesToUpload, cleanTitle, groupId, isNewGroup);
     setTranslationBatches((prev) => [uploadBatch, ...prev]);
     isConfirmingStudioUploadRef.current = false;
-
-    try {
-      await saveTranslationBatchToIDB(uploadBatch);
-      await resumeStudioMangaUpload(uploadBatch);
-    } catch (error) {
-      await failStudioMangaUpload(uploadBatch, error);
-    }
+    await saveTranslationBatchToIDB(uploadBatch).catch((error) =>
+      console.warn(`Could not retain manga upload draft ${uploadBatch.id}:`, error)
+    );
+    await resumeStudioMangaUpload(uploadBatch);
   };
 
   const closeStudioMangaUploadModal = () => {
     setIsStudioMangaUploadModalOpen(false);
     setPendingStudioMangaFiles([]);
     setStudioMangaUploadError(null);
+    setStudioMangaUploadWarning(null);
   };
 
   return {
@@ -305,5 +273,8 @@ export const useStudioMangaUpload = ({
     handleStudioMangaUploadConfirm,
     closeStudioMangaUploadModal,
     resumeStudioMangaUpload,
+    retryMangaImportJob,
+    dismissMangaImportJob,
+    refreshMangaImportJobs,
   };
 };

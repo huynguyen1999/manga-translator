@@ -48,7 +48,7 @@ export const ItemRow: React.FC<{
   item: QueuedImage;
   now: number;
   batchSettings?: Partial<TranslationSettings>;
-  batchMangaTitle?: string;
+  batchMangaTitle?: string; canMutateItems: boolean;
   onRetryItem: (itemId: string, keepFailedPagesForEditing?: boolean) => void | Promise<void>;
   onRemoveItem: (itemId: string) => void | Promise<void>;
   removeActionKey: string;
@@ -80,7 +80,7 @@ export const ItemRow: React.FC<{
   item,
   now,
   batchSettings,
-  batchMangaTitle,
+  batchMangaTitle, canMutateItems,
   onRetryItem,
   onRemoveItem,
   removeActionKey,
@@ -99,7 +99,7 @@ export const ItemRow: React.FC<{
   const isProcessing = item.status === "processing";
   const isError = item.status === "error";
   const isAwaitingTranslation = item.step === "awaiting_translation";
-  const canSkip = item.status === "queued" || (isProcessing && (isAwaitingTranslation || ["initialize", "colorization", "textline_merge", "mask_generation", "layout", "rendering"].includes(item.step || "")));
+  const canSkip = canMutateItems && (item.status === "queued" || (isProcessing && (isAwaitingTranslation || ["initialize", "colorization", "textline_merge", "mask_generation", "layout", "rendering"].includes(item.step || ""))));
   const queuedStatus =
     item.step && !["reserved", "initialize", "starting"].includes(item.step)
       ? `Waiting · Next: ${formatStage(item.step)}`
@@ -261,7 +261,7 @@ export const ItemRow: React.FC<{
               <Icon icon="carbon:renew" className={`h-3.5 w-3.5 ${isActionPending(retryActionKey) ? "animate-spin" : ""}`} />
               {isActionPending(retryActionKey) ? "Retrying…" : "Retry"}
             </button>
-            <button
+            {canMutateItems && <button
               type="button"
               onClick={() => runAction(retryActionKey, "Retrying…", () => onRetryItem(item.id, true))}
               disabled={isActionPending(retryActionKey)}
@@ -271,8 +271,8 @@ export const ItemRow: React.FC<{
             >
               <Icon icon="carbon:edit" className="h-3.5 w-3.5" />
               {isActionPending(retryActionKey) ? "Retrying…" : "Pass & edit"}
-            </button>
-            <button
+            </button>}
+            {canMutateItems && <button
               type="button"
               onClick={() => runAction(removeActionKey, "Removing…", () => onRemoveItem(item.id))}
               disabled={isActionPending(removeActionKey)}
@@ -282,7 +282,7 @@ export const ItemRow: React.FC<{
               aria-label={`Remove failed page ${item.file.name}`}
             >
               <Icon icon={isActionPending(removeActionKey) ? "carbon:renew" : "carbon:trash-can"} className={`h-4 w-4 ${isActionPending(removeActionKey) ? "animate-spin" : ""}`} />
-            </button>
+            </button>}
           </>
         )}
         {isFinished && downloadUrl && (

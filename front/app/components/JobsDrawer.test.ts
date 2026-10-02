@@ -7,9 +7,10 @@ import {
   shouldCloseJobsDrawer,
   sortJobEntries,
   summarySection,
+  mangaImportJobSection,
   type JobEntry,
 } from "@/components/JobsDrawer";
-import type { SummaryJob, TranslationBatch } from "@/types";
+import type { MangaImportJob, SummaryJob, TranslationBatch } from "@/types";
 
 const insideViewer = {} as EventTarget;
 const insideDrawer = {} as EventTarget;
@@ -27,6 +28,10 @@ assert.equal(summarySection({ status: "queued" } as SummaryJob), "queued");
 assert.equal(summarySection({ status: "paused" } as SummaryJob), "queued");
 assert.equal(summarySection({ status: "generating" } as SummaryJob), "active");
 assert.equal(summarySection({ status: "ready" } as SummaryJob), "completed");
+assert.equal(mangaImportJobSection({ status: "failed" } as MangaImportJob), "attention");
+assert.equal(mangaImportJobSection({ status: "queued" } as MangaImportJob), "queued");
+assert.equal(mangaImportJobSection({ status: "processing" } as MangaImportJob), "active");
+assert.equal(mangaImportJobSection({ status: "completed" } as MangaImportJob), "completed");
 
 assert.equal(batchSection({ status: "error", failedCount: 0 } as TranslationBatch), "attention");
 assert.equal(batchSection({ status: "completed", failedCount: 2 } as TranslationBatch), "attention");
@@ -88,11 +93,12 @@ const translationBatch: TranslationBatch = {
 const activeEntries: JobEntry[] = [
   { type: "summary", value: summaryJob },
   { type: "batch", value: translationBatch },
+  { type: "manga-import", value: { id: "import-1", title: "Manga Import", status: "processing", createdAt: "2026-09-29T10:02:00.000Z" } },
 ];
 
 const initialOrder = sortJobEntries(activeEntries, "active");
 // Summary was created at 10:05:00, Batch at 10:00:00 -> Summary first, Batch second
-assert.deepEqual(initialOrder.map((e) => e.value.id), ["summary-1", "batch-1"]);
+assert.deepEqual(initialOrder.map((e) => e.value.id), ["summary-1", "import-1", "batch-1"]);
 
 // Progress tick on translation batch updates its updatedAt to 10:06:00
 const updatedBatch: TranslationBatch = {

@@ -128,8 +128,7 @@ export const BatchCard: React.FC<{
   const needsReview = hasDetails ? batch.items.filter((item) => item.needsReview).length : (batch.needsReviewCount || 0);
   const progress = batch.totalItems ? Math.round((completed / batch.totalItems) * 100) : 100;
   const batchKind = getBatchKind(batch);
-  const canChangeTranslator = batchKind !== "rerender" && batchKind !== "pipeline-rerun" && canChangeBatchTranslator(batch);
-  const canKeepFailedPages = batch.status !== "completed" && !isUploading && batchKind !== "rerender" && batchKind !== "pipeline-rerun";
+  const canChangeTranslator = batchKind !== "manga-upload" && batchKind !== "rerender" && batchKind !== "pipeline-rerun" && canChangeBatchTranslator(batch); const canKeepFailedPages = batch.status !== "completed" && !isUploading && batchKind !== "manga-upload" && batchKind !== "rerender" && batchKind !== "pipeline-rerun";
   const rerunMode = batch.rerunMode;
   const rerunModeLabel = rerunMode === "full" ? "Full" : rerunMode === "translation_typesetting" ? "Retranslation" : rerunMode === "reprocess_text" ? "Reprocess text" : "Typesetting";
   const batchKindLabel = batchKind === "manga-upload" ? "Manga upload" : batchKind === "rerender" ? "Layout rerender" : batchKind === "pipeline-rerun" ? `Pipeline rerun · ${rerunModeLabel}` : "Translation";
@@ -348,7 +347,7 @@ export const BatchCard: React.FC<{
         </div>
       )}
       <div className="flex flex-wrap items-center gap-1 border-t border-zinc-200 px-2 py-1 empty:hidden dark:border-zinc-700">
-        <BatchActions batch={batch} failedItems={failedItems} failed={failed} hasDetails={hasDetails} retryAllActionKey={retryAllActionKey} isActionPending={isActionPending} runAction={runAction} onRetryItem={onRetryItem} onPriorityChange={onPriorityChange} />
+        <BatchActions batch={batch} failedItems={failedItems} failed={batchKind === "manga-upload" ? 0 : failed} hasDetails={hasDetails} retryAllActionKey={retryAllActionKey} isActionPending={isActionPending} runAction={runAction} onRetryItem={onRetryItem} onPriorityChange={onPriorityChange} />
       </div>
 
       {expanded && !hasDetails && (
@@ -384,6 +383,7 @@ export const BatchCard: React.FC<{
               now={item.status === "processing" && item.stepStartedAt ? clock : 0}
               batchSettings={batch.settings}
               batchMangaTitle={batch.mangaTitle}
+              canMutateItems={batchKind !== "manga-upload"}
               onRetryItem={handleRetryItem}
               onRemoveItem={handleRemoveItem}
               retryActionKey={`retry:${batch.id}:${item.id}`}

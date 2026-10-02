@@ -2,134 +2,52 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Icon } from "@iconify/react";
 import { Link } from "react-router";
 import type { FinishedImage, MangaSummary, SummaryJob, TranslationBatch, TranslationSettings, TranslatorKey } from "@/types";
+import type { MangaImportJob } from "@/features/upload/mangaImportJobs";
 import { BatchCard } from "./TranslatingSection";
+import { MangaImportJobRow } from "./MangaImportJobRow";
+import {
+  batchSection,
+  mangaImportJobSection,
+  sectionLabels,
+  shouldCloseJobsDrawer,
+  sortJobEntries,
+  summarySection,
+  type JobEntry,
+  type JobSection,
+} from "./jobDrawerEntries";
 import { apiUrl } from "@/utils/api";
 import { buildMangaDetailIdUrl, mangaIdForTitle } from "@/utils/routeState";
 import { summaryModelOptions } from "@/config";
 import SummaryJobRow from "./SummaryJobRow";
 import { useModalEscape } from "@/utils/useModalEscape";
 
+export {
+  batchSection,
+  getJobCompletionTimestamp,
+  getJobCreationTimestamp,
+  mangaImportJobSection,
+  sectionLabels,
+  shouldCloseJobsDrawer,
+  sortJobEntries,
+  summarySection,
+} from "./jobDrawerEntries";
+export type { JobEntry, JobSection } from "./jobDrawerEntries";
+
 type AsyncAction = () => void | Promise<void>;
-export type JobSection = "active" | "queued" | "attention" | "completed";
-
-export type JobEntry = {
-  type: "batch" | "summary";
-  value: TranslationBatch | SummaryJob;
-};
-
-const jobFirstSeenTimestamps = new Map<string, number>();
-
-export const getJobCreationTimestamp = (entry: JobEntry): number => {
-  if (entry.type === "batch") {
-    const batch = entry.value as TranslationBatch;
-    const added = batch.addedAt instanceof Date
-      ? batch.addedAt.getTime()
-      : typeof batch.addedAt === "number"
-      ? batch.addedAt
-      : typeof batch.addedAt === "string"
-      ? Date.parse(batch.addedAt)
-      : 0;
-    if (!Number.isNaN(added) && added > 0) return added;
-    const updated = batch.updatedAt instanceof Date
-      ? batch.updatedAt.getTime()
-      : typeof batch.updatedAt === "number"
-      ? batch.updatedAt
-      : typeof batch.updatedAt === "string"
-      ? Date.parse(batch.updatedAt)
-      : 0;
-    if (!Number.isNaN(updated) && updated > 0) return updated;
-    return 0;
-  }
-  const job = entry.value as SummaryJob;
-  if (job.createdAt) {
-    const created = Date.parse(job.createdAt);
-    if (!Number.isNaN(created) && created > 0) return created;
-  }
-  const existingFirstSeen = jobFirstSeenTimestamps.get(job.id);
-  if (existingFirstSeen !== undefined) return existingFirstSeen;
-  const initial = job.updatedAt ? Date.parse(job.updatedAt) : Date.now();
-  const timestamp = !Number.isNaN(initial) && initial > 0 ? initial : Date.now();
-  jobFirstSeenTimestamps.set(job.id, timestamp);
-  return timestamp;
-};
-
-export const getJobCompletionTimestamp = (entry: JobEntry): number => {
-  if (entry.type === "batch") {
-    const batch = entry.value as TranslationBatch;
-    const updated = batch.updatedAt instanceof Date
-      ? batch.updatedAt.getTime()
-      : typeof batch.updatedAt === "number"
-      ? batch.updatedAt
-      : typeof batch.updatedAt === "string"
-      ? Date.parse(batch.updatedAt)
-      : 0;
-    if (!Number.isNaN(updated) && updated > 0) return updated;
-    return getJobCreationTimestamp(entry);
-  }
-  const job = entry.value as SummaryJob;
-  if (job.updatedAt) {
-    const updated = Date.parse(job.updatedAt);
-    if (!Number.isNaN(updated) && updated > 0) return updated;
-  }
-  return getJobCreationTimestamp(entry);
-};
-
-export const isJobPriority = (entry: JobEntry): boolean =>
-  entry.type === "batch" && Boolean((entry.value as TranslationBatch).priority);
-
-export const sortJobEntries = (entries: JobEntry[], section: JobSection): JobEntry[] =>
-  entries.slice().sort((a, b) => {
-    const prioDiff = (isJobPriority(b) ? 1 : 0) - (isJobPriority(a) ? 1 : 0);
-    if (prioDiff !== 0) return prioDiff;
-
-    if (section === "completed") {
-      const timeDiff = getJobCompletionTimestamp(b) - getJobCompletionTimestamp(a);
-      if (timeDiff !== 0) return timeDiff;
-      return b.value.id.localeCompare(a.value.id);
-    }
-
-    const timeDiff = getJobCreationTimestamp(b) - getJobCreationTimestamp(a);
-    if (timeDiff !== 0) return timeDiff;
-
-    return b.value.id.localeCompare(a.value.id);
-  });
-
-export const batchSection = (batch: TranslationBatch): JobSection => {
-  if (batch.status === "error" || (batch.status === "completed" && Boolean(batch.failedCount))) return "attention";
-  if (batch.status === "completed") return "completed";
-  if (batch.status === "waiting" || batch.status === "paused") return "queued";
-  return "active";
-};
-
-export const summarySection = (job: SummaryJob): JobSection =>
-  job.status === "error"
-    ? "attention"
-    : job.status === "ready"
-    ? "completed"
-    : job.status === "queued" || job.status === "paused"
-    ? "queued"
-    : "active";
-
-export const sectionLabels: Record<JobSection, string> = {
-  active: "Active",
-  queued: "Queued / Paused",
-  attention: "Needs attention",
-  completed: "Completed",
-};
-
-export const shouldCloseJobsDrawer = (eventTarget: EventTarget | null, drawer: HTMLElement | null): boolean =>
-  Boolean(drawer && eventTarget && drawer.contains(eventTarget as Node));
 
 interface JobsDrawerProps {
   open: boolean;
   onClose: () => void;
   batches: TranslationBatch[];
+  mangaImportJobs: MangaImportJob[];
   summaryJobs: SummaryJob[];
   onLoadBatchDetails: (id: string) => Promise<void>;
   onPause: (id: string) => void | Promise<void>;
   onResume: (id: string) => void | Promise<void>;
   onDismissBatch: (id: string) => void | Promise<unknown>;
   onRemoveBatch: (id: string) => void | Promise<void>;
+  onRetryMangaImportJob: (id: string) => void | Promise<void>;
+  onDismissMangaImportJob: (id: string) => void | Promise<void>;
   onRetryItem: (batchId: string, itemId: string, keepFailedPagesForEditing?: boolean) => void | Promise<void>;
   onRemoveItem: (batchId: string, itemId: string) => void | Promise<void>;
   onTranslatorChange: (batchId: string, translator: TranslatorKey) => void;
@@ -166,12 +84,15 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
   open,
   onClose,
   batches,
+  mangaImportJobs,
   summaryJobs,
   onLoadBatchDetails,
   onPause,
   onResume,
   onDismissBatch,
   onRemoveBatch,
+  onRetryMangaImportJob,
+  onDismissMangaImportJob,
   onRetryItem,
   onRemoveItem,
   onTranslatorChange,
@@ -271,18 +192,21 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
   const groups = useMemo(() => {
     const result: Record<JobSection, JobEntry[]> = { active: [], queued: [], attention: [], completed: [] };
     batches.filter((batch) => !batch.dismissed).forEach((batch) => result[batchSection(batch)].push({ type: "batch", value: batch }));
+    mangaImportJobs.forEach((job) => result[mangaImportJobSection(job)].push({ type: "manga-import", value: job }));
     summaryJobs.forEach((job) => result[summarySection(job)].push({ type: "summary", value: job }));
     for (const section of Object.keys(result) as JobSection[]) {
       result[section] = sortJobEntries(result[section], section);
     }
     return result;
-  }, [batches, summaryJobs]);
+  }, [batches, mangaImportJobs, summaryJobs]);
 
   if (!open) return null;
 
   const completedBatches = batches.filter((batch) => !batch.dismissed && batchSection(batch) === "completed");
   const completedSummaries = summaryJobs.filter((job) => summarySection(job) === "completed");
   const attentionBatches = batches.filter((batch) => !batch.dismissed && batchSection(batch) === "attention");
+  const completedMangaImports = mangaImportJobs.filter((job) => mangaImportJobSection(job) === "completed");
+  const attentionMangaImports = mangaImportJobs.filter((job) => mangaImportJobSection(job) === "attention");
   const attentionSummaries = summaryJobs.filter((job) => summarySection(job) === "attention");
   const queuedBatches = batches.filter((batch) => !batch.dismissed && batchSection(batch) === "queued");
   const queuedSummaries = summaryJobs.filter((job) => summarySection(job) === "queued");
@@ -306,8 +230,8 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
           <details className="group relative shrink-0">
             <summary className="flex size-9 cursor-pointer list-none items-center justify-center rounded-lg text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800 [&::-webkit-details-marker]:hidden" aria-label="More job actions" title="More job actions"><Icon icon="carbon:overflow-menu-horizontal" className="size-4" /></summary>
             <div className="absolute right-0 top-10 z-30 w-48 rounded-xl border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800" onClick={(event) => { if ((event.target as HTMLElement).closest("button")) event.currentTarget.parentElement?.removeAttribute("open"); }}>
-              <button type="button" onClick={() => runAction("clear-completed", "Clearing…", async () => { await Promise.all([...completedBatches.map((batch) => onDismissBatch(batch.id)), ...completedSummaries.map((job) => onDismissSummary(job))]); })} disabled={!completedBatches.length && !completedSummaries.length || isActionPending("clear-completed")} className="w-full rounded-lg px-3 py-2 text-left text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:text-zinc-200 dark:hover:bg-zinc-700">Clear completed</button>
-              <button type="button" onClick={() => runAction("clear-attention", "Clearing…", async () => { await Promise.all([...attentionBatches.map((batch) => onDismissBatch(batch.id)), ...attentionSummaries.map((job) => onDismissSummary(job))]); })} disabled={!attentionBatches.length && !attentionSummaries.length || isActionPending("clear-attention")} className="w-full rounded-lg px-3 py-2 text-left text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:text-zinc-200 dark:hover:bg-zinc-700">Clear needs-attention</button>
+              <button type="button" onClick={() => runAction("clear-completed", "Clearing…", async () => { await Promise.all([...completedBatches.map((batch) => onDismissBatch(batch.id)), ...completedMangaImports.map((job) => onDismissMangaImportJob(job.id)), ...completedSummaries.map((job) => onDismissSummary(job))]); })} disabled={!completedBatches.length && !completedMangaImports.length && !completedSummaries.length || isActionPending("clear-completed")} className="w-full rounded-lg px-3 py-2 text-left text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:text-zinc-200 dark:hover:bg-zinc-700">Clear completed</button>
+              <button type="button" onClick={() => runAction("clear-attention", "Clearing…", async () => { await Promise.all([...attentionBatches.map((batch) => onDismissBatch(batch.id)), ...attentionMangaImports.map((job) => onDismissMangaImportJob(job.id)), ...attentionSummaries.map((job) => onDismissSummary(job))]); })} disabled={!attentionBatches.length && !attentionMangaImports.length && !attentionSummaries.length || isActionPending("clear-attention")} className="w-full rounded-lg px-3 py-2 text-left text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:text-zinc-200 dark:hover:bg-zinc-700">Clear needs-attention</button>
               <button type="button" onClick={() => runAction("remove-queued", "Removing…", async () => { await Promise.all(queuedBatches.map((batch) => onRemoveBatch(batch.id))); await Promise.all(queuedSummaries.map((job) => onDismissSummary(job))); })} disabled={!queuedBatches.length && !queuedSummaries.length || isActionPending("remove-queued")} className="w-full rounded-lg px-3 py-2 text-left text-xs text-rose-600 hover:bg-rose-50 disabled:opacity-40 dark:text-rose-400 dark:hover:bg-rose-950/40">Remove queued</button>
             </div>
           </details>
@@ -349,7 +273,7 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
                     {entries.map((entry) => entry.type === "summary" ? (
                       <SummaryJobRow
                         key={entry.value.id}
-                        job={entry.value as SummaryJob}
+                        job={entry.value}
                         onDismiss={onDismissSummary}
                         onRetry={onRetrySummary}
                         onPause={onPauseSummary}
@@ -359,10 +283,20 @@ export const JobsDrawer: React.FC<JobsDrawerProps> = ({
                         isActionPending={isActionPending}
                         runAction={runAction}
                       />
+                    ) : entry.type === "manga-import" ? (
+                      <MangaImportJobRow
+                        key={entry.value.id}
+                        job={entry.value}
+                        onRetry={onRetryMangaImportJob}
+                        onDismiss={onDismissMangaImportJob}
+                        onOpen={onClose}
+                        isActionPending={isActionPending}
+                        runAction={runAction}
+                      />
                     ) : (
                       <BatchCard
                         key={entry.value.id}
-                        batch={entry.value as TranslationBatch}
+                        batch={entry.value}
                         onLoadDetails={onLoadBatchDetails}
                         onDismiss={onDismissBatch}
                         onRemove={onRemoveBatch}
