@@ -141,7 +141,7 @@ try {
   assert.equal(accepted.status, "queued");
   assert.equal(accepted.createdAt, new Date(1790899200000).toISOString());
   assert.equal(requestMethod, "POST");
-  assert.equal(new URL(requestUrl, "http://studio.test").pathname, "/manga-import-jobs");
+  assert.equal(new URL(requestUrl, "http://studio.test").pathname, "/api/manga-import-jobs");
   assert.deepEqual(progress, [75]);
   assert.ok(capturedForm);
   const form = capturedForm;
@@ -222,11 +222,11 @@ try {
     return response({});
   });
   assert.deepEqual(retryCalls.map(({ url, method }) => ({ pathname: new URL(url, "http://studio.test").pathname, method })), [
-    { pathname: "/manga-import-jobs/failed%2F1/retry", method: "POST" },
-    { pathname: "/manga-import-jobs/failed%2F1", method: "DELETE" },
+    { pathname: "/api/manga-import-jobs/failed%2F1/retry", method: "POST" },
+    { pathname: "/api/manga-import-jobs/failed%2F1", method: "DELETE" },
   ]);
   assert.equal(requestCount, 1, "status hydration and retained-upload retry do not retransmit files");
-  assert.ok(fetchCalls.every(({ url }) => new URL(url, "http://studio.test").pathname === "/manga-import-jobs"));
+  assert.ok(fetchCalls.every(({ url }) => new URL(url, "http://studio.test").pathname === "/api/manga-import-jobs"));
 
   render();
   actions.handleStudioMangaUpload([file("notes.txt", "text/plain")]);
@@ -302,7 +302,7 @@ try {
   assert.equal(state.batches.length, 1, "an unaccepted upload failure retains the local retry draft");
   assert.equal(state.batches[0].status, "error");
   assert.equal(state.batches[0].items[0].file, page.file);
-  assert.equal(new URL(requestUrl, "http://studio.test").pathname, "/manga-import-jobs");
+  assert.equal(new URL(requestUrl, "http://studio.test").pathname, "/api/manga-import-jobs");
   assert.equal(requestCount, 3);
   assert.ok(fetchCalls.every(({ url }) => !/results\/import|\/batches/.test(url)));
   state.batches = [];
